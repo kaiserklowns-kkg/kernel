@@ -1,0 +1,21 @@
+﻿[package]
+name = "oceans-kernel"
+description = "The Oceans kernel"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "oceans-kernel"
+test = false
+bench = false
+
+[dependencies]
+oceans-frame-allocator.workspace = true
+oceans-memory-map.workspace = true
+# Boot protocol bindings; confined to src/boot (ADR-0003).
+limine = "0.5"
+spin = { version = "0.12", default-features = false, features = ["spin_mutex", "once"] }
+# CPU structure definitions and instructions; confined to src/arch (ADR-0004).
+x86_64 = { version = "0.15", default-features = false, features = ["instructions"] }

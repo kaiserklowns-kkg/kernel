@@ -1,0 +1,9 @@
+[package]
+name = "oceans-memory-map"
+description = "Bootloader-independent physical memory map model for the Oceans kernel"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "oceans-xtask"
+description = "Oceans build, image and emulator tooling (`cargo xtask`)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# Deliberately dependency-free: the build tool must work on a fresh checkout.
+[dependencies]
