@@ -35,7 +35,7 @@ the network stack are userspace services by default. A small set of
 boot-critical paths (early console, timer, interrupt controller) stays in the
 kernel. Any further in-kernel driver needs an ADR with measurements.
 
-### Current boot flow (Phase 1)
+### Current boot flow
 
 ```
 UEFI firmware → Limine → kernel_entry (boot/limine.rs)
@@ -43,8 +43,11 @@ UEFI firmware → Limine → kernel_entry (boot/limine.rs)
   → BootInfo              protocol-neutral memory map, direct-map offset, cmdline
   → kernel_main
       → arch::init        GDT + TSS (IST for #DF), IDT (32 exception stubs), PIC masked
-      → memory::discover  validate + summarise the memory map
-      → int3 self-test    exception path round trip
+      → memory::init      memory map → frame allocator → own page tables (W^X, NX, SMEP…)
+      → switch_stack      onto a guarded kernel stack
+  → kernel_main_on_kernel_stack
+      → reclaim bootloader memory
+      → self-tests        only with oceans.test=smoke
       → "OCEANS KERNEL ONLINE"
 ```
 

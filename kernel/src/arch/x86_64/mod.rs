@@ -1,11 +1,18 @@
 //! x86_64 support (Tier 1, ADR-0005).
 
+mod cpu;
 mod gdt;
 mod interrupts;
+mod paging;
 mod pic;
 mod serial;
 
+use core::arch::asm;
+
 use ::x86_64::instructions::{self as insn, port::Port};
+
+pub use cpu::{enable_protections, features as cpu_features};
+pub use paging::AddressSpace;
 
 pub const NAME: &str = "x86_64";
 
@@ -62,4 +69,28 @@ pub fn exit_emulator(code: EmulatorExit) -> ! {
     // configuration and unassigned on supported hardware.
     unsafe { Port::<u32>::new(0xf4).write(code as u32) };
     halt_forever()
+}
+
+/// Moves execution onto the stack whose top is `top` and calls `next`.
+/// The current stack is abandoned and never returned to.
+///
+/// # Safety
+///
+/// `top` must be the 16-byte aligned top of a mapped, writable stack that
+/// nothing else uses.
+pub unsafe fn switch_stack(top: u64, next: extern "C" fn() -> !) -> ! {
+    // SAFETY: the caller guarantees the stack; `call` pushes a return address
+    // onto a 16-byte aligned RSP, which is the SysV entry convention, and
+    // `next` never returns.
+    unsafe {
+        asm!(
+            "mov rsp, {top}",
+            "xor ebp, ebp",
+            "call {next}",
+            "ud2",
+            top = in(reg) top,
+            next = in(reg) next,
+            options(noreturn),
+        )
+    }
 }

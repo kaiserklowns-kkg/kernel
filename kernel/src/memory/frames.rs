@@ -9,7 +9,7 @@ use core::ops::Range;
 use oceans_frame_allocator::{
     AllocError, Frame, FrameAllocator, FrameInfo, FreeError, Layout, place_metadata,
 };
-use oceans_memory_map::PAGE_SIZE;
+use oceans_memory_map::{PAGE_SIZE, RegionKind};
 use spin::{Mutex, Once};
 
 use super::{MIB, phys_to_virt};
@@ -60,8 +60,29 @@ pub fn init(boot: &BootInfo) {
         metadata.start
     );
     FRAMES.call_once(|| Mutex::new(allocator));
+}
 
-    self_test();
+/// Adds every bootloader-reclaimable region to the allocator.
+pub fn reclaim_bootloader_memory(boot: &BootInfo) {
+    let mut reclaimed = 0;
+    for region in boot
+        .memory_regions()
+        .iter()
+        .filter(|r| r.kind() == RegionKind::BootloaderReclaimable)
+    {
+        match with_allocator(|frames| {
+            frames.add_free_range(region.base()..region.end(), &[LOW_MEMORY])
+        }) {
+            Ok(frames) => reclaimed += frames,
+            Err(err) => panic!("reclaiming bootloader memory {:#x}: {err:?}", region.base()),
+        }
+    }
+    let stats = with_allocator(|frames| frames.stats());
+    klog::info!(
+        "reclaimed {} MiB of bootloader memory; {} MiB free",
+        reclaimed * PAGE_SIZE / MIB,
+        stats.free_frames * PAGE_SIZE / MIB
+    );
 }
 
 /// Allocates `2^order` contiguous, naturally aligned frames.
@@ -86,7 +107,7 @@ fn with_allocator<R>(f: impl FnOnce(&mut FrameAllocator<'static>) -> R) -> R {
 
 /// Allocates real frames, writes and reads them through the direct map, and
 /// checks that freeing restores the allocator exactly.
-fn self_test() {
+pub fn self_test() {
     let before = with_allocator(|frames| frames.stats());
 
     let single = allocate_frames(0).expect("self-test: allocate one frame");

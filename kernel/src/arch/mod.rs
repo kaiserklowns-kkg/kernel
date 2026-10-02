@@ -6,6 +6,7 @@ mod x86_64;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::{
-    EmulatorExit, NAME, breakpoint, console_write, disable_interrupts, early_init, exit_emulator,
-    halt_forever, init, without_interrupts,
+    AddressSpace, EmulatorExit, NAME, breakpoint, console_write, cpu_features, disable_interrupts,
+    early_init, enable_protections, exit_emulator, halt_forever, init, switch_stack,
+    without_interrupts,
 };

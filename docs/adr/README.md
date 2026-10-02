@@ -16,5 +16,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0006](0006-security-model.md) | Capability-based security model | Proposed |
 | [0007](0007-ai-permission-mediation.md) | AI agents as unprivileged, mediated principals | Proposed |
 | [0008](0008-physical-frame-allocator.md) | Physical frame allocator: buddy system with per-frame metadata | Accepted |
+| [0009](0009-kernel-address-space.md) | Kernel address space: own page tables, W^X, guarded stacks | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

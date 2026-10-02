@@ -25,21 +25,23 @@ cargo xtask check           # rustfmt, clippy (host + kernel), unit tests
 
 Add `--release` to `build`, `image`, `run` or `smoke` for an optimised kernel.
 
-## Expected output
+## Expected output (normal boot)
 
 ```
 [INFO ] kernel: Oceans 0.1.0 on x86_64
 [INFO ] kernel: command line: ""
-[DEBUG] arch::x86_64::gdt: GDT and TSS loaded
-[DEBUG] arch::x86_64::interrupts: IDT loaded with 32 exception handlers
-[DEBUG] arch::x86_64::pic: legacy PIC remapped to vectors 32..48 and masked
-[DEBUG] memory: 0x0000000000000000..0x000000000009f000      636 KiB usable
-...
-[INFO ] memory: 202 MiB usable (...), ... regions
+[INFO ] memory: 201 MiB usable (51630 pages of 4 KiB), 47 MiB reclaimable, ...
 [INFO ] memory: physical memory direct map at 0xffff800000000000
-[INFO ] arch::x86_64::interrupts: breakpoint at 0x..., resuming
+[INFO ] memory::frames: frame allocator: 200 MiB free in 51278 frames, metadata 768 KiB at 0x1780000
+[INFO ] arch::x86_64::cpu: protections: NX WP PGE
+[INFO ] memory::paging: kernel address space active: root 0x..., direct map 251 MiB using pages up to 2 MiB
+[INFO ] memory::frames: reclaimed 47 MiB of bootloader memory; 248 MiB free
 [INFO ] kernel: OCEANS KERNEL ONLINE
 ```
+
+`cargo xtask smoke` adds `oceans.test=smoke` to the command line: the kernel
+then also runs its self-tests and exits QEMU with the result. Normal boots run
+no tests. Pass `-cpu max` to QEMU to exercise SMEP/SMAP/UMIP and 1 GiB pages.
 
 ## Rules for every change
 

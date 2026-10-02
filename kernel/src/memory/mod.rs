@@ -1,10 +1,9 @@
-//! Physical memory management.
-//!
-//! Phase 1 validates and reports the boot memory map; Phase 2 builds the
-//! physical frame allocator on it (ADR-0008). Paging and the kernel heap
-//! follow (docs/kernel/memory.md).
+//! Memory management: boot memory map, physical frames (ADR-0008) and the
+//! kernel address space (ADR-0009). See docs/kernel/memory.md.
 
-mod frames;
+pub mod frames;
+pub mod layout;
+pub mod paging;
 
 use oceans_memory_map::{PAGE_SIZE, summarize};
 use spin::Once;
@@ -17,9 +16,25 @@ const MIB: u64 = 1024 * 1024;
 /// Virtual offset at which the bootloader maps all physical memory.
 static DIRECT_MAP_OFFSET: Once<u64> = Once::new();
 
+/// Discovers memory, starts the frame allocator and switches to the
+/// kernel's own page tables.
 pub fn init(boot: &BootInfo) {
     discover(boot);
     frames::init(boot);
+    paging::init(boot);
+}
+
+/// Hands bootloader-reclaimable memory to the frame allocator. Call only once
+/// nothing uses bootloader memory any more: the kernel runs on its own stack
+/// and page tables, and boot information has been copied.
+pub fn reclaim_bootloader_memory(boot: &BootInfo) {
+    frames::reclaim_bootloader_memory(boot);
+}
+
+/// Memory self-tests, for smoke-test boots.
+pub fn self_test() {
+    frames::self_test();
+    paging::self_test();
 }
 
 /// Virtual address of physical address `phys` in the direct map.

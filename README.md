@@ -16,7 +16,7 @@ controlled set of modern hardware instead of maximum compatibility.
 |---|---|---|
 | 0 — Architecture | ADRs, system architecture, repo layout | **In progress** — see [docs/adr](docs/adr) |
 | 1 — Boot | Boot in QEMU, `OCEANS KERNEL ONLINE` | **Done** — `cargo xtask smoke` passes |
-| 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **In progress** — frame allocator done (ADR-0008) |
+| 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **In progress** — frame allocator (ADR-0008), kernel address space (ADR-0009) |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 

@@ -114,11 +114,25 @@ pub enum FreeError {
     NotAllocated(Frame),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddError {
+    /// Part of the range lies outside the [`Layout`] span.
+    OutsideLayout { start: u64, end: u64 },
+    /// Part of the range is already managed by the allocator.
+    AlreadyManaged(Frame),
+}
+
+/// Region kinds whose frames the allocator may manage, now or once released.
+const fn is_allocatable(kind: RegionKind) -> bool {
+    matches!(kind, RegionKind::Usable | RegionKind::BootloaderReclaimable)
+}
+
 /// Which physical frames the metadata array describes.
 ///
-/// It spans from the lowest to the highest usable page. The base is rounded
-/// down to a `MAX_ORDER` block boundary so that buddy arithmetic on indices
-/// matches physical alignment.
+/// It spans from the lowest to the highest page that is usable or will become
+/// usable once bootloader memory is released. The base is rounded down to a
+/// `MAX_ORDER` block boundary so that buddy arithmetic on indices matches
+/// physical alignment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     base_frame: u64,
@@ -128,7 +142,7 @@ pub struct Layout {
 impl Layout {
     pub fn for_regions(regions: &[Region]) -> Result<Self, InitError> {
         let mut span: Option<(u64, u64)> = None;
-        for region in regions.iter().filter(|r| r.kind() == RegionKind::Usable) {
+        for region in regions.iter().filter(|r| is_allocatable(r.kind())) {
             if let Some((start, pages)) = region.whole_pages() {
                 let (lo, hi) = (start / PAGE_SIZE, start / PAGE_SIZE + pages);
                 span = Some(match span {
@@ -266,11 +280,58 @@ impl<'m> FrameAllocator<'m> {
             let start = piece.start.max(span.start);
             let end = piece.end.min(span.end);
             if start < end {
-                allocator
-                    .add_free_range(allocator.index_of_addr(start), allocator.index_of_addr(end));
+                allocator.add_frames(allocator.index_of_addr(start), allocator.index_of_addr(end));
             }
         });
         Ok(allocator)
+    }
+
+    /// Hands the page-aligned parts of `range` not overlapping `exclusions`
+    /// to the allocator, e.g. bootloader memory once boot data is no longer
+    /// needed. Returns the number of frames added.
+    ///
+    /// The whole call fails without changes if any frame is outside the
+    /// layout or already managed, so memory can never be added twice.
+    pub fn add_free_range(
+        &mut self,
+        range: Range<u64>,
+        exclusions: &[Range<u64>],
+    ) -> Result<u64, AddError> {
+        let span = self.layout.span();
+        let mut error = None;
+        subtract(range.clone(), exclusions, &mut |piece| {
+            if error.is_some() {
+                return;
+            }
+            if piece.start < span.start || piece.end > span.end {
+                error = Some(AddError::OutsideLayout {
+                    start: piece.start,
+                    end: piece.end,
+                });
+                return;
+            }
+            let (start, end) = (
+                self.index_of_addr(piece.start),
+                self.index_of_addr(piece.end),
+            );
+            if let Some(managed) =
+                (start..end).find(|&i| self.frames[i].state != State::Unavailable)
+            {
+                error = Some(AddError::AlreadyManaged(self.frame_at(managed)));
+            }
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+
+        let before = self.stats.managed_frames;
+        subtract(range, exclusions, &mut |piece| {
+            self.add_frames(
+                self.index_of_addr(piece.start),
+                self.index_of_addr(piece.end),
+            );
+        });
+        Ok(self.stats.managed_frames - before)
     }
 
     pub const fn stats(&self) -> Stats {
@@ -336,7 +397,7 @@ impl<'m> FrameAllocator<'m> {
     }
 
     /// Adds frames `[start, end)` (indices) as free, in maximal aligned blocks.
-    fn add_free_range(&mut self, mut start: usize, end: usize) {
+    fn add_frames(&mut self, mut start: usize, end: usize) {
         while start < end {
             let order = (0..=MAX_ORDER)
                 .rev()
@@ -634,6 +695,71 @@ mod tests {
             expected_frames,
             "every frame exactly once"
         );
+    }
+
+    #[test]
+    fn bootloader_memory_is_released_later_exactly_once() {
+        let reclaimable = Region::new(6 * MIB, 2 * MIB, RegionKind::BootloaderReclaimable).unwrap();
+        let regions = [
+            usable(4 * MIB, 2 * MIB),
+            reclaimable,
+            usable(8 * MIB, 4 * MIB),
+        ];
+        let mut h = Harness::new(&regions);
+        assert_eq!(
+            h.layout.span(),
+            4 * MIB..12 * MIB,
+            "layout covers reclaimable memory"
+        );
+        let mut a = h.allocator(&regions, &[]);
+        assert_eq!(
+            a.stats().managed_frames,
+            1536,
+            "reclaimable memory not yet managed"
+        );
+        assert_eq!(
+            a.free_blocks(MAX_ORDER),
+            1,
+            "8..12 MiB; 4..6 MiB has no buddy yet"
+        );
+
+        let low = 6 * MIB..6 * MIB + 0x1000;
+        assert_eq!(
+            a.add_free_range(6 * MIB..8 * MIB, core::slice::from_ref(&low)),
+            Ok(511)
+        );
+        assert_eq!(a.add_free_range(low.clone(), &[]), Ok(1));
+        assert_eq!(
+            a.stats(),
+            Stats {
+                managed_frames: 2048,
+                free_frames: 2048
+            }
+        );
+        assert_eq!(
+            a.free_blocks(MAX_ORDER),
+            2,
+            "released memory coalesced with its buddy"
+        );
+
+        let twice = Frame::from_addr(6 * MIB).unwrap();
+        assert_eq!(
+            a.add_free_range(6 * MIB..8 * MIB, &[]),
+            Err(AddError::AlreadyManaged(twice))
+        );
+        assert_eq!(
+            a.add_free_range(12 * MIB..13 * MIB, &[]),
+            Err(AddError::OutsideLayout {
+                start: 12 * MIB,
+                end: 13 * MIB
+            })
+        );
+        // A failing call changes nothing, even if part of the range was valid.
+        assert_eq!(
+            a.add_free_range(4 * MIB..12 * MIB, &[]),
+            Err(AddError::AlreadyManaged(Frame::from_addr(4 * MIB).unwrap()))
+        );
+        assert_eq!(a.stats().managed_frames, 2048);
     }
 
     #[test]
