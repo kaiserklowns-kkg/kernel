@@ -1,9 +1,9 @@
 ﻿[workspace]
 resolver = "3"
-members = ["kernel", "libs/capability", "libs/frame-allocator", "libs/heap", "libs/memory-map", "tools/xtask"]
+members = ["kernel", "libs/capability", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/scheduler", "tools/xtask"]
 # The kernel only builds for bare-metal targets; host-side `cargo test`
 # and `cargo build` cover the portable crates and tooling.
-default-members = ["libs/capability", "libs/frame-allocator", "libs/heap", "libs/memory-map", "tools/xtask"]
+default-members = ["libs/capability", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/scheduler", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ oceans-capability = { path = "libs/capability" }
 oceans-frame-allocator = { path = "libs/frame-allocator" }
 oceans-heap = { path = "libs/heap" }
 oceans-memory-map = { path = "libs/memory-map" }
+oceans-scheduler = { path = "libs/scheduler" }
 
 [profile.release]
 debug = 1

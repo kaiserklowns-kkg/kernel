@@ -22,6 +22,8 @@ mod klog;
 mod memory;
 mod object;
 mod panic;
+mod sched;
+mod time;
 
 use boot::BootInfo;
 
@@ -49,17 +51,22 @@ fn kernel_main(boot: &'static BootInfo) -> ! {
 
     let stack = memory::paging::allocate_kernel_stack()
         .unwrap_or_else(|err| panic!("cannot allocate the boot kernel stack: {err:?}"));
+    let top = stack.top();
+    // The stack becomes the boot thread's once the scheduler starts.
+    sched::set_boot_stack(stack);
     // SAFETY: the stack was just mapped read-write in the active address
     // space and is used by nothing else. Nothing on the current stack is
     // needed afterwards: everything continues from kernel-owned statics.
-    unsafe { arch::switch_stack(stack.top(), kernel_main_on_kernel_stack) }
+    unsafe { arch::switch_stack(top, kernel_main_on_kernel_stack) }
 }
 
 /// Second boot stage, on a kernel-owned stack. Bootloader memory (including
 /// the stack and page tables it gave us) is no longer used and is reclaimed.
+/// Then the scheduler starts and this code continues as the boot thread.
 extern "C" fn kernel_main_on_kernel_stack() -> ! {
     let boot = boot::info();
     memory::reclaim_bootloader_memory(boot);
+    sched::init();
 
     let smoke_test = boot.cmdline_has(SMOKE_TEST_FLAG);
     if smoke_test {
@@ -71,7 +78,8 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     if smoke_test {
         arch::exit_emulator(arch::EmulatorExit::Success);
     }
-    arch::halt_forever()
+    // Boot work is done; the idle thread takes over until there is more.
+    sched::exit()
 }
 
 /// Boot self-tests, run only with `oceans.test=smoke` (CI). Any failure panics.
@@ -80,5 +88,6 @@ fn self_test() {
     arch::breakpoint();
     memory::self_test();
     object::self_test();
+    sched::self_test();
     klog::info!("self-tests passed");
 }

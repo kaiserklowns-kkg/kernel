@@ -16,6 +16,7 @@ oceans-capability.workspace = true
 oceans-frame-allocator.workspace = true
 oceans-heap.workspace = true
 oceans-memory-map.workspace = true
+oceans-scheduler.workspace = true
 # Boot protocol bindings; confined to src/boot (ADR-0003).
 limine = "0.5"
 spin = { version = "0.12", default-features = false, features = ["spin_mutex", "once"] }

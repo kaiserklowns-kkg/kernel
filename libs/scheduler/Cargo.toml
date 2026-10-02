@@ -1,0 +1,9 @@
+[package]
+name = "oceans-scheduler"
+description = "Scheduling policy for the Oceans kernel: run queue, sleep queue, time slices (ADR-0012)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

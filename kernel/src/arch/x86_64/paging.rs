@@ -86,6 +86,34 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Removes the 4 KiB mapping at `virt` and flushes it from this CPU's
+    /// TLB. Returns the physical address it mapped. Page tables emptied by
+    /// this are kept (they are reused by later mappings).
+    ///
+    /// Only valid for the active address space or the shared kernel half;
+    /// other CPUs need a shootdown once SMP exists.
+    pub fn unmap(&mut self, virt: u64) -> Result<u64, MapError> {
+        let mut table = self.root;
+        for level in (1..=3).rev() {
+            let entry = read(table, index(virt, level));
+            if entry & PRESENT == 0 {
+                return Err(MapError::NotMapped(virt));
+            }
+            if entry & HUGE != 0 {
+                return Err(MapError::HugePageConflict(virt));
+            }
+            table = entry & ADDRESS_MASK;
+        }
+        let slot = index(virt, 0);
+        let entry = read(table, slot);
+        if entry & PRESENT == 0 {
+            return Err(MapError::NotMapped(virt));
+        }
+        write(table, slot, 0);
+        ::x86_64::instructions::tlb::flush(::x86_64::VirtAddr::new(virt));
+        Ok(entry & ADDRESS_MASK)
+    }
+
     /// Allocates the next-level table for the top-level slot covering `virt`
     /// if it does not exist yet.
     pub fn prepare_top_level(&mut self, virt: u64) -> Result<(), MapError> {

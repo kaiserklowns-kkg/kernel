@@ -82,6 +82,8 @@ pub enum MapError {
     HugePageConflict(u64),
     /// No frame for a page table.
     OutOfMemory,
+    /// Nothing is mapped at this address.
+    NotMapped(u64),
 }
 
 /// Size of the kernel stack each thread gets.
@@ -138,43 +140,117 @@ pub fn init(boot: &BootInfo) {
 }
 
 /// A kernel stack mapped in the stack region, with an unmapped guard page
-/// below it so an overflow faults instead of corrupting memory.
+/// below it so an overflow faults instead of corrupting memory. Dropping it
+/// unmaps the stack and returns its frames, so it must not be the stack the
+/// CPU is running on.
 pub struct KernelStack {
-    top: u64,
+    slot: u64,
 }
 
 impl KernelStack {
+    const fn bottom(slot: u64) -> u64 {
+        KERNEL_STACKS.start + (slot + 1) * STACK_SLOT_SIZE - KERNEL_STACK_SIZE
+    }
+
     /// Initial stack pointer (16-byte aligned).
     pub const fn top(&self) -> u64 {
-        self.top
+        Self::bottom(self.slot) + KERNEL_STACK_SIZE
     }
 }
 
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        unmap_stack_pages(Self::bottom(self.slot), KERNEL_STACK_SIZE);
+        arch::without_interrupts(|| FREE_STACK_SLOTS.lock().push(self.slot));
+    }
+}
+
+/// Slots of freed stacks, reused before new ones are taken.
+static FREE_STACK_SLOTS: Mutex<alloc::vec::Vec<u64>> = Mutex::new(alloc::vec::Vec::new());
+
 /// Allocates and maps a new kernel stack.
 pub fn allocate_kernel_stack() -> Result<KernelStack, MapError> {
-    let slot = NEXT_STACK_SLOT.fetch_add(1, Ordering::Relaxed);
-    let slot_base = KERNEL_STACKS.start + slot * STACK_SLOT_SIZE;
-    if slot_base + STACK_SLOT_SIZE > KERNEL_STACKS.end {
-        return Err(MapError::OutOfMemory);
-    }
-    // Stack occupies the top of the slot; the page below it stays unmapped.
-    let bottom = slot_base + STACK_SLOT_SIZE - KERNEL_STACK_SIZE;
+    let reused = arch::without_interrupts(|| FREE_STACK_SLOTS.lock().pop());
+    let slot = match reused {
+        Some(slot) => slot,
+        None => {
+            let slot = NEXT_STACK_SLOT.fetch_add(1, Ordering::Relaxed);
+            if KERNEL_STACKS.start + (slot + 1) * STACK_SLOT_SIZE > KERNEL_STACKS.end {
+                return Err(MapError::OutOfMemory);
+            }
+            slot
+        }
+    };
+    let bottom = KernelStack::bottom(slot);
 
-    with_kernel_space(|space| {
+    let mut mapped = 0;
+    let result = with_kernel_space(|space| {
         for page in (bottom..bottom + KERNEL_STACK_SIZE).step_by(PAGE_SIZE as usize) {
             let frame = super::frames::allocate_frames(0).map_err(|_| MapError::OutOfMemory)?;
-            space.map(
+            if let Err(err) = space.map(
                 page,
                 frame.addr(),
                 PageSize::Size4KiB,
                 MapFlags::KERNEL_DATA,
-            )?;
+            ) {
+                let _ = super::frames::free_frames(frame);
+                return Err(err);
+            }
+            mapped += PAGE_SIZE;
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => Ok(KernelStack { slot }),
+        Err(err) => {
+            // Undo the partial stack so neither frames nor the slot leak.
+            unmap_stack_pages(bottom, mapped);
+            arch::without_interrupts(|| FREE_STACK_SLOTS.lock().push(slot));
+            Err(err)
+        }
+    }
+}
+
+fn unmap_stack_pages(bottom: u64, len: u64) {
+    with_kernel_space(|space| {
+        for page in (bottom..bottom + len).step_by(PAGE_SIZE as usize) {
+            let phys = space
+                .unmap(page)
+                .unwrap_or_else(|err| panic!("kernel stack page {page:#x}: {err:?}"));
+            let frame = oceans_frame_allocator::Frame::from_addr(phys).expect("page-aligned");
+            if let Err(err) = super::frames::free_frames(frame) {
+                panic!("kernel stack frame {phys:#x} rejected on free: {err:?}");
+            }
+        }
+    });
+}
+
+/// Next free address in the MMIO region. MMIO mappings are permanent.
+static NEXT_MMIO: AtomicU64 = AtomicU64::new(layout::MMIO.start);
+
+/// Maps device registers at physical `phys..phys + size` uncached,
+/// read-write, never executable. Returns the virtual address of `phys`.
+pub fn map_mmio(phys: u64, size: u64) -> Result<*mut u8, MapError> {
+    let start = phys - phys % PAGE_SIZE;
+    let end = (phys + size).next_multiple_of(PAGE_SIZE);
+    let virt = NEXT_MMIO.fetch_add(end - start, Ordering::Relaxed);
+    if virt + (end - start) > layout::MMIO.end {
+        return Err(MapError::OutOfMemory);
+    }
+    let flags = MapFlags {
+        writable: true,
+        executable: false,
+        user: false,
+        global: true,
+        cache: Cache::Uncached,
+    };
+    with_kernel_space(|space| {
+        for offset in (0..end - start).step_by(PAGE_SIZE as usize) {
+            space.map(virt + offset, start + offset, PageSize::Size4KiB, flags)?;
         }
         Ok(())
     })?;
-    Ok(KernelStack {
-        top: bottom + KERNEL_STACK_SIZE,
-    })
+    Ok((virt + (phys - start)) as *mut u8)
 }
 
 /// Physical address and flags `virt` maps to in the kernel address space.

@@ -1,4 +1,4 @@
-//! CPU exception handling.
+//! CPU exceptions and device interrupts.
 //!
 //! Every exception vector has a small assembly stub that normalises the stack
 //! (pushing a dummy error code where the CPU does not), then jumps to a common
@@ -21,6 +21,17 @@ const EXCEPTION_COUNT: usize = 32;
 const VECTOR_BREAKPOINT: u64 = 3;
 const VECTOR_DOUBLE_FAULT: usize = 8;
 const VECTOR_PAGE_FAULT: u64 = 14;
+/// Local APIC timer (above the remapped, masked legacy PIC range 32–47).
+pub const VECTOR_TIMER: u8 = 48;
+/// Local APIC spurious interrupt; must not be acknowledged.
+pub const VECTOR_SPURIOUS: u8 = 255;
+
+/// Called on every timer interrupt, after EOI, with interrupts disabled.
+static TIMER_HANDLER: Once<fn()> = Once::new();
+
+pub fn set_timer_handler(handler: fn()) {
+    TIMER_HANDLER.call_once(|| handler);
+}
 
 /// Register state at the time of the exception, in stack order.
 #[repr(C)]
@@ -85,9 +96,37 @@ exception_stubs! {
     27 "push 0", 28 "push 0", 29 "", 30 "", 31 "push 0",
 }
 
+// Device interrupt stubs, same frame layout as exceptions.
+global_asm!(
+    ".pushsection .text.oceans_exceptions, \"ax\", @progbits",
+    "oceans_irq_stub_timer:",
+    "push 0",
+    "push 48",
+    "jmp {common}",
+    "oceans_irq_stub_spurious:",
+    "push 0",
+    "push 255",
+    "jmp {common}",
+    ".popsection",
+    ".pushsection .rodata.oceans_exceptions, \"a\", @progbits",
+    ".balign 8",
+    ".global oceans_irq_stubs",
+    ".hidden oceans_irq_stubs",
+    "oceans_irq_stubs:",
+    ".quad oceans_irq_stub_timer",
+    ".quad oceans_irq_stub_spurious",
+    ".popsection",
+    common = sym exception_common,
+);
+
 unsafe extern "C" {
     #[link_name = "oceans_exception_stubs"]
     static EXCEPTION_STUBS: [u64; EXCEPTION_COUNT];
+}
+
+unsafe extern "C" {
+    #[link_name = "oceans_irq_stubs"]
+    static IRQ_STUBS: [u64; 2];
 }
 
 /// Saves registers, calls the dispatcher with a pointer to the frame,
@@ -141,6 +180,15 @@ unsafe extern "C" fn exception_common() {
 extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
     match frame.vector {
         VECTOR_BREAKPOINT => klog::info!("breakpoint at {:#x}, resuming", frame.rip),
+        v if v == u64::from(VECTOR_TIMER) => {
+            // Acknowledge first: the handler may switch threads, and the
+            // next tick must still be delivered.
+            super::apic::end_of_interrupt();
+            if let Some(handler) = TIMER_HANDLER.get() {
+                handler();
+            }
+        }
+        v if v == u64::from(VECTOR_SPURIOUS) => {}
         _ => fatal_exception(frame),
     }
 }
@@ -257,7 +305,11 @@ pub fn init() {
             let ist = (vector == VECTOR_DOUBLE_FAULT).then_some(DOUBLE_FAULT_IST_INDEX);
             *gate = Gate::interrupt(handler, selector, ist);
         }
-        // Vectors ≥ 32 stay non-present until interrupt routing exists; a
+        // SAFETY: the IRQ stub table above has exactly two entries.
+        let (timer, spurious) = unsafe { (IRQ_STUBS[0], IRQ_STUBS[1]) };
+        gates[usize::from(VECTOR_TIMER)] = Gate::interrupt(timer, selector, None);
+        gates[usize::from(VECTOR_SPURIOUS)] = Gate::interrupt(spurious, selector, None);
+        // Other vectors stay non-present until interrupt routing exists; a
         // stray delivery raises #GP/#NP and is reported as fatal.
         Idt(gates)
     });

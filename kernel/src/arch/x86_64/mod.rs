@@ -1,5 +1,7 @@
 //! x86_64 support (Tier 1, ADR-0005).
 
+mod apic;
+mod context;
 mod cpu;
 mod gdt;
 mod interrupts;
@@ -11,6 +13,7 @@ use core::arch::asm;
 
 use ::x86_64::instructions::{self as insn, port::Port};
 
+pub use context::{prepare_stack, switch_context};
 pub use cpu::{enable_protections, features as cpu_features};
 pub use paging::AddressSpace;
 
@@ -93,4 +96,22 @@ pub unsafe fn switch_stack(top: u64, next: extern "C" fn() -> !) -> ! {
             options(noreturn),
         )
     }
+}
+
+/// Starts the periodic timer: `handler` runs on every tick, in interrupt
+/// context with interrupts disabled. Requires the kernel page tables.
+pub fn start_timer(hz: u32, handler: fn()) {
+    apic::init();
+    interrupts::set_timer_handler(handler);
+    apic::start_timer(hz);
+}
+
+pub fn enable_interrupts() {
+    insn::interrupts::enable();
+}
+
+/// Enables interrupts and halts until the next one, atomically (no wake-up
+/// can be lost between the two).
+pub fn wait_for_interrupt() {
+    insn::interrupts::enable_and_hlt();
 }

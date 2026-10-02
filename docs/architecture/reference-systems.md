@@ -84,7 +84,7 @@ does not matter for reading drivers.
 3. **ADR-0011 Kernel objects & capabilities** (done): typed objects (AddressSpace,
    Thread, Endpoint, Notification, MmioRange, Irq, DmaBuffer), per-process
    capability table, rights bits, delegation over IPC. No uid in the kernel.
-4. **ADR-0012 IPC:** synchronous call/reply on endpoints with direct switch,
+4. **ADR-0013 IPC** (threads and scheduler first: ADR-0012, done): synchronous call/reply on endpoints with direct switch,
    capability transfer, shared-memory channels for bulk data; latency
    benchmarks in CI.
 5. **Kernel lint policy:** enable `clippy::indexing_slicing`, `unwrap_used`,
