@@ -13,6 +13,7 @@ bench = false
 
 [dependencies]
 oceans-frame-allocator.workspace = true
+oceans-heap.workspace = true
 oceans-memory-map.workspace = true
 # Boot protocol bindings; confined to src/boot (ADR-0003).
 limine = "0.5"

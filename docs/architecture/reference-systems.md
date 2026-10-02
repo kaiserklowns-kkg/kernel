@@ -77,14 +77,14 @@ does not matter for reading drivers.
 
 ## 4. Decisions this feeds into (Phase 2 ADRs)
 
-1. **ADR-0008 Physical memory:** buddy allocator + per-frame metadata
+1. **ADR-0008 Physical memory** (done): buddy allocator + per-frame metadata
    (refcount, state); built over `libs/memory-map`; host-tested.
-2. **ADR-0009 Address-space layout:** lower half user, −2 GiB kernel, direct
+2. **ADR-0009 Address-space layout** (done; heap: ADR-0010): lower half user, −2 GiB kernel, direct
    map, growable heap region, guard pages.
-3. **ADR-0010 Kernel objects & capabilities:** typed objects (AddressSpace,
+3. **ADR-0011 Kernel objects & capabilities:** typed objects (AddressSpace,
    Thread, Endpoint, Notification, MmioRange, Irq, DmaBuffer), per-process
    capability table, rights bits, delegation over IPC. No uid in the kernel.
-4. **ADR-0011 IPC:** synchronous call/reply on endpoints with direct switch,
+4. **ADR-0012 IPC:** synchronous call/reply on endpoints with direct switch,
    capability transfer, shared-memory channels for bulk data; latency
    benchmarks in CI.
 5. **Kernel lint policy:** enable `clippy::indexing_slicing`, `unwrap_used`,

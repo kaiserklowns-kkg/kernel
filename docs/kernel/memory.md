@@ -7,7 +7,7 @@ Implemented incrementally (master spec §15). State per step:
 | 1 | Physical memory discovery | **Done** — `kernel/src/memory`, `libs/memory-map` |
 | 2 | Physical frame allocator | **Done** — ADR-0008, `kernel/src/memory/frames.rs`, `libs/frame-allocator` |
 | 3 | Kernel-owned page tables | **Done** — ADR-0009, `kernel/src/memory/paging.rs`, `kernel/src/arch/x86_64/paging.rs` |
-| 4 | Kernel heap | Phase 2 (next) |
+| 4 | Kernel heap | **Done** — ADR-0010, `kernel/src/memory/heap.rs`, `libs/heap` |
 | 5 | User address spaces | Phase 2 |
 | 6 | Memory protection (NX, W^X, SMEP/SMAP/UMIP) | **Done** for the kernel — ADR-0009; user side with processes |
 | 7 | Shared memory (capability-mediated) | Phase 2, with IPC |
@@ -36,7 +36,7 @@ Decided in [ADR-0009](../adr/0009-kernel-address-space.md); source of truth
 |---|---|
 | `0x0000_0000_0000_1000`.. | user space (128 TiB) |
 | `0xffff_8000_0000_0000` | direct map of RAM (RW, NX; no MMIO, no kernel image) |
-| `0xffff_c000_0000_0000` | kernel heap |
+| `0xffff_c000_0000_0000` | reserved: virtually contiguous allocations > 4 MiB (the heap itself lives in the direct map, ADR-0010) |
 | `0xffff_c080_0000_0000` | kernel stacks (64 KiB + unmapped guard page each) |
 | `0xffff_c100_0000_0000` | MMIO |
 | `0xffff_ffff_8000_0000` | kernel image: text R-X, rodata R--, data RW- |
@@ -55,3 +55,13 @@ Buddy allocator, orders 0–10 (4 KiB–4 MiB), decided in
 - Bootloader-reclaimable memory is added after the switch to the kernel's own
   stack and page tables (ADR-0009).
 - Self-test runs only in smoke-test boots (`oceans.test=smoke`, CI).
+
+## Kernel heap (Phase 2)
+
+`alloc` (`Box`, `Vec`, `BTreeMap`, `Arc`, …) is available after
+`memory::init`. Decided in [ADR-0010](../adr/0010-kernel-heap.md):
+
+- ≤ 2 KiB: slab caches in 9 power-of-two classes; one empty slab cached per
+  class, others returned to the frame allocator.
+- > 2 KiB up to 4 MiB: one buddy block of the next power-of-two size.
+- All heap memory is in the direct map; lock order is heap → frames.

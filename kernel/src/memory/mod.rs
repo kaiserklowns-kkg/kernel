@@ -1,7 +1,9 @@
-//! Memory management: boot memory map, physical frames (ADR-0008) and the
-//! kernel address space (ADR-0009). See docs/kernel/memory.md.
+//! Memory management: boot memory map, physical frames (ADR-0008), the
+//! kernel address space (ADR-0009) and the kernel heap (ADR-0010). See
+//! docs/kernel/memory.md.
 
 pub mod frames;
+pub mod heap;
 pub mod layout;
 pub mod paging;
 
@@ -22,6 +24,7 @@ pub fn init(boot: &BootInfo) {
     discover(boot);
     frames::init(boot);
     paging::init(boot);
+    heap::init();
 }
 
 /// Hands bootloader-reclaimable memory to the frame allocator. Call only once
@@ -35,6 +38,17 @@ pub fn reclaim_bootloader_memory(boot: &BootInfo) {
 pub fn self_test() {
     frames::self_test();
     paging::self_test();
+    heap::self_test();
+}
+
+/// Physical address of a direct-map pointer.
+pub fn virt_to_phys(virt: *const u8) -> u64 {
+    let offset = *DIRECT_MAP_OFFSET
+        .get()
+        .expect("memory::init sets the direct map first");
+    (virt as u64)
+        .checked_sub(offset)
+        .expect("pointer is not in the direct map")
 }
 
 /// Virtual address of physical address `phys` in the direct map.

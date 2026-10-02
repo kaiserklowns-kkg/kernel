@@ -1,9 +1,9 @@
 ﻿[workspace]
 resolver = "3"
-members = ["kernel", "libs/frame-allocator", "libs/memory-map", "tools/xtask"]
+members = ["kernel", "libs/frame-allocator", "libs/heap", "libs/memory-map", "tools/xtask"]
 # The kernel only builds for bare-metal targets; host-side `cargo test`
 # and `cargo build` cover the portable crates and tooling.
-default-members = ["libs/frame-allocator", "libs/memory-map", "tools/xtask"]
+default-members = ["libs/frame-allocator", "libs/heap", "libs/memory-map", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oceans-frame-allocator = { path = "libs/frame-allocator" }
+oceans-heap = { path = "libs/heap" }
 oceans-memory-map = { path = "libs/memory-map" }
 
 [profile.release]

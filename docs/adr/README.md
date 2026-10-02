@@ -17,5 +17,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0007](0007-ai-permission-mediation.md) | AI agents as unprivileged, mediated principals | Proposed |
 | [0008](0008-physical-frame-allocator.md) | Physical frame allocator: buddy system with per-frame metadata | Accepted |
 | [0009](0009-kernel-address-space.md) | Kernel address space: own page tables, W^X, guarded stacks | Accepted |
+| [0010](0010-kernel-heap.md) | Kernel heap: slab caches + buddy page blocks via the direct map | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

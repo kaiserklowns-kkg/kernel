@@ -37,11 +37,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-heap"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-kernel"
 version = "0.1.0"
 dependencies = [
  "limine",
  "oceans-frame-allocator",
+ "oceans-heap",
  "oceans-memory-map",
  "spin",
  "x86_64",

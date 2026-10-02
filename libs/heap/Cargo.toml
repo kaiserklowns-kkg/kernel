@@ -1,0 +1,9 @@
+[package]
+name = "oceans-heap"
+description = "Slab + page-block heap allocator for the Oceans kernel (ADR-0010)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
