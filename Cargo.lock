@@ -30,6 +30,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-capability"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-frame-allocator"
 version = "0.1.0"
 dependencies = [
@@ -45,6 +49,7 @@ name = "oceans-kernel"
 version = "0.1.0"
 dependencies = [
  "limine",
+ "oceans-capability",
  "oceans-frame-allocator",
  "oceans-heap",
  "oceans-memory-map",

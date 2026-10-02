@@ -1,0 +1,9 @@
+[package]
+name = "oceans-capability"
+description = "Capability tables, rights and revocation for the Oceans kernel (ADR-0011)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -1,6 +1,6 @@
 # ADR-0006: Capability-based security model
 
-- Status: Proposed (detailed design due with Phase 2 IPC)
+- Status: Accepted — mechanism specified in [ADR-0011](0011-capabilities.md); permission broker and consent design follow in Phase 5
 - Date: 2026-10-03
 
 ## Context

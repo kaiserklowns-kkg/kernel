@@ -12,6 +12,7 @@ test = false
 bench = false
 
 [dependencies]
+oceans-capability.workspace = true
 oceans-frame-allocator.workspace = true
 oceans-heap.workspace = true
 oceans-memory-map.workspace = true

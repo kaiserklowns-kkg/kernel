@@ -13,10 +13,11 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0003](0003-boot-protocol.md) | Boot protocol: Limine behind a boot abstraction | Accepted |
 | [0004](0004-rust-toolchain.md) | Stable Rust only; minimal, audited dependencies | Accepted |
 | [0005](0005-hardware-targets.md) | Hardware tiers and initial targets | Accepted |
-| [0006](0006-security-model.md) | Capability-based security model | Proposed |
+| [0006](0006-security-model.md) | Capability-based security model | Accepted (mechanism: ADR-0011) |
 | [0007](0007-ai-permission-mediation.md) | AI agents as unprivileged, mediated principals | Proposed |
 | [0008](0008-physical-frame-allocator.md) | Physical frame allocator: buddy system with per-frame metadata | Accepted |
 | [0009](0009-kernel-address-space.md) | Kernel address space: own page tables, W^X, guarded stacks | Accepted |
 | [0010](0010-kernel-heap.md) | Kernel heap: slab caches + buddy page blocks via the direct map | Accepted |
+| [0011](0011-capabilities.md) | Kernel objects and capabilities | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

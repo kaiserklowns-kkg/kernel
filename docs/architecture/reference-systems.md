@@ -81,7 +81,7 @@ does not matter for reading drivers.
    (refcount, state); built over `libs/memory-map`; host-tested.
 2. **ADR-0009 Address-space layout** (done; heap: ADR-0010): lower half user, −2 GiB kernel, direct
    map, growable heap region, guard pages.
-3. **ADR-0011 Kernel objects & capabilities:** typed objects (AddressSpace,
+3. **ADR-0011 Kernel objects & capabilities** (done): typed objects (AddressSpace,
    Thread, Endpoint, Notification, MmioRange, Irq, DmaBuffer), per-process
    capability table, rights bits, delegation over IPC. No uid in the kernel.
 4. **ADR-0012 IPC:** synchronous call/reply on endpoints with direct switch,

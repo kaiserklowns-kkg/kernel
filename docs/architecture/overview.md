@@ -47,7 +47,7 @@ UEFI firmware → Limine → kernel_entry (boot/limine.rs)
       → switch_stack      onto a guarded kernel stack
   → kernel_main_on_kernel_stack
       → reclaim bootloader memory
-      → self-tests        only with oceans.test=smoke
+      → self-tests        only with oceans.test=smoke (memory, heap, capabilities)
       → "OCEANS KERNEL ONLINE"
 ```
 

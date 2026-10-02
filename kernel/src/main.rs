@@ -20,6 +20,7 @@ mod arch;
 mod boot;
 mod klog;
 mod memory;
+mod object;
 mod panic;
 
 use boot::BootInfo;
@@ -78,5 +79,6 @@ fn self_test() {
     // A breakpoint must be delivered through the IDT and return cleanly.
     arch::breakpoint();
     memory::self_test();
+    object::self_test();
     klog::info!("self-tests passed");
 }

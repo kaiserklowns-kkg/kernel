@@ -16,7 +16,7 @@ controlled set of modern hardware instead of maximum compatibility.
 |---|---|---|
 | 0 — Architecture | ADRs, system architecture, repo layout | **In progress** — see [docs/adr](docs/adr) |
 | 1 — Boot | Boot in QEMU, `OCEANS KERNEL ONLINE` | **Done** — `cargo xtask smoke` passes |
-| 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **In progress** — frames (ADR-0008), address space (ADR-0009), heap (ADR-0010) |
+| 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **In progress** — frames (0008), address space (0009), heap (0010), capabilities (0011) |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 
@@ -40,10 +40,12 @@ Details: [docs/development/getting-started.md](docs/development/getting-started.
 kernel/            Oceans kernel (Rust, no_std)
   src/boot/          boot protocol adapters → BootInfo
   src/arch/x86_64/   CPU bring-up: serial, GDT/TSS, IDT, PIC
-  src/memory/        physical memory discovery
+  src/memory/        frames, page tables, heap
+  src/object/        kernel objects reachable by capability
 libs/memory-map/   host-testable physical memory map model
 libs/frame-allocator/ host-testable buddy allocator for physical frames
 libs/heap/          host-testable slab + page-block kernel heap
+libs/capability/    host-testable capability tables, rights, revocation
 tools/xtask/       build, image and QEMU tooling (`cargo xtask`)
 docs/              architecture, ADRs, hardware, development guides
 ```
