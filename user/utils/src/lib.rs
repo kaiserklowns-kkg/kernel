@@ -25,7 +25,7 @@ impl Utility {
     /// capability was not granted.
     pub fn start(name: &str, start: &Start) -> Result<Self, i64> {
         let directory = Directory::from_start(start).ok_or(EXIT_NO_CONSOLE)?;
-        let mut out = Out(directory.find_kind("console").ok_or(EXIT_NO_CONSOLE)?);
+        let mut out = Out::new(directory.find_kind("console").ok_or(EXIT_NO_CONSOLE)?);
         let Some(sysinfo) = directory.find_kind("sysinfo") else {
             let _ = writeln!(
                 out,
@@ -41,7 +41,7 @@ impl Utility {
 /// capabilities than `sysinfo`.
 pub fn console(start: &Start) -> Result<(Out, Directory), i64> {
     let directory = Directory::from_start(start).ok_or(EXIT_NO_CONSOLE)?;
-    let out = Out(directory.find_kind("console").ok_or(EXIT_NO_CONSOLE)?);
+    let out = Out::new(directory.find_kind("console").ok_or(EXIT_NO_CONSOLE)?);
     Ok((out, directory))
 }
 

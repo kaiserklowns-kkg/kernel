@@ -100,6 +100,10 @@ name = "oceans-heap"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-http"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-net"
 version = "0.1.0"
 
@@ -145,6 +149,8 @@ version = "0.1.0"
 dependencies = [
  "oceans-abi",
  "oceans-block-proto",
+ "oceans-fs-proto",
+ "oceans-http",
  "oceans-net-proto",
  "oceans-rt",
 ]

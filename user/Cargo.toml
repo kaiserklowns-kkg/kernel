@@ -22,6 +22,7 @@ oceans-net-proto = { path = "net-proto" }
 oceans-net = { path = "../libs/net" }
 oceans-dns = { path = "../libs/dns" }
 oceans-archive = { path = "../libs/archive" }
+oceans-http = { path = "../libs/http" }
 oceans-elf = { path = "../libs/elf" }
 oceans-volume = { path = "../libs/volume" }
 

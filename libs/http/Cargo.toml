@@ -1,0 +1,9 @@
+[package]
+name = "oceans-http"
+description = "HTTP/1.1 client protocol for Oceans: URLs, requests and a streaming, validating response parser, without allocation (ADR-0028)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

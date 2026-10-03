@@ -725,17 +725,66 @@ impl Directory {
 }
 
 /// Console output as `fmt::Write`, translating `\n` to `\r\n`.
-pub struct Out(pub Handle);
+///
+/// Line-buffered: a line goes to the console in one write (when it ends,
+/// when the buffer fills, or when the `Out` is dropped), so kernel log
+/// lines cannot land in the middle of it.
+pub struct Out {
+    handle: Handle,
+    line: [u8; 256],
+    len: usize,
+}
+
+impl Out {
+    pub const fn new(console: Handle) -> Self {
+        Self {
+            handle: console,
+            line: [0; 256],
+            len: 0,
+        }
+    }
+
+    /// The console capability.
+    pub fn handle(&self) -> Handle {
+        self.handle
+    }
+
+    /// Writes what is buffered.
+    pub fn flush(&mut self) -> Result<(), Error> {
+        let result = console_write(self.handle, &self.line[..self.len]);
+        self.len = 0;
+        result
+    }
+
+    /// Buffers raw bytes (no translation), flushing full lines' worth.
+    pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        for &byte in bytes {
+            if self.len == self.line.len() {
+                self.flush()?;
+            }
+            self.line[self.len] = byte;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
 
 impl fmt::Write for Out {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for (i, part) in s.split('\n').enumerate() {
             if i > 0 {
-                console_write(self.0, b"\r\n").map_err(|_| fmt::Error)?;
+                self.write_bytes(b"\r\n").map_err(|_| fmt::Error)?;
+                self.flush().map_err(|_| fmt::Error)?;
             }
-            console_write(self.0, part.as_bytes()).map_err(|_| fmt::Error)?;
+            self.write_bytes(part.as_bytes()).map_err(|_| fmt::Error)?;
         }
         Ok(())
+    }
+}
+
+impl Drop for Out {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 

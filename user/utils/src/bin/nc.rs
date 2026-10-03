@@ -64,7 +64,7 @@ fn main(start: Start) -> i64 {
     let mut buffer = [0u8; 256];
     loop {
         match stream.read_wait(&mut buffer, IDLE_MS) {
-            Ok(Read::Data(len)) => print_bytes(&out, &buffer[..len]),
+            Ok(Read::Data(len)) => print_bytes(&mut out, &buffer[..len]),
             Ok(Read::Eof) => return 0,
             Ok(Read::WouldBlock) => {}
             Err(error) => return fail(&mut out, error.message()),
@@ -74,26 +74,15 @@ fn main(start: Start) -> i64 {
 
 /// Prints received bytes, line ends as CR LF and other control bytes as
 /// `.`.
-fn print_bytes(out: &Out, bytes: &[u8]) {
-    let mut line = [0u8; 256];
-    let mut len = 0;
+fn print_bytes(out: &mut Out, bytes: &[u8]) {
     for &byte in bytes {
-        match byte {
-            b'\n' => {
-                let _ = oceans_rt::console_write(out.0, &line[..len]);
-                let _ = oceans_rt::console_write(out.0, b"\r\n");
-                len = 0;
+        let _ = match byte {
+            b'\n' => out.write_str("\n").map_err(drop),
+            b'\r' => Ok(()),
+            byte if byte.is_ascii_graphic() || byte == b' ' || byte == b'\t' => {
+                out.write_bytes(&[byte]).map_err(drop)
             }
-            b'\r' => {}
-            byte => {
-                line[len] = if byte.is_ascii_graphic() || byte == b' ' || byte == b'\t' {
-                    byte
-                } else {
-                    b'.'
-                };
-                len += 1;
-            }
-        }
+            _ => out.write_bytes(b".").map_err(drop),
+        };
     }
-    let _ = oceans_rt::console_write(out.0, &line[..len]);
 }

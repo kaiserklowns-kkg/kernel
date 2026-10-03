@@ -38,6 +38,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ping",
     "host",
     "nc",
+    "fetch",
     "ipc-test",
 ];
 /// The virtio disk QEMU attaches (ADR-0021), holding the filesystem
@@ -116,6 +117,12 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run host out use:net -- oceans.test 10.0.2.2:$DNS\r\n",
     b"run host out use:net -- missing.test 10.0.2.2:$DNS\r\n",
     b"run nc out use:net -- 10.0.2.2 $TCP hello over tcp\r\n",
+    // HTTP (ADR-0028), from a server xtask runs on the host.
+    b"run fetch out use:net -- http://10.0.2.2:$HTTP/hello.txt\r\n",
+    b"run fetch out use:net -- http://10.0.2.2:$HTTP/redirect\r\n",
+    b"run fetch out use:net -- http://10.0.2.2:$HTTP/chunked\r\n",
+    b"run fetch out use:net -- http://10.0.2.2:$HTTP/missing\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /keep/big.bin\r\n",
     b"exit\r\n",
 ];
 /// The second smoke boot, on the disk the first one left.
@@ -186,6 +193,11 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("oceans.test has address 10.1.2.3"),
     Expect::Contains("host: missing.test: not found"),
     Expect::Line("hello from the host: hello over tcp"),
+    Expect::Line("hello over http"),
+    Expect::Line("you were redirected"),
+    Expect::Line("chunked transfer works"),
+    Expect::Contains("fetch: HTTP 404 Not Found"),
+    Expect::Line("fetch: saved 20000 bytes"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -639,10 +651,12 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let tcp_echo = tcp_echo_probe(tcp_forward);
     let dns_port = dns_server()?;
     let tcp_port = tcp_greeter()?;
+    let http_port = http_server()?;
     let expand = |command: &[u8]| -> Vec<u8> {
         String::from_utf8_lossy(command)
             .replace("$DNS", &dns_port.to_string())
             .replace("$TCP", &tcp_port.to_string())
+            .replace("$HTTP", &http_port.to_string())
             .into_bytes()
     };
     let mut child = qemu_command(true, SMOKE_DISK_IMAGE, Some((udp_forward, tcp_forward)))?
@@ -798,6 +812,14 @@ fn check_smoke_disk() -> Result {
         .read(note, 0, &mut text)
         .map_err(|e| format!("reading the kept file: {e:?}"))?;
     // The shell's `write` ends the text with a newline.
+    let big = lookup(&volume, keep, "big.bin")?;
+    let mut downloaded = vec![0u8; volume.size(big).map_err(|e| format!("{e:?}"))? as usize];
+    volume
+        .read(big, 0, &mut downloaded)
+        .map_err(|e| format!("reading the downloaded file: {e:?}"))?;
+    if downloaded != big_body() {
+        return Err("the file fetched over HTTP does not match what the host served".into());
+    }
     if text != format!("{KEPT_TEXT}\n").as_bytes() {
         return Err(format!(
             "kept file holds {:?}",
@@ -939,6 +961,55 @@ fn tcp_greeter() -> Result<u16> {
             }
             let greeting = format!("hello from the host: {}\n", String::from_utf8_lossy(&line));
             let _ = stream.write_all(greeting.as_bytes());
+        }
+    });
+    Ok(port)
+}
+
+/// The body of `/big`: 20000 bytes in a pattern that catches reordering.
+fn big_body() -> Vec<u8> {
+    (0..20_000u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// An HTTP server on the host for the guest's `fetch`. Returns its port.
+fn http_server() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("cannot start the HTTP server: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+                match stream.read(&mut byte) {
+                    Ok(1) => request.push(byte[0]),
+                    _ => break,
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            let path = request.split(' ').nth(1).unwrap_or("").to_string();
+            let fixed = |status: &str, body: &[u8]| {
+                let mut response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(body);
+                response
+            };
+            let response = match path.as_str() {
+                "/hello.txt" => fixed("200 OK", b"hello over http\n"),
+                "/moved.txt" => fixed("200 OK", b"you were redirected\n"),
+                "/redirect" => b"HTTP/1.1 302 Found\r\nLocation: /moved.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
+                "/big" => fixed("200 OK", &big_body()),
+                _ => fixed("404 Not Found", b"not here\n"),
+            };
+            let _ = stream.write_all(&response);
         }
     });
     Ok(port)
