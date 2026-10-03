@@ -82,7 +82,13 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     if smoke_test {
         arch::exit_emulator(arch::EmulatorExit::Success);
     }
-    // Boot work is done; the idle thread takes over until there is more.
+
+    // Hand the system to init. This thread stays only to report if init
+    // ever exits (it should not): nothing else would notice.
+    if let Some(init) = process::init::start(boot, false) {
+        let code = init.wait_exit();
+        klog::error!("init exited with code {code}: no userspace is running");
+    }
     sched::exit()
 }
 
@@ -95,5 +101,6 @@ fn self_test() {
     sched::self_test();
     ipc::self_test();
     process::self_test(boot::info());
+    process::init_self_test(boot::info());
     klog::info!("self-tests passed");
 }

@@ -52,7 +52,9 @@ UEFI firmware → Limine → kernel_entry (boot/limine.rs)
       → self-tests        only with oceans.test=smoke (memory, heap, capabilities, scheduler, IPC,
                           user processes from the ipc-test boot module)
       → "OCEANS KERNEL ONLINE"
-      → boot thread exits; idle thread runs
+      → init (first user process, ADR-0016): reads services.conf,
+        starts and supervises services with only their declared capabilities
+      → boot thread waits; reports if init ever exits
 ```
 
 Source map: `kernel/src/boot` is the only code that knows Limine;

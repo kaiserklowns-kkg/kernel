@@ -16,7 +16,16 @@ use std::time::{Duration, Instant};
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_PACKAGE: &str = "oceans-kernel";
 /// User programs (in the `user/` workspace) shipped as boot modules.
-const USER_PROGRAMS: &[&str] = &["ipc-test"];
+const USER_PROGRAMS: &[&str] = &[
+    "init",
+    "echo-service",
+    "hello-client",
+    "crasher",
+    "ipc-test",
+];
+/// Service manifests for init: normal boots and smoke tests.
+const MANIFEST: &str = "config/services.conf";
+const SMOKE_MANIFEST: &str = "config/services-smoke.conf";
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const LIMINE_BRANCH: &str = "v9.x-binary";
 const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
@@ -238,6 +247,15 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     for program in USER_PROGRAMS {
         copy(&user.join(program), &esp.join("boot").join(program))?;
     }
+    let manifest = if cmdline.is_some() {
+        SMOKE_MANIFEST
+    } else {
+        MANIFEST
+    };
+    copy(
+        &root().join(manifest),
+        &esp.join("boot").join("services.conf"),
+    )?;
 
     let mut conf = String::from("timeout: 0\n\n/Oceans\n    protocol: limine\n");
     conf.push_str(&format!("    path: boot():/boot/{KERNEL_PACKAGE}\n"));
@@ -247,6 +265,7 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     for program in USER_PROGRAMS {
         conf.push_str(&format!("    module_path: boot():/boot/{program}\n"));
     }
+    conf.push_str("    module_path: boot():/boot/services.conf\n");
     let conf_path = limine_conf_dir.join("limine.conf");
     fs::write(&conf_path, conf)
         .map_err(|e| format!("cannot write {}: {e}", conf_path.display()))?;

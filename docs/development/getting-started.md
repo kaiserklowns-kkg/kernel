@@ -37,8 +37,16 @@ Add `--release` to `build`, `image`, `run` or `smoke` for an optimised kernel.
 [INFO ] memory::paging: kernel address space active: root 0x..., direct map 251 MiB using pages up to 2 MiB
 [INFO ] memory::frames: reclaimed 47 MiB of bootloader memory; 248 MiB free
 [INFO ] kernel: OCEANS KERNEL ONLINE
+[INFO ] process::init: init started with 6 boot modules
+[INFO ] syscall: [init] init: 2 services in services.conf
+[INFO ] syscall: [init/echo] echo: ready
+[INFO ] syscall: [init] init: started echo
+[INFO ] syscall: [init] init: started hello
+[INFO ] syscall: [init/hello] hello: echo replied "HELLO, OCEANS"
+[INFO ] syscall: [init] init: hello exited with 0
 ```
 
+Services are configured in `config/services.conf` (ADR-0016).
 `cargo xtask smoke` adds `oceans.test=smoke` to the command line: the kernel
 then also runs its self-tests and exits QEMU with the result. Normal boots run
 no tests. Pass `-cpu max` to QEMU to exercise SMEP/SMAP/UMIP and 1 GiB pages.

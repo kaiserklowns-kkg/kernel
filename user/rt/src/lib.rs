@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 2).
+//! Minimal Oceans userspace runtime (ABI version 3).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -300,9 +300,66 @@ pub fn process_spawn(
     call(nr::PROCESS_SPAWN, args).map(|(h, _)| Handle(h))
 }
 
+/// Like [`process_spawn`], naming the process `<our name>/<name>` in logs
+/// (`name` is truncated to `oceans_abi::PROCESS_NAME_MAX` bytes).
+pub fn process_spawn_named(
+    image: Handle,
+    len: u64,
+    handles: &[Handle],
+    arg: u64,
+    name: &str,
+) -> Result<Handle, Error> {
+    let mut buffer = [0u8; oceans_abi::PROCESS_NAME_MAX];
+    let mut take = name.len().min(buffer.len());
+    while !name.is_char_boundary(take) {
+        take -= 1;
+    }
+    buffer[..take].copy_from_slice(&name.as_bytes()[..take]);
+    let args = [
+        image.0,
+        len,
+        handles.as_ptr() as u64,
+        handles.len() as u64,
+        arg,
+        buffer.as_ptr() as u64,
+    ];
+    call(nr::PROCESS_SPAWN, args).map(|(h, _)| Handle(h))
+}
+
 /// Blocks until the process exits; returns its exit code.
 pub fn process_wait(process: Handle) -> Result<i64, Error> {
     call(nr::PROCESS_WAIT, [process.0, 0, 0, 0, 0, 0]).map(|(_, code)| code as i64)
+}
+
+// ---- ABI 3 -----------------------------------------------------------------
+
+/// A new notification (latched 64-bit signal word).
+pub fn notification_create() -> Result<Handle, Error> {
+    call(nr::NOTIFICATION_CREATE, [0; 6]).map(|(h, _)| Handle(h))
+}
+
+/// Sets `bits` on the notification (needs `SIGNAL`). Never blocks.
+pub fn notification_signal(notification: Handle, bits: u64) -> Result<(), Error> {
+    call(nr::NOTIFICATION_SIGNAL, [notification.0, bits, 0, 0, 0, 0]).map(drop)
+}
+
+/// Blocks until any bit is set; returns and clears them (needs `WAIT`).
+pub fn notification_wait(notification: Handle) -> Result<u64, Error> {
+    call(nr::NOTIFICATION_WAIT, [notification.0, 0, 0, 0, 0, 0]).map(|(bits, _)| bits)
+}
+
+/// Signals `bits` on `notification` when `process` exits.
+pub fn process_watch(process: Handle, notification: Handle, bits: u64) -> Result<(), Error> {
+    call(
+        nr::PROCESS_WATCH,
+        [process.0, notification.0, bits, 0, 0, 0],
+    )
+    .map(drop)
+}
+
+/// Blocks for at least `ms` milliseconds.
+pub fn sleep_ms(ms: u64) {
+    call(nr::SLEEP, [ms, 0, 0, 0, 0, 0]).ok();
 }
 
 /// Fixed-capacity text buffer for formatting without an allocator.

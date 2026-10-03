@@ -1,0 +1,15 @@
+[package]
+name = "crasher"
+description = "Test service that faults on purpose, to exercise supervision (ADR-0016)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "crasher"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true

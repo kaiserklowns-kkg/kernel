@@ -1,4 +1,4 @@
-//! The Oceans system call ABI, version 2 (ADR-0014, ADR-0015).
+//! The Oceans system call ABI, version 3 (ADR-0014, ADR-0015, ADR-0016).
 //!
 //! Shared by the kernel and userspace so both sides agree by construction.
 //! The ABI is versioned: numbers and meanings below never change within a
@@ -15,9 +15,10 @@
 
 #![no_std]
 
-/// Version history: 1 = ADR-0014 (syscalls 0–7); 2 = ADR-0015 (8–17).
-/// Versions only add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 2;
+/// Version history: 1 = ADR-0014 (syscalls 0–7); 2 = ADR-0015 (8–17);
+/// 3 = ADR-0016 (18–22). Versions only add; existing numbers keep their
+/// meaning.
+pub const ABI_VERSION: u64 = 3;
 
 /// System call numbers.
 pub mod nr {
@@ -64,14 +65,32 @@ pub mod nr {
     pub const MEMORY_MAP: u64 = 14;
     /// `(addr) -> 0` — removes the mapping that starts at `addr`.
     pub const MEMORY_UNMAP: u64 = 15;
-    /// `(image, image_len, handles: *const u64, handles_len, arg) ->
+    /// `(image, image_len, handles: *const u64, handles_len, arg, name) ->
     /// process_handle` — starts a process from the ELF image held in the
     /// memory object `image` (needs `READ`), moving `handles` (each needs
-    /// `TRANSFER`) to it as its initial capabilities.
+    /// `TRANSFER`) to it as its initial capabilities. `name` (ABI 3): 0, or
+    /// a pointer to a [`PROCESS_NAME_MAX`]-byte buffer holding a UTF-8 name,
+    /// zero-padded; the process is named `<parent>/<name>` in logs.
     pub const PROCESS_SPAWN: u64 = 16;
     /// `(process) -> (0, exit_code)` — blocks until the process exits.
     /// Needs `WAIT`.
     pub const PROCESS_WAIT: u64 = 17;
+
+    // ABI 3
+
+    /// `() -> handle` — a notification (latched 64-bit signal word).
+    pub const NOTIFICATION_CREATE: u64 = 18;
+    /// `(notification, bits) -> 0` — needs `SIGNAL`. Never blocks.
+    pub const NOTIFICATION_SIGNAL: u64 = 19;
+    /// `(notification) -> bits` — blocks until any bit is set, returns and
+    /// clears them. Needs `WAIT`.
+    pub const NOTIFICATION_WAIT: u64 = 20;
+    /// `(process, notification, bits) -> 0` — signals `bits` on the
+    /// notification when the process exits (at once if it already has).
+    /// Needs `WAIT` on the process and `SIGNAL` on the notification.
+    pub const PROCESS_WATCH: u64 = 21;
+    /// `(milliseconds) -> 0` — blocks for at least that long.
+    pub const SLEEP: u64 = 22;
 }
 
 /// `MEMORY_MAP` protection bits. Writable and executable together are
@@ -118,6 +137,9 @@ pub struct MessageDesc {
 
 /// Capabilities one message may carry.
 pub const IPC_MAX_HANDLES: usize = 4;
+
+/// Size of the `PROCESS_SPAWN` name buffer.
+pub const PROCESS_NAME_MAX: usize = 32;
 
 /// Largest program image accepted by `PROCESS_SPAWN`, in bytes.
 pub const SPAWN_MAX_IMAGE: usize = 16 * 1024 * 1024;

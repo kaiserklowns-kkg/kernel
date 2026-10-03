@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 2 (`oceans-abi`, ADR-0014, ADR-0015).
+//! System call dispatch, ABI version 3 (`oceans-abi`, ADR-0014, ADR-0015, ADR-0016).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -11,14 +11,14 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use oceans_abi::{
-    DEBUG_WRITE_MAX, Error, IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc, SPAWN_MAX_IMAGE, nr,
-    prot, start::MAX_INITIAL_HANDLES,
+    DEBUG_WRITE_MAX, Error, IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc, PROCESS_NAME_MAX,
+    SPAWN_MAX_IMAGE, nr, prot, start::MAX_INITIAL_HANDLES,
 };
 use oceans_capability::{CapError, Handle, Rights};
 
 use crate::arch::{self, SyscallFrame};
 use crate::ipc::endpoint::Endpoint;
-use crate::ipc::{IpcError, Message};
+use crate::ipc::{IpcError, Message, Notification};
 use crate::object::{
     self, Capability, KernelObject, MemoryObject, ObjectError, ObjectKind, default_rights,
 };
@@ -63,8 +63,13 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::MEMORY_CREATE => memory_create(&process, a0),
         nr::MEMORY_MAP => memory_map(&process, a0, a1, a2),
         nr::MEMORY_UNMAP => process.unmap_memory(a0).map(|()| (0, 0)),
-        nr::PROCESS_SPAWN => process_spawn(&process, a0, a1, a2, a3, a4),
+        nr::PROCESS_SPAWN => process_spawn(&process, a0, a1, a2, a3, a4, a5),
         nr::PROCESS_WAIT => process_wait(&process, a0),
+        nr::NOTIFICATION_CREATE => notification_create(&process),
+        nr::NOTIFICATION_SIGNAL => notification_signal(&process, a0, a1),
+        nr::NOTIFICATION_WAIT => notification_wait(&process, a0),
+        nr::PROCESS_WATCH => process_watch(&process, a0, a1, a2),
+        nr::SLEEP => sleep(a0),
         _ => Err(Error::UnknownSyscall),
     };
     match result {
@@ -499,7 +504,23 @@ fn process_spawn(
     handles_ptr: u64,
     handles_len: u64,
     arg: u64,
+    name_ptr: u64,
 ) -> SyscallResult {
+    let mut name_bytes = [0u8; PROCESS_NAME_MAX];
+    if name_ptr != 0 {
+        process.copy_from_user(name_ptr, &mut name_bytes)?;
+    }
+    let name_len = name_bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(PROCESS_NAME_MAX);
+    let child_name =
+        core::str::from_utf8(&name_bytes[..name_len]).map_err(|_| Error::InvalidArgument)?;
+    let child_name = if child_name.is_empty() {
+        "child"
+    } else {
+        child_name
+    };
     let object = arch::without_interrupts(|| {
         object::memory(
             &mut process.capabilities().lock(),
@@ -530,7 +551,7 @@ fn process_spawn(
     let count = len_arg(handles_len, MAX_INITIAL_HANDLES)?;
     let handles = read_handles(process, handles_ptr, count, MAX_INITIAL_HANDLES)?;
     let initial = take_for_transfer(process, &handles)?;
-    let name = alloc::format!("{}.child", process.name());
+    let name = alloc::format!("{}/{child_name}", process.name());
     let child = process::spawn(&name, &bytes, initial, arg)?;
     let raw = insert(
         process,
@@ -553,4 +574,62 @@ fn process_wait(process: &Process, raw: u64) -> SyscallResult {
     .map_err(object_error)?;
     let code = child.wait_exit();
     Ok((0, code as u64))
+}
+
+// ---- ABI 3 -----------------------------------------------------------------
+
+fn notification_create(process: &Process) -> SyscallResult {
+    let raw = insert(
+        process,
+        Capability::new(
+            KernelObject::Notification(Notification::new()),
+            default_rights(ObjectKind::Notification),
+        ),
+    )?;
+    Ok((raw, 0))
+}
+
+fn notification_signal(process: &Process, raw: u64, bits: u64) -> SyscallResult {
+    let notification = arch::without_interrupts(|| {
+        object::notification(
+            &mut process.capabilities().lock(),
+            handle(raw),
+            Rights::SIGNAL,
+        )
+    })
+    .map_err(object_error)?;
+    notification.signal(bits);
+    Ok((0, 0))
+}
+
+fn notification_wait(process: &Process, raw: u64) -> SyscallResult {
+    let notification = arch::without_interrupts(|| {
+        object::notification(
+            &mut process.capabilities().lock(),
+            handle(raw),
+            Rights::WAIT,
+        )
+    })
+    .map_err(object_error)?;
+    Ok((notification.wait(), 0))
+}
+
+fn process_watch(process: &Process, raw: u64, notification: u64, bits: u64) -> SyscallResult {
+    if bits == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    let (child, notification) = arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let child = object::process(&mut table, handle(raw), Rights::WAIT)?;
+        let notification = object::notification(&mut table, handle(notification), Rights::SIGNAL)?;
+        Ok((child, notification))
+    })
+    .map_err(object_error)?;
+    child.watch_exit(notification, bits);
+    Ok((0, 0))
+}
+
+fn sleep(ms: u64) -> SyscallResult {
+    sched::sleep_ms(ms);
+    Ok((0, 0))
 }

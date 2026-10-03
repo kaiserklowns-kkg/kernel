@@ -23,5 +23,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0013](0013-ipc.md) | IPC: endpoints (call/reply) and notifications | Accepted |
 | [0014](0014-processes-and-user-mode.md) | Processes, user mode and the system call ABI | Accepted |
 | [0015](0015-syscall-abi-v2.md) | System call ABI v2: capabilities over IPC, memory, processes | Accepted |
+| [0016](0016-init-and-service-manager.md) | init and the service manager | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

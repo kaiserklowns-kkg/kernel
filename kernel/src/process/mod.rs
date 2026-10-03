@@ -27,6 +27,7 @@ use oceans_memory_map::PAGE_SIZE;
 use spin::Mutex;
 
 use crate::arch::{self, AddressSpace, TrapFrame};
+use crate::ipc::Notification;
 use crate::klog;
 use crate::memory::layout::USER;
 use crate::memory::paging::{self, Cache, MapError, MapFlags, PageSize};
@@ -34,8 +35,9 @@ use crate::memory::phys_to_virt;
 use crate::object::{CapTable, Capability, DEFAULT_CAP_LIMIT, MemoryObject, ObjectError};
 use crate::sched::{self, Thread};
 
+pub mod init;
 mod self_test;
-pub use self_test::self_test;
+pub use self_test::{init_self_test, self_test};
 
 /// Top of the main thread's stack; the stack grows down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_7fff_f000_0000;
@@ -227,6 +229,9 @@ pub struct Process {
     exit_code: AtomicI64,
     /// Threads blocked in `wait_exit`.
     exit_waiters: Mutex<VecDeque<Arc<Thread>>>,
+    /// Notifications signalled at exit (`PROCESS_WATCH`); guarded by
+    /// `exit_waiters`' lock ordering: always taken after it.
+    watchers: Mutex<Vec<(Arc<Notification>, u64)>>,
 }
 
 impl fmt::Debug for Process {
@@ -274,15 +279,37 @@ impl Process {
         })
     }
 
+    /// Signals `bits` on `notification` when the process exits, or now if
+    /// it already has.
+    pub fn watch_exit(&self, notification: Arc<Notification>, bits: u64) {
+        let now = arch::without_interrupts(|| {
+            let _waiters = self.exit_waiters.lock();
+            if self.exit_status().is_some() {
+                return true;
+            }
+            self.watchers.lock().push((notification.clone(), bits));
+            false
+        });
+        if now {
+            notification.signal(bits);
+        }
+    }
+
     fn set_exit(&self, code: i64) {
-        let waiters = arch::without_interrupts(|| {
+        let (waiters, watchers) = arch::without_interrupts(|| {
             let mut waiters = self.exit_waiters.lock();
             self.exit_code.store(code, Ordering::Relaxed);
             self.exited.store(true, Ordering::Release);
-            core::mem::take(&mut *waiters)
+            (
+                core::mem::take(&mut *waiters),
+                core::mem::take(&mut *self.watchers.lock()),
+            )
         });
         for waiter in waiters {
             sched::wake(waiter);
+        }
+        for (notification, bits) in watchers {
+            notification.signal(bits);
         }
     }
 
@@ -458,6 +485,7 @@ pub fn spawn(
         exited: AtomicBool::new(false),
         exit_code: AtomicI64::new(0),
         exit_waiters: Mutex::new(VecDeque::new()),
+        watchers: Mutex::new(Vec::new()),
     });
     let args = [handles.len() as u64, handles_addr, arg];
     sched::spawn_user(

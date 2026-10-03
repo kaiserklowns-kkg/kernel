@@ -1,0 +1,15 @@
+[package]
+name = "echo-service"
+description = "Oceans system service: echo-service (ADR-0016)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "echo-service"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true

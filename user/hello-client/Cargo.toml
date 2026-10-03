@@ -1,0 +1,15 @@
+[package]
+name = "hello-client"
+description = "Oceans system service: hello-client (ADR-0016)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hello-client"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true

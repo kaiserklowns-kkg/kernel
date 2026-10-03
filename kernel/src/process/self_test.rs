@@ -122,3 +122,13 @@ fn wait_all(processes: &[&Arc<Process>], seconds: u64) {
         sched::sleep_ms(10);
     }
 }
+
+/// init with the test manifest: it starts the services, checks every
+/// expectation in the manifest (exit codes, restart counts) and exits 0 only
+/// if all hold.
+pub fn init_self_test(boot: &BootInfo) {
+    let init = super::init::start(boot, true).expect("smoke image ships init");
+    wait_all(&[&init], 30);
+    assert_eq!(init.exit_status(), Some(0), "init's service test failed");
+    klog::info!("init self-test passed: services started, supervised and restarted per manifest");
+}
