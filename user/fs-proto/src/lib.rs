@@ -93,6 +93,8 @@ pub enum Status {
     BadRequest = 9,
     /// The disk failed (ADR-0022).
     IoError = 10,
+    /// Data on the disk no longer matches its checksum (ADR-0027).
+    Corrupt = 11,
 }
 
 impl Status {
@@ -108,6 +110,7 @@ impl Status {
             7 => Self::InvalidName,
             8 => Self::NoSpace,
             10 => Self::IoError,
+            11 => Self::Corrupt,
             _ => Self::BadRequest,
         }
     }
@@ -125,6 +128,7 @@ impl Status {
             Self::NoSpace => "no space",
             Self::BadRequest => "bad request",
             Self::IoError => "I/O error",
+            Self::Corrupt => "data corrupted on disk (checksum mismatch)",
         }
     }
 }

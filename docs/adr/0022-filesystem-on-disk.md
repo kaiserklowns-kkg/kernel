@@ -1,6 +1,6 @@
 # ADR-0022: The filesystem on disk (OceansFS)
 
-- Status: Accepted
+- Status: Accepted (format amended by ADR-0027: data checksums)
 - Date: 2026-10-03
 - Depends on: ADR-0019 (filesystem service), ADR-0021 (block devices)
 - Amends: ADR-0021. Raw block access moves from the shell to the

@@ -10,8 +10,15 @@
 //!   CRC32C.
 //! - **Metadata** is the whole directory tree, serialized in preorder:
 //!   - per node: kind, name, then
-//!     - for a file: size and block list (0 = a hole that reads as zeros);
+//!     - for a file: size and block list, each block with the CRC-32C of
+//!       its contents (format 2, ADR-0027; block 0 = a hole that reads as
+//!       zeros);
 //!     - for a directory: child count.
+//! - Every data block read from the disk is checked against its CRC, so
+//!   silent corruption is reported (`Corrupt`) instead of returned as
+//!   data. Format 1 volumes (no data CRCs) still mount: their CRCs are
+//!   computed at mount and the volume is written as format 2 at the next
+//!   commit.
 //! - Everything else is data blocks. There is no allocation bitmap: the
 //!   free blocks are whatever the metadata does not reference, recomputed
 //!   at mount.
@@ -68,7 +75,8 @@ pub const MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MIN_BLOCKS: u64 = 16;
 
 const MAGIC: &[u8; 8] = b"OCEANSFS";
-const VERSION: u32 = 1;
+/// The format written; 1 (no data checksums) is still read.
+const VERSION: u32 = 2;
 const SUPERBLOCKS: u64 = 2;
 /// Superblock layout.
 const SB_META_LIST: usize = 48;
@@ -118,6 +126,8 @@ pub enum FsError {
     NotEmpty,
     /// The node or its directory is read-only.
     ReadOnly,
+    /// A data block does not match its checksum: the disk corrupted it.
+    Corrupt,
     InvalidName,
     /// Quota, disk space or depth limit reached.
     NoSpace,
@@ -188,9 +198,24 @@ pub fn crc32c(bytes: &[u8]) -> u32 {
     })
 }
 
+/// A file block on disk and the CRC-32C of its contents (block 0: a hole).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Extent {
+    block: u32,
+    crc: u32,
+}
+
+impl Extent {
+    const HOLE: Self = Self { block: 0, crc: 0 };
+
+    fn is_hole(self) -> bool {
+        self.block == 0
+    }
+}
+
 enum Data {
     Memory(Vec<u8>),
-    Disk { size: u64, blocks: Vec<u32> },
+    Disk { size: u64, blocks: Vec<Extent> },
 }
 
 impl Data {
@@ -229,6 +254,7 @@ impl Node {
 }
 
 struct Superblock {
+    version: u32,
     total_blocks: u64,
     generation: u64,
     meta_len: u64,
@@ -248,7 +274,7 @@ impl Superblock {
     fn encode(&self) -> Box<BlockBuf> {
         let mut out = Box::new([0u8; BLOCK_SIZE]);
         out[..8].copy_from_slice(MAGIC);
-        out[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        out[8..12].copy_from_slice(&self.version.to_le_bytes());
         out[12..16].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
         out[16..24].copy_from_slice(&self.total_blocks.to_le_bytes());
         out[24..32].copy_from_slice(&self.generation.to_le_bytes());
@@ -273,7 +299,8 @@ impl Superblock {
             if crc32c(&block[..SB_CRC]) != u32_at(block, SB_CRC) {
                 return Err("superblock checksum mismatch");
             }
-            if u32_at(block, 8) != VERSION {
+            let version = u32_at(block, 8);
+            if !(1..=VERSION).contains(&version) {
                 return Err("unsupported format version");
             }
             if u32_at(block, 12) as usize != BLOCK_SIZE {
@@ -288,6 +315,7 @@ impl Superblock {
                 return Err("bad metadata length");
             }
             Ok(Self {
+                version,
                 total_blocks: u64_at(block, 16),
                 generation: u64_at(block, 24),
                 meta_len,
@@ -345,6 +373,9 @@ pub struct Volume<D> {
     meta_blocks: Vec<u32>,
     dirty: bool,
     cache: Vec<Option<(u32, Box<BlockBuf>)>>,
+    /// The format commits write (always [`VERSION`]; tests write older
+    /// ones to check upgrades).
+    format: u32,
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -374,6 +405,7 @@ impl<D: BlockDevice> Volume<D> {
             meta_blocks: Vec::new(),
             dirty: false,
             cache: (0..CACHE_SLOTS).map(|_| None).collect(),
+            format: VERSION,
         }
     }
 
@@ -451,9 +483,36 @@ impl<D: BlockDevice> Volume<D> {
         if crc32c(&meta) != superblock.meta_crc {
             return Err("metadata checksum mismatch");
         }
-        self.parse(&meta)?;
+        self.parse(&meta, superblock.version)?;
         self.generation = superblock.generation;
         self.meta_blocks = superblock.meta_blocks.clone();
+        if superblock.version < VERSION {
+            self.compute_checksums()?;
+            // Written as the current format at the next commit.
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
+    /// Format 1 has no data checksums: compute them from the disk.
+    fn compute_checksums(&mut self) -> Result<(), &'static str> {
+        let mut block = Box::new([0u8; BLOCK_SIZE]);
+        for id in 0..self.nodes.len() {
+            let Some(Node {
+                content: Content::File(Data::Disk { blocks, .. }),
+                ..
+            }) = self.nodes[id].as_mut()
+            else {
+                continue;
+            };
+            let device = self.device.as_mut().expect("mounted");
+            for extent in blocks.iter_mut().filter(|e| !e.is_hole()) {
+                device
+                    .read_block(u64::from(extent.block), &mut block)
+                    .map_err(|_| "cannot read data to checksum it")?;
+                extent.crc = crc32c(&block[..]);
+            }
+        }
         Ok(())
     }
 
@@ -472,7 +531,7 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
-    fn parse(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+    fn parse(&mut self, bytes: &[u8], version: u32) -> Result<(), &'static str> {
         let mut reader = Reader { bytes, at: 0 };
         if reader.u8()? != KIND_DIRECTORY || reader.u8()? != 0 {
             return Err("bad root record");
@@ -511,10 +570,11 @@ impl<D: BlockDevice> Volume<D> {
                     let mut blocks = Vec::with_capacity(count);
                     for _ in 0..count {
                         let block = reader.u32()?;
+                        let crc = if version >= 2 { reader.u32()? } else { 0 };
                         if block != 0 {
                             self.claim(block)?;
                         }
-                        blocks.push(block);
+                        blocks.push(Extent { block, crc });
                     }
                     (Content::File(Data::Disk { size, blocks }), 0)
                 }
@@ -678,8 +738,8 @@ impl<D: BlockDevice> Volume<D> {
             match node.content {
                 Content::File(Data::Memory(bytes)) => self.memory_bytes -= bytes.len(),
                 Content::File(Data::Disk { blocks, .. }) => {
-                    for block in blocks.into_iter().filter(|&b| b != 0) {
-                        self.release_block(block);
+                    for extent in blocks.into_iter().filter(|e| !e.is_hole()) {
+                        self.release_block(extent.block);
                     }
                 }
                 Content::Directory(_) => {}
@@ -822,12 +882,12 @@ impl<D: BlockDevice> Volume<D> {
             let index = (position / BLOCK_SIZE as u64) as usize;
             let in_block = (position % BLOCK_SIZE as u64) as usize;
             let chunk = (BLOCK_SIZE - in_block).min(len - done);
-            match blocks[index] {
-                0 => out[done..done + chunk].fill(0),
-                block => {
-                    let data = self.read_cached(block)?;
-                    out[done..done + chunk].copy_from_slice(&data[in_block..in_block + chunk]);
-                }
+            let extent = blocks[index];
+            if extent.is_hole() {
+                out[done..done + chunk].fill(0);
+            } else {
+                let data = self.read_cached(extent)?;
+                out[done..done + chunk].copy_from_slice(&data[in_block..in_block + chunk]);
             }
             done += chunk;
         }
@@ -882,7 +942,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Takes a disk file's block list out of its node (and puts it back
     /// with `put_blocks`), so blocks can be changed while the device is
     /// borrowed.
-    fn take_blocks(&mut self, id: NodeId) -> (u64, Vec<u32>) {
+    fn take_blocks(&mut self, id: NodeId) -> (u64, Vec<Extent>) {
         match self.node_mut(id) {
             Ok(Node {
                 content: Content::File(Data::Disk { size, blocks }),
@@ -892,7 +952,7 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
-    fn put_blocks(&mut self, id: NodeId, new_size: u64, new_blocks: Vec<u32>) {
+    fn put_blocks(&mut self, id: NodeId, new_size: u64, new_blocks: Vec<Extent>) {
         if let Ok(Node {
             content: Content::File(Data::Disk { size, blocks }),
             ..
@@ -915,14 +975,14 @@ impl<D: BlockDevice> Volume<D> {
             .filter(|&i| {
                 blocks
                     .get(i)
-                    .is_none_or(|&b| b == 0 || self.states[b as usize] != FRESH)
+                    .is_none_or(|e| e.is_hole() || self.states[e.block as usize] != FRESH)
             })
             .count();
         let new_entries = (last + 1).saturating_sub(blocks.len());
-        self.ensure_room(4 * new_entries, copies as u64)?;
+        self.ensure_room(8 * new_entries, copies as u64)?;
         let (size, mut blocks) = self.take_blocks(id);
         if blocks.len() <= last {
-            blocks.resize(last + 1, 0);
+            blocks.resize(last + 1, Extent::HOLE);
         }
         let mut result = Ok(());
         for (index, slot) in blocks.iter_mut().enumerate().take(last + 1).skip(first) {
@@ -930,23 +990,26 @@ impl<D: BlockDevice> Volume<D> {
             let from = offset.max(block_start);
             let to = end.min(block_start + BLOCK_SIZE as u64);
             let old = *slot;
-            let mut buffer: Box<BlockBuf> = match old {
-                0 => Box::new([0u8; BLOCK_SIZE]),
-                block => match self.read_cached(block) {
+            let mut buffer: Box<BlockBuf> = if old.is_hole() {
+                Box::new([0u8; BLOCK_SIZE])
+            } else {
+                match self.read_cached(old) {
                     Ok(data) => Box::new(*data),
                     Err(error) => {
                         result = Err(error);
                         break;
                     }
-                },
+                }
             };
             buffer[(from - block_start) as usize..(to - block_start) as usize]
                 .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
-            if old != 0 && self.states[old as usize] == FRESH {
-                if let Err(error) = self.write_cached(old, buffer) {
+            let crc = crc32c(&buffer[..]);
+            if !old.is_hole() && self.states[old.block as usize] == FRESH {
+                if let Err(error) = self.write_cached(old.block, buffer) {
                     result = Err(error);
                     break;
                 }
+                slot.crc = crc;
             } else {
                 let new = self.allocate_block().expect("room ensured");
                 if let Err(error) = self.write_cached(new, buffer) {
@@ -954,9 +1017,9 @@ impl<D: BlockDevice> Volume<D> {
                     result = Err(error);
                     break;
                 }
-                *slot = new;
-                if old != 0 {
-                    self.release_block(old);
+                *slot = Extent { block: new, crc };
+                if !old.is_hole() {
+                    self.release_block(old.block);
                 }
             }
         }
@@ -964,9 +1027,9 @@ impl<D: BlockDevice> Volume<D> {
         // old size are dropped so size and block list always agree.
         let new_size = if result.is_ok() { size.max(end) } else { size };
         let keep = new_size.div_ceil(BLOCK_SIZE as u64) as usize;
-        for block in blocks.drain(keep.min(blocks.len())..) {
-            if block != 0 {
-                self.release_block(block);
+        for extent in blocks.drain(keep.min(blocks.len())..) {
+            if !extent.is_hole() {
+                self.release_block(extent.block);
             }
         }
         self.put_blocks(id, new_size, blocks);
@@ -1006,18 +1069,18 @@ impl<D: BlockDevice> Volume<D> {
                 let size = *size;
                 let count = new_size.div_ceil(BLOCK_SIZE as u64) as usize;
                 if count > blocks.len() {
-                    self.ensure_room(4 * (count - blocks.len()), 0)?;
+                    self.ensure_room(8 * (count - blocks.len()), 0)?;
                 }
                 if new_size > size {
                     self.zero_tail(id, size, new_size)?;
                 }
                 let (_, mut blocks) = self.take_blocks(id);
-                for block in blocks.drain(count.min(blocks.len())..) {
-                    if block != 0 {
-                        self.release_block(block);
+                for extent in blocks.drain(count.min(blocks.len())..) {
+                    if !extent.is_hole() {
+                        self.release_block(extent.block);
                     }
                 }
-                blocks.resize(count, 0);
+                blocks.resize(count, Extent::HOLE);
                 self.put_blocks(id, new_size, blocks);
                 self.dirty = true;
                 Ok(())
@@ -1074,7 +1137,7 @@ impl<D: BlockDevice> Volume<D> {
                 continue;
             };
             match &node.content {
-                Content::File(Data::Disk { blocks, .. }) => size += 12 + 4 * blocks.len(),
+                Content::File(Data::Disk { blocks, .. }) => size += 12 + 8 * blocks.len(),
                 Content::File(Data::Memory(_)) => {}
                 Content::Directory(entries) => {
                     size += 4;
@@ -1104,7 +1167,10 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
-    fn read_cached(&mut self, block: u32) -> Result<&BlockBuf, FsError> {
+    /// A data block's contents, verified against its checksum when read
+    /// from the disk (cached blocks were verified or written by us).
+    fn read_cached(&mut self, extent: Extent) -> Result<&BlockBuf, FsError> {
+        let block = extent.block;
         let slot = block as usize % CACHE_SLOTS;
         let hit = matches!(&self.cache[slot], Some((b, _)) if *b == block);
         if !hit {
@@ -1113,6 +1179,9 @@ impl<D: BlockDevice> Volume<D> {
                 .as_mut()
                 .ok_or(FsError::Io)?
                 .read_block(u64::from(block), &mut data)?;
+            if crc32c(&data[..]) != extent.crc {
+                return Err(FsError::Corrupt);
+            }
             self.cache[slot] = Some((block, data));
         }
         Ok(&self.cache[slot].as_ref().expect("filled").1)
@@ -1151,8 +1220,11 @@ impl<D: BlockDevice> Volume<D> {
                     out.extend_from_slice(name.as_bytes());
                     out.extend_from_slice(&size.to_le_bytes());
                     out.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
-                    for block in blocks {
-                        out.extend_from_slice(&block.to_le_bytes());
+                    for extent in blocks {
+                        out.extend_from_slice(&extent.block.to_le_bytes());
+                        if volume.format >= 2 {
+                            out.extend_from_slice(&extent.crc.to_le_bytes());
+                        }
                     }
                 }
                 Content::Directory(entries) => {
@@ -1202,6 +1274,7 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
         let superblock = Superblock {
+            version: self.format,
             total_blocks: self.states.len() as u64,
             generation: self.generation + 1,
             meta_len: meta.len() as u64,
@@ -1678,11 +1751,62 @@ mod tests {
                 let mut mutated = meta.clone();
                 mutated[i] = value;
                 let mut fresh = Volume::empty(Some(MemDisk::new(64)), 64);
-                let _ = fresh.parse(&mutated);
+                let _ = fresh.parse(&mutated, VERSION);
             }
         }
         let mut fresh = Volume::empty(Some(MemDisk::new(64)), 64);
-        assert!(fresh.parse(&meta[..meta.len() - 1]).is_err());
+        assert!(fresh.parse(&meta[..meta.len() - 1], VERSION).is_err());
+    }
+
+    #[test]
+    fn corrupted_data_is_reported_not_returned() {
+        let (mut volume, _) = Volume::open(MemDisk::new(64), true).unwrap();
+        let id = file(&mut volume, ROOT, "f", &[b'x'; 5000]);
+        volume.commit().unwrap();
+        let Some(Content::File(Data::Disk { blocks, .. })) =
+            volume.nodes[id].as_ref().map(|n| &n.content)
+        else {
+            panic!("a disk file");
+        };
+        let second = blocks[1].block as usize;
+        let mut disk = volume.device().unwrap().clone();
+        disk.image[second * BLOCK_SIZE + 10] ^= 0x40; // bit rot in block 1
+        let mut again = reopen(&disk);
+        let id = again.lookup(ROOT, "f").unwrap();
+        let mut buffer = [0u8; 100];
+        assert_eq!(again.read(id, 0, &mut buffer), Ok(100), "block 0 is intact");
+        assert_eq!(again.read(id, 4096, &mut buffer), Err(FsError::Corrupt));
+        assert_eq!(
+            again.write(id, 4100, b"y"),
+            Err(FsError::Corrupt),
+            "a damaged block is not silently rewritten"
+        );
+    }
+
+    #[test]
+    fn format_1_volumes_are_upgraded() {
+        let (mut volume, _) = Volume::open(MemDisk::new(64), true).unwrap();
+        volume.format = 1;
+        volume.dirty = true;
+        volume.commit().unwrap();
+        file(&mut volume, ROOT, "old", &[b'o'; 6000]);
+        volume.commit().unwrap();
+        let disk = volume.device().unwrap().clone();
+        let slot = (volume.generation() % 2) as usize * BLOCK_SIZE;
+        assert_eq!(u32_at(&disk.image[slot..], 8), 1, "written as format 1");
+
+        let mut upgraded = reopen(&disk);
+        assert!(upgraded.is_dirty(), "the upgrade is pending");
+        assert_eq!(
+            snapshot(&mut upgraded),
+            ["/old = ".to_string() + &"o".repeat(6000)]
+        );
+        upgraded.commit().unwrap();
+        let disk = upgraded.device().unwrap().clone();
+        let slot = (upgraded.generation() % 2) as usize * BLOCK_SIZE;
+        assert_eq!(u32_at(&disk.image[slot..], 8), VERSION, "now format 2");
+        let mut again = reopen(&disk);
+        assert_eq!(snapshot(&mut again).len(), 1);
     }
 
     #[test]
@@ -1698,10 +1822,10 @@ mod tests {
             meta.extend_from_slice(&5u32.to_le_bytes());
         }
         let mut volume = Volume::empty(Some(MemDisk::new(64)), 64);
-        assert_eq!(volume.parse(&meta), Err("block referenced twice"));
+        assert_eq!(volume.parse(&meta, 1), Err("block referenced twice"));
         let mut volume = Volume::empty(Some(MemDisk::new(64)), 64);
         let end = meta.len();
         meta[end - 4..].copy_from_slice(&1u32.to_le_bytes());
-        assert_eq!(volume.parse(&meta), Err("block number out of range"));
+        assert_eq!(volume.parse(&meta, 1), Err("block number out of range"));
     }
 }

@@ -128,6 +128,7 @@ fn status(error: FsError) -> Status {
         FsError::InvalidName => Status::InvalidName,
         FsError::NoSpace => Status::NoSpace,
         FsError::Io => Status::IoError,
+        FsError::Corrupt => Status::Corrupt,
     }
 }
 

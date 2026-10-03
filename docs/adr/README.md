@@ -34,5 +34,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0024](0024-tcp-and-dns.md) | TCP and DNS | Accepted |
 | [0025](0025-boot-archive.md) | The boot archive (initrd) | Accepted |
 | [0026](0026-entropy.md) | Kernel entropy and the `RANDOM` system call | Accepted |
+| [0027](0027-oceansfs-data-checksums.md) | OceansFS format 2: data block checksums | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.
