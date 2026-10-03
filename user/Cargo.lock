@@ -486,6 +486,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvme"
+version = "0.1.0"
+dependencies = [
+ "oceans-block-proto",
+ "oceans-nvme",
+ "oceans-rt",
+ "oceans-virtio",
+]
+
+[[package]]
 name = "oceans-abi"
 version = "0.1.0"
 
@@ -538,6 +548,10 @@ dependencies = [
  "oceans-dns",
  "oceans-rt",
 ]
+
+[[package]]
+name = "oceans-nvme"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-rt"

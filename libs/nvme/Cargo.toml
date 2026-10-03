@@ -1,0 +1,9 @@
+[package]
+name = "oceans-nvme"
+description = "NVMe for Oceans: commands, completions, identify data, PRPs and sector translation, without allocation (ADR-0040)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

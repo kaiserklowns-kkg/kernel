@@ -33,8 +33,13 @@
 //!   on handles below it are forwarded there and the replies passed back,
 //!   so every client sees one tree. `SYNC` reaches the mounts too.
 //!
-//! Manifest grants: `log`, `provide = fs`, `use = block` or `use = X as
-//! media` (optional), `use = X as mount:NAME` (any), any `module:NAME`.
+//! - **Other instances** serve other disks (an NVMe disk, ADR-0040): they
+//!   provide another endpoint, which their log lines name, and have no
+//!   `/bin` unless given modules.
+//!
+//! Manifest grants: `log`, `provide = fs` (or another name), `use = block`
+//! or `use = X as media` (optional), `use = X as mount:NAME` (any), any
+//! `module:NAME`.
 
 #![no_std]
 #![no_main]
@@ -46,7 +51,7 @@ mod store;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use oceans_block_proto::{Disk, SECTOR_SIZE};
 use oceans_fat::Fat;
@@ -179,14 +184,36 @@ fn kind(kind: oceans_volume::Kind) -> Kind {
 
 /// Serving removable media (log lines say so).
 static MEDIA: AtomicBool = AtomicBool::new(false);
+/// The endpoint served, when it is not `fs` (log lines name it): another
+/// instance, such as the one on an NVMe disk (ADR-0040).
+static INSTANCE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static INSTANCE_LEN: AtomicUsize = AtomicUsize::new(0);
+
+fn set_instance(name: &'static str) {
+    INSTANCE_LEN.store(name.len(), Ordering::Relaxed);
+    INSTANCE.store(name.as_ptr().cast_mut(), Ordering::Release);
+}
+
+fn instance() -> Option<&'static str> {
+    let base = INSTANCE.load(Ordering::Acquire);
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: set once from a `&'static str` (`set_instance`) before any
+    // reader; the length was stored before the pointer.
+    let bytes = unsafe { core::slice::from_raw_parts(base, INSTANCE_LEN.load(Ordering::Relaxed)) };
+    core::str::from_utf8(bytes).ok()
+}
 
 fn say(log: Handle, args: core::fmt::Arguments<'_>) {
     let mut line = Buffer::<160>::new();
-    let _ = line.write_str(if MEDIA.load(Ordering::Relaxed) {
-        "fs (media): "
+    let _ = if MEDIA.load(Ordering::Relaxed) {
+        line.write_str("fs (media): ")
+    } else if let Some(name) = instance() {
+        write!(line, "fs ({name}): ")
     } else {
-        "fs: "
-    });
+        line.write_str("fs: ")
+    };
     let _ = line.write_fmt(args);
     let _ = oceans_rt::debug_write(log, line.as_str());
 }
@@ -202,6 +229,16 @@ fn main(start: Start) -> i64 {
 
     let media = directory.find("use", "media");
     MEDIA.store(media.is_some(), Ordering::Relaxed);
+    let provided = directory.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (Some(_), Some("provide"), Some(name)) => Some(name),
+            _ => None,
+        }
+    });
+    if let Some(name) = provided.filter(|&name| name != "fs") {
+        set_instance(name);
+    }
     let volume = match media {
         Some(_) => Store::memory(),
         None => Store::Oceans(mount(log, directory.find("use", "block"))),
@@ -233,8 +270,16 @@ fn main(start: Start) -> i64 {
     if fs.media.is_some() {
         say(log, format_args!("ready for removable media"));
     } else {
-        let published = fs.publish_programs(&directory);
-        say(log, format_args!("ready, {published} programs in /bin"));
+        let modules = directory
+            .lines()
+            .filter(|line| line.split_whitespace().nth(1) == Some("module"))
+            .count();
+        if modules > 0 {
+            let published = fs.publish_programs(&directory);
+            say(log, format_args!("ready, {published} programs in /bin"));
+        } else {
+            say(log, format_args!("ready"));
+        }
         for (point, _) in &fs.mounts {
             say(log, format_args!("/{point}: a mounted filesystem"));
         }

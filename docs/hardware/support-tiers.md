@@ -24,8 +24,8 @@ value. Exact chipsets are added only after research and a test device.
 | CPU | x86-64 (TCG/KVM) | x86-64-v2+ Intel/AMD; selected AArch64 |
 | Console | 16550 UART (COM1); UEFI GOP framebuffer text console + PS/2 keyboard (ADR-0029) | USB HID keyboards (xHCI) |
 | Buses | PCI Express via ACPI MCFG/ECAM (ADR-0021) | — |
-| Storage | virtio-blk (modern, `1af4:1042`), userspace driver (ADR-0021) | NVMe |
-| USB | — | xHCI |
+| Storage | virtio-blk (modern, `1af4:1042`), userspace driver (ADR-0021); NVMe (class `010802`), userspace driver (ADR-0040) | NVMe SSDs (validation on real machines pending) |
+| USB | xHCI (QEMU `qemu-xhci`): keyboards, hubs, mass storage (ADR-0032–0034) | xHCI controllers of the target machines |
 | Network | virtio-net (modern, `1af4:1041`), userspace driver (ADR-0023) | Intel and Realtek Ethernet |
 
 Tier 3 explicitly: legacy BIOS boot, 32-bit x86, ISA, IDE/PATA, floppy.

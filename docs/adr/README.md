@@ -47,5 +47,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0037](0037-crash-safe-fat-writes.md) | Crash-safe FAT writes | Accepted |
 | [0038](0038-rename.md) | Rename | Accepted |
 | [0039](0039-copying-with-shared-buffers.md) | Copying with shared buffers | Accepted |
+| [0040](0040-nvme.md) | NVMe | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

@@ -1,0 +1,18 @@
+[package]
+name = "nvme"
+description = "NVMe driver: a userspace service holding one device capability, serving the block protocol (ADR-0040)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "nvme"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-block-proto.workspace = true
+oceans-nvme.workspace = true
+oceans-virtio.workspace = true

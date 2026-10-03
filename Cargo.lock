@@ -528,6 +528,10 @@ name = "oceans-net"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-nvme"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-pci"
 version = "0.1.0"
 

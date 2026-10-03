@@ -31,6 +31,7 @@ const USER_PROGRAMS: &[&str] = &[
     "lspci",
     "disk",
     "virtio-blk",
+    "nvme",
     "virtio-net",
     "xhci",
     "usb-storage",
@@ -60,6 +61,13 @@ const STICK_IMAGE: &str = "build/usb-stick.img";
 const SMOKE_STICK_IMAGE: &str = "build/smoke-stick.img";
 const STICK_SIZE: usize = 4 * 1024 * 1024;
 const STICK_TEXT: &str = "kept on a usb stick";
+/// The NVMe disk (ADR-0040), holding a second Oceans volume at /nvme: `run`
+/// keeps its own, `smoke` starts from a blank one, which the first boot
+/// formats and writes, the second reads back, and the host checks.
+const NVME_IMAGE: &str = "build/nvme.img";
+const SMOKE_NVME_IMAGE: &str = "build/smoke-nvme.img";
+const NVME_SIZE: usize = 16 * 1024 * 1024;
+const NVME_TEXT: &str = "kept on nvme";
 /// A second stick, plugged in during the first smoke boot: FAT16 in an MBR
 /// partition, made by mkfs.fat and mtools (libs/fat/testdata, ADR-0036).
 const SMOKE_FAT_IMAGE: &str = "build/smoke-fat.img";
@@ -155,6 +163,12 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run fetch out use:net -- https://10.0.2.2:$HTTPS/tls.txt\r\n",
     b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.txt\r\n",
     b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.bin /keep/tls.bin\r\n",
+    // NVMe (ADR-0040): the driver serves the block protocol, and a second
+    // fs instance keeps an Oceans volume on it at /nvme.
+    b"run disk out use:nvme -- info\r\n",
+    b"write /nvme/note.txt kept on nvme\r\n",
+    b"cp /keep/big.bin /nvme\r\n",
+    b"ls /nvme\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -247,6 +261,7 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"uname\r\n",
     b"ls /usb\r\n",
     b"cat /usb/note.txt\r\n",
+    b"cat /nvme/note.txt\r\n",
     b"exit\r\n",
 ];
 const REBOOT_EXPECT: &[Expect] = &[
@@ -254,6 +269,8 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  usb/"),
     Expect::Line("  big.bin"),
     Expect::Line("kept on a usb stick"),
+    Expect::Contains("fs (nvmefs): mounted the disk: generation"),
+    Expect::Line("kept on nvme"),
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept across reboots"),
     Expect::Line("  note.txt"),
@@ -322,6 +339,13 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello over https"),
     Expect::Contains("fetch: TLSv1_3 TLS13_"),
     Expect::Contains("fetch: saved 262144 bytes"),
+    Expect::Contains("nvme: QEMU NVMe Ctrl (serial oceans-nvme, firmware "),
+    Expect::Contains("nvme: namespace 1: 32768 sectors (16 MiB), 512-byte blocks"),
+    Expect::Contains("fs (nvmefs): formatted a blank disk: "),
+    Expect::Contains("fs: /nvme: a mounted filesystem"),
+    Expect::Line("disk: 32768 sectors of 512 bytes (16 MiB)"),
+    Expect::Line("  note.txt"),
+    Expect::Line("  big.bin"),
     Expect::Contains("lsusb: requests `use:usb`"),
     Expect::Contains(
         "xhci: port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s), keyboard (console input)",
@@ -678,6 +702,7 @@ const GUEST_MAC: &str = "52:54:00:12:34:56";
 fn qemu_command(
     headless: bool,
     disk: &str,
+    nvme: &str,
     stick: &str,
     spare_stick: Option<&str>,
     forward: Option<(u16, u16)>,
@@ -714,6 +739,11 @@ fn qemu_command(
     .arg("-drive")
     .arg(format!("if=none,id=disk0,format=raw,file={disk}"))
     .args(["-device", "virtio-blk-pci,drive=disk0,disable-legacy=on"])
+    // An NVMe controller (class 010802) with one namespace, driven by the
+    // userspace nvme service (ADR-0040).
+    .arg("-drive")
+    .arg(format!("if=none,id=nvme0,format=raw,file={nvme}"))
+    .args(["-device", "nvme,serial=oceans-nvme,drive=nvme0"])
     // A modern-only virtio NIC (1af4:1041) on QEMU's user network (NAT,
     // DHCP at 10.0.2.2), driven by the userspace virtio-net service.
     .arg("-netdev")
@@ -823,10 +853,12 @@ fn find_firmware(qemu: &Path) -> Result<PathBuf> {
 fn run(profile: Profile) -> Result {
     build_image(profile, None)?;
     prepare_disk(DISK_IMAGE, false)?;
+    prepare_blank(NVME_IMAGE, NVME_SIZE, false)?;
     prepare_stick(STICK_IMAGE, false)?;
     run_command(&mut qemu_command(
         false,
         DISK_IMAGE,
+        NVME_IMAGE,
         STICK_IMAGE,
         None,
         None,
@@ -966,6 +998,45 @@ fn fsck_fat(image: &Path) -> Option<(bool, String)> {
     ))
 }
 
+/// A blank (zero-filled) image of `size` bytes; an existing one is
+/// replaced only if `fresh`.
+fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
+    let path = root().join(path);
+    if path.is_file() && !fresh {
+        return Ok(());
+    }
+    fs::write(&path, vec![0u8; size]).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// The files the guest stored on the NVMe disk, read from its image as an
+/// Oceans volume (ADR-0040).
+fn check_smoke_nvme() -> Result {
+    use oceans_volume::{ROOT, Volume};
+
+    let path = root().join(SMOKE_NVME_IMAGE);
+    let image = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let (mut volume, _) = Volume::open(ImageFile(image), false)
+        .map_err(|e| format!("the NVMe disk does not mount on the host: {e:?}"))?;
+    let mut read = |name: &str| -> std::result::Result<Vec<u8>, String> {
+        let node = volume
+            .lookup(ROOT, name)
+            .map_err(|e| format!("/nvme/{name}: {e:?}"))?;
+        let mut bytes = vec![0u8; volume.size(node).map_err(|e| format!("{e:?}"))? as usize];
+        volume
+            .read(node, 0, &mut bytes)
+            .map_err(|e| format!("reading /nvme/{name}: {e:?}"))?;
+        Ok(bytes)
+    };
+    if read("note.txt")? != format!("{NVME_TEXT}\n").as_bytes() {
+        return Err("/nvme/note.txt does not hold what the shell wrote".into());
+    }
+    if read("big.bin")? != big_body() {
+        return Err("/nvme/big.bin does not match the file copied there".into());
+    }
+    println!("the files written to /nvme are on the NVMe image");
+    Ok(())
+}
+
 /// A blank USB stick image; an existing one is replaced only if `fresh`.
 fn prepare_stick(path: &str, fresh: bool) -> Result {
     let path = root().join(path);
@@ -1014,6 +1085,7 @@ fn check_smoke_stick() -> Result {
 fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
     prepare_disk(SMOKE_DISK_IMAGE, true)?;
+    prepare_blank(SMOKE_NVME_IMAGE, NVME_SIZE, true)?;
     prepare_stick(SMOKE_STICK_IMAGE, true)?;
     prepare_fat_stick()?;
     println!("smoke boot 1 of 2: blank disk");
@@ -1023,6 +1095,7 @@ fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
     smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT)?;
     check_smoke_disk()?;
+    check_smoke_nvme()?;
     check_smoke_stick()?;
     check_smoke_fat()?;
     println!("smoke test passed: kernel came online, files survived a reboot");
@@ -1062,6 +1135,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let mut child = qemu_command(
         true,
         SMOKE_DISK_IMAGE,
+        SMOKE_NVME_IMAGE,
         SMOKE_STICK_IMAGE,
         Some(SMOKE_FAT_IMAGE),
         Some((udp_forward, tcp_forward)),
