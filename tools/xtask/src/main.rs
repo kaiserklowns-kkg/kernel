@@ -155,6 +155,15 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run fetch out use:net -- https://10.0.2.2:$HTTPS/tls.txt\r\n",
     b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.txt\r\n",
     b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.bin /keep/tls.bin\r\n",
+    // IPv6 (ADR-0043): QEMU's user network advertises fec0::/64 from
+    // router fe80::2 and maps fec0::2 to the host's ::1, where xtask runs
+    // IPv6 servers (`$DNS6`, `$TCP6`, `$HTTP6`).
+    b"run ifconfig out use:net\r\n",
+    b"run ping out use:net -- fec0::2 2\r\n",
+    b"run ping out use:net -- fe80::2 1\r\n",
+    b"run host out use:net -- ipv6.oceans.test [fec0::2]:$DNS6\r\n",
+    b"run nc out use:net -- [fec0::2] $TCP6 hello over ipv6\r\n",
+    b"run fetch out use:net -- http://[fec0::2]:$HTTP6/ipv6.txt\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -310,8 +319,30 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("timeout: seq=1"),
     Expect::Line("1 sent, 0 received"),
     Expect::Line("oceans.test has address 10.1.2.3"),
+    Expect::Line("oceans.test has IPv6 address 2001:db8::1:2:3"),
     Expect::Contains("host: missing.test: not found"),
     Expect::Line("hello from the host: hello over tcp"),
+    // IPv6 (ADR-0043): link-local and SLAAC addresses, the router's
+    // advertisement, then ICMPv6, UDP (DNS), TCP and HTTP over IPv6.
+    Expect::Contains("net: IPv6 fe80::"),
+    Expect::Contains("/64 (link-local)"),
+    Expect::Contains("net: IPv6 fec0::"),
+    Expect::Contains("/64 (SLAAC)"),
+    // QEMU advertises its DNS proxy fec0::3 (RDNSS) only when the host
+    // itself has an IPv6 DNS server, so " dns fec0::3" may follow.
+    Expect::Contains("net: IPv6 router fe80::2"),
+    Expect::Contains("      inet6 fe80::"),
+    Expect::Contains("/64 link-local"),
+    Expect::Contains("      inet6 fec0::"),
+    Expect::Contains("/64 autoconf"),
+    Expect::Contains("      inet6 router fe80::2"),
+    Expect::Line("PING fec0::2 with 57 bytes"),
+    Expect::Contains("reply from fec0::2: seq=1"),
+    Expect::Contains("reply from fec0::2: seq=2"),
+    Expect::Contains("reply from fe80::2: seq=1"),
+    Expect::Line("ipv6.oceans.test has IPv6 address 2001:db8::6"),
+    Expect::Line("hello from the host over IPv6: hello over ipv6"),
+    Expect::Line("hello over http on ipv6"),
     Expect::Line("hello over http"),
     Expect::Line("you were redirected"),
     Expect::Line("chunked transfer works"),
@@ -715,13 +746,15 @@ fn qemu_command(
     .arg(format!("if=none,id=disk0,format=raw,file={disk}"))
     .args(["-device", "virtio-blk-pci,drive=disk0,disable-legacy=on"])
     // A modern-only virtio NIC (1af4:1041) on QEMU's user network (NAT,
-    // DHCP at 10.0.2.2), driven by the userspace virtio-net service.
+    // DHCP at 10.0.2.2; IPv6 router advertisements for fec0::/64 from
+    // fe80::2, ADR-0043), driven by the userspace virtio-net service. Both
+    // families are named: naming only one turns the other off.
     .arg("-netdev")
     .arg(match forward {
-        Some((udp, tcp)) => {
-            format!("user,id=net0,hostfwd=udp:127.0.0.1:{udp}-:7,hostfwd=tcp:127.0.0.1:{tcp}-:7")
-        }
-        None => "user,id=net0".to_string(),
+        Some((udp, tcp)) => format!(
+            "user,id=net0,ipv4=on,ipv6=on,hostfwd=udp:127.0.0.1:{udp}-:7,hostfwd=tcp:127.0.0.1:{tcp}-:7"
+        ),
+        None => "user,id=net0,ipv4=on,ipv6=on".to_string(),
     })
     .arg("-device")
     .arg(format!(
@@ -1046,15 +1079,24 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let tcp_forward = free_tcp_port()?;
     let udp_echo = udp_echo_probe(udp_forward);
     let tcp_echo = tcp_echo_probe(tcp_forward);
-    let dns_port = dns_server()?;
-    let tcp_port = tcp_greeter()?;
-    let http_port = http_server()?;
+    let dns_port = dns_server(IPV4_LOOPBACK)?;
+    let tcp_port = tcp_greeter(IPV4_LOOPBACK, "hello from the host")?;
+    let http_port = http_server(IPV4_LOOPBACK)?;
     let https = HttpsServer::start()?;
+    // QEMU's user network connects the guest's IPv6 traffic for fec0::2
+    // to the host's ::1 (ADR-0043).
+    let dns6_port = dns_server(IPV6_LOOPBACK)?;
+    let tcp6_port = tcp_greeter(IPV6_LOOPBACK, "hello from the host over IPv6")?;
+    let http6_port = http_server(IPV6_LOOPBACK)?;
     let expand = |command: &[u8]| -> Vec<u8> {
+        // Longer names first: `$HTTP` is a prefix of `$HTTPS` and `$HTTP6`.
         String::from_utf8_lossy(command)
+            .replace("$DNS6", &dns6_port.to_string())
             .replace("$DNS", &dns_port.to_string())
+            .replace("$TCP6", &tcp6_port.to_string())
             .replace("$TCP", &tcp_port.to_string())
             .replace("$HTTPS", &https.port.to_string())
+            .replace("$HTTP6", &http6_port.to_string())
             .replace("$HTTP", &http_port.to_string())
             .into_bytes()
     };
@@ -1387,11 +1429,49 @@ fn tcp_echo_probe(port: u16) -> mpsc::Receiver<()> {
     done_rx
 }
 
-/// A DNS server on the host for the guest's resolver: `oceans.test` is
-/// 10.1.2.3, every other name does not exist. Returns its UDP port.
-fn dns_server() -> Result<u16> {
+/// Where the host's test servers listen: loopback, which QEMU's user
+/// network reaches as 10.0.2.2 and (IPv6) fec0::2.
+const IPV4_LOOPBACK: &str = "127.0.0.1:0";
+const IPV6_LOOPBACK: &str = "[::1]:0";
+
+/// A name the host's DNS server knows: (name, A, AAAA).
+type DnsName = (&'static str, Option<[u8; 4]>, Option<[u8; 16]>);
+
+const DNS_NAMES: &[DnsName] = &[
+    (
+        "oceans.test",
+        Some([10, 1, 2, 3]),
+        Some([0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 3]),
+    ),
+    (
+        "ipv6.oceans.test",
+        None,
+        Some([0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6]),
+    ),
+];
+
+/// The question name of a DNS query, as text (no compression in
+/// questions; `None` if malformed).
+fn query_name(query: &[u8]) -> Option<String> {
+    let mut at = 12;
+    let mut labels = Vec::new();
+    loop {
+        let len = usize::from(*query.get(at)?);
+        if len == 0 {
+            return Some(labels.join("."));
+        }
+        let label = query.get(at + 1..at + 1 + len)?;
+        labels.push(String::from_utf8_lossy(label).to_ascii_lowercase());
+        at += 1 + len;
+    }
+}
+
+/// A DNS server on the host for the guest's resolver, answering for
+/// [`DNS_NAMES`] (every other name does not exist), listening at `bind`.
+/// Returns its UDP port.
+fn dns_server(bind: &str) -> Result<u16> {
     let socket =
-        UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("cannot start the DNS server: {e}"))?;
+        UdpSocket::bind(bind).map_err(|e| format!("cannot start the DNS server at {bind}: {e}"))?;
     let port = socket.local_addr().map_err(|e| e.to_string())?.port();
     thread::spawn(move || {
         let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
@@ -1403,9 +1483,12 @@ fn dns_server() -> Result<u16> {
                 continue;
             };
             let query = &query[..len];
-            let known = query.get(12..25) == Some(b"\x06oceans\x04test\x00".as_slice());
-            let address = known.then_some([10, 1, 2, 3]);
-            if let Ok(len) = oceans_dns::respond(query, address, &mut answer) {
+            let name = query_name(query);
+            let (a, aaaa) = DNS_NAMES
+                .iter()
+                .find(|(known, _, _)| name.as_deref() == Some(*known))
+                .map_or((None, None), |&(_, a, aaaa)| (a, aaaa));
+            if let Ok(len) = oceans_dns::respond_with(query, a, aaaa, &mut answer) {
                 let _ = socket.send_to(&answer[..len], from);
             }
         }
@@ -1413,11 +1496,11 @@ fn dns_server() -> Result<u16> {
     Ok(port)
 }
 
-/// A TCP server on the host: answers each line with a greeting, then
-/// closes. Returns its port.
-fn tcp_greeter() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("cannot start the TCP server: {e}"))?;
+/// A TCP server on the host, listening at `bind`: answers each line with
+/// `greeting`, then closes. Returns its port.
+fn tcp_greeter(bind: &str, greeting: &'static str) -> Result<u16> {
+    let listener = TcpListener::bind(bind)
+        .map_err(|e| format!("cannot start the TCP server at {bind}: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     thread::spawn(move || {
         for stream in listener.incoming() {
@@ -1433,8 +1516,8 @@ fn tcp_greeter() -> Result<u16> {
                 }
                 line.push(byte[0]);
             }
-            let greeting = format!("hello from the host: {}\n", String::from_utf8_lossy(&line));
-            let _ = stream.write_all(greeting.as_bytes());
+            let reply = format!("{greeting}: {}\n", String::from_utf8_lossy(&line));
+            let _ = stream.write_all(reply.as_bytes());
         }
     });
     Ok(port)
@@ -1543,10 +1626,11 @@ impl Drop for HttpsServer {
     }
 }
 
-/// An HTTP server on the host for the guest's `fetch`. Returns its port.
-fn http_server() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("cannot start the HTTP server: {e}"))?;
+/// An HTTP server on the host for the guest's `fetch`, listening at
+/// `bind`. Returns its port.
+fn http_server(bind: &str) -> Result<u16> {
+    let listener = TcpListener::bind(bind)
+        .map_err(|e| format!("cannot start the HTTP server at {bind}: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     thread::spawn(move || {
         for stream in listener.incoming() {
@@ -1575,6 +1659,7 @@ fn http_server() -> Result<u16> {
             };
             let response = match path.as_str() {
                 "/hello.txt" => fixed("200 OK", b"hello over http\n"),
+                "/ipv6.txt" => fixed("200 OK", b"hello over http on ipv6\n"),
                 "/moved.txt" => fixed("200 OK", b"you were redirected\n"),
                 "/redirect" => b"HTTP/1.1 302 Found\r\nLocation: /moved.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
                 "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),

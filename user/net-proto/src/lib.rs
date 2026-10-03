@@ -12,6 +12,13 @@
 //!   is signalled on every change (connected, data, space, end, error).
 //! - DNS ([`resolve`]): a resolver over a UDP socket, run by the program
 //!   itself (it blocks only its caller), using `oceans-dns`.
+//! - IPv6 (ADR-0043): the operations above that carry addresses have
+//!   IPv6-capable versions (`SEND_TO6`, `RECV6`, `TCP_CONNECT6`, `INFO6`)
+//!   carrying 16-byte addresses, IPv4 as IPv4-mapped (`::ffff:a.b.c.d`).
+//!   The original operations are unchanged, so IPv4-only programs keep
+//!   working. Clients: [`Socket::send_to_ip`], [`Socket::recv_ip`],
+//!   [`TcpStream::connect_ip`], [`info6`], and name resolution choosing
+//!   between families ([`resolve_ip`], [`lookup`], [`connect_host`]).
 //!
 //! Requests are IPC calls; replies carry a [`Status`] label.
 
@@ -19,11 +26,17 @@
 
 use oceans_rt::{Error, Handle, prot, rights};
 
-pub type Ipv4 = [u8; 4];
+pub use oceans_inet::{
+    Colons, Dotted, IpAddr, Ipv4, Ipv6, parse_ip, parse_ipv4, parse_ipv6, split_host_port,
+};
+
 pub type Mac = [u8; 6];
 
 /// Largest datagram payload per call.
 pub const MAX_DATA: usize = 240;
+/// Largest datagram payload per `SEND_TO6` or `RECV6` call (the 16-byte
+/// address leaves less room in a message).
+pub const MAX_DATA6: usize = 236;
 
 /// Reply status (reply label).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +212,21 @@ pub mod op {
     /// On a connection: data = `[offset u32][capacity u32]`: receives into
     /// the shared buffer → `[len u32]`, `Empty` or `Eof`.
     pub const TCP_RECV_BUF: u64 = 15;
+    /// On a socket (ADR-0043): data = `[address 16][port u16][payload]`,
+    /// the address IPv6 or IPv4-mapped; payload at most
+    /// [`MAX_DATA6`](super::MAX_DATA6).
+    pub const SEND_TO6: u64 = 16;
+    /// On a socket: → `[address 16][port u16][flags u8][payload]` (IPv4
+    /// senders IPv4-mapped), or `Empty`. Flag 1: the payload was cut to
+    /// [`MAX_DATA6`](super::MAX_DATA6). (`RECV` skips datagrams from IPv6
+    /// senders, which it cannot express.)
+    pub const RECV6: u64 = 17;
+    /// data = `[address 16][port u16][bits u64]`, handle = a notification
+    /// → a connection handle, connecting in the background.
+    pub const TCP_CONNECT6: u64 = 18;
+    /// On the stack's endpoint: → the IPv6 configuration, see
+    /// [`NetInfo6`](super::NetInfo6).
+    pub const INFO6: u64 = 19;
 }
 
 /// Shared buffer `TcpStream` attaches to each connection (ADR-0030).
@@ -265,28 +293,147 @@ impl NetInfo {
     }
 }
 
-/// Parses dotted-quad text (`10.0.2.2`).
-pub fn parse_ipv4(text: &str) -> Option<Ipv4> {
-    let mut address = [0u8; 4];
-    let mut parts = text.split('.');
-    for byte in &mut address {
-        let part = parts.next()?;
-        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        *byte = part.parse().ok()?;
-    }
-    parts.next().is_none().then_some(address)
+/// Address states in [`NetInfo6`].
+pub mod address_state {
+    pub const TENTATIVE: u8 = 0;
+    pub const PREFERRED: u8 = 1;
+    pub const DEPRECATED: u8 = 2;
+    pub const DUPLICATE: u8 = 3;
 }
 
-/// `a.b.c.d` for display.
-pub struct Dotted(pub Ipv4);
+/// One IPv6 address of the interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Address6 {
+    pub address: Ipv6,
+    pub prefix: u8,
+    /// See [`address_state`].
+    pub state: u8,
+    /// Link-local (else from a router's prefix, SLAAC).
+    pub link_local: bool,
+}
 
-impl core::fmt::Display for Dotted {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let [a, b, c, d] = self.0;
-        write!(f, "{a}.{b}.{c}.{d}")
+impl Address6 {
+    const SIZE: usize = 19;
+
+    /// Usable for traffic (preferred or deprecated).
+    pub fn usable(&self) -> bool {
+        matches!(
+            self.state,
+            address_state::PREFERRED | address_state::DEPRECATED
+        )
     }
+}
+
+/// The stack's IPv6 configuration (`INFO6`): `[flags u8][hop limit u8]
+/// [mtu u16][count u8]`, `count` × `[address 16][prefix u8][state u8]
+/// [link-local u8]`, then `[router 16][dns 16]` (zeros when unset). Flag
+/// 1: IPv6 is enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetInfo6 {
+    pub enabled: bool,
+    pub hop_limit: u8,
+    pub mtu: u16,
+    addresses: [Address6; Self::MAX_ADDRESSES],
+    count: usize,
+    pub router: Option<Ipv6>,
+    pub dns: Option<Ipv6>,
+}
+
+impl NetInfo6 {
+    pub const MAX_ADDRESSES: usize = 8;
+    pub const MAX_SIZE: usize = 5 + Self::MAX_ADDRESSES * Address6::SIZE + 32;
+    const NONE: Address6 = Address6 {
+        address: [0; 16],
+        prefix: 0,
+        state: 0,
+        link_local: false,
+    };
+
+    /// No IPv6.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            hop_limit: 0,
+            mtu: 0,
+            addresses: [Self::NONE; Self::MAX_ADDRESSES],
+            count: 0,
+            router: None,
+            dns: None,
+        }
+    }
+
+    pub fn addresses(&self) -> &[Address6] {
+        &self.addresses[..self.count]
+    }
+
+    /// Adds an address (beyond [`MAX_ADDRESSES`](Self::MAX_ADDRESSES),
+    /// returns false).
+    pub fn push(&mut self, address: Address6) -> bool {
+        if self.count >= Self::MAX_ADDRESSES {
+            return false;
+        }
+        self.addresses[self.count] = address;
+        self.count += 1;
+        true
+    }
+
+    /// Whether IPv6 can reach beyond the link: a usable address that is
+    /// not link-local.
+    pub fn global(&self) -> bool {
+        self.addresses().iter().any(|a| a.usable() && !a.link_local)
+    }
+
+    /// Writes the encoding; returns its length.
+    pub fn encode(&self, out: &mut [u8; Self::MAX_SIZE]) -> usize {
+        out[0] = u8::from(self.enabled);
+        out[1] = self.hop_limit;
+        out[2..4].copy_from_slice(&self.mtu.to_le_bytes());
+        out[4] = self.count as u8;
+        let mut at = 5;
+        for address in self.addresses() {
+            out[at..at + 16].copy_from_slice(&address.address);
+            out[at + 16] = address.prefix;
+            out[at + 17] = address.state;
+            out[at + 18] = u8::from(address.link_local);
+            at += Address6::SIZE;
+        }
+        out[at..at + 16].copy_from_slice(&self.router.unwrap_or([0; 16]));
+        out[at + 16..at + 32].copy_from_slice(&self.dns.unwrap_or([0; 16]));
+        at + 32
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut info = Self::disabled();
+        info.enabled = *bytes.first()? & 1 != 0;
+        info.hop_limit = *bytes.get(1)?;
+        info.mtu = u16::from_le_bytes(bytes.get(2..4)?.try_into().ok()?);
+        let count = usize::from(*bytes.get(4)?);
+        if count > Self::MAX_ADDRESSES {
+            return None;
+        }
+        let mut at = 5;
+        for _ in 0..count {
+            let record = bytes.get(at..at + Address6::SIZE)?;
+            info.push(Address6 {
+                address: record[..16].try_into().ok()?,
+                prefix: record[16],
+                state: record[17],
+                link_local: record[18] != 0,
+            });
+            at += Address6::SIZE;
+        }
+        let set = |address: Ipv6| (address != [0; 16]).then_some(address);
+        info.router = set(bytes.get(at..at + 16)?.try_into().ok()?);
+        info.dns = set(bytes.get(at + 16..at + 32)?.try_into().ok()?);
+        Some(info)
+    }
+}
+
+/// The IPv6 configuration of the stack behind `net`.
+pub fn info6(net: Handle) -> Result<NetInfo6, NetError> {
+    let mut reply = [0u8; NetInfo6::MAX_SIZE];
+    let (len, _) = request(net, op::INFO6, &[], &[], &mut reply, &mut [])?;
+    NetInfo6::decode(&reply[..len]).ok_or(NetError::Status(Status::BadRequest))
 }
 
 /// The configuration of the stack behind `net`.
@@ -300,6 +447,16 @@ pub fn info(net: Handle) -> Result<NetInfo, NetError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Received {
     pub from: Ipv4,
+    /// UDP: source port. Echo: sequence number.
+    pub port: u16,
+    pub len: usize,
+    pub truncated: bool,
+}
+
+/// What a socket received, from either family ([`Socket::recv_ip`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceivedFrom {
+    pub from: IpAddr,
     /// UDP: source port. Echo: sequence number.
     pub port: u16,
     pub len: usize,
@@ -430,6 +587,54 @@ impl Socket {
                     port: u16::from_le_bytes([reply[4], reply[5]]),
                     len: take,
                     truncated: reply[6] & TRUNCATED != 0 || take < payload.len(),
+                }))
+            }
+            Ok(_) => Err(NetError::Status(Status::BadRequest)),
+            Err(NetError::Status(Status::Empty)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Sends to an address of either family (UDP: to `port`; echo: `port`
+    /// ignored). IPv6 payloads are limited to [`MAX_DATA6`].
+    pub fn send_to_ip(&self, address: IpAddr, port: u16, payload: &[u8]) -> Result<(), NetError> {
+        let address = match address {
+            IpAddr::V4(address) => return self.send_to(address, port, payload),
+            IpAddr::V6(address) => address,
+        };
+        if payload.len() > MAX_DATA6 {
+            return Err(NetError::Status(Status::TooLarge));
+        }
+        let mut data = [0u8; 18 + MAX_DATA6];
+        data[..16].copy_from_slice(&address);
+        data[16..18].copy_from_slice(&port.to_le_bytes());
+        data[18..18 + payload.len()].copy_from_slice(payload);
+        request(
+            self.handle,
+            op::SEND_TO6,
+            &data[..18 + payload.len()],
+            &[],
+            &mut [],
+            &mut [],
+        )
+        .map(drop)
+    }
+
+    /// The next received datagram from either family, copied into
+    /// `buffer`, or `None` if nothing is waiting.
+    pub fn recv_ip(&self, buffer: &mut [u8]) -> Result<Option<ReceivedFrom>, NetError> {
+        let mut reply = [0u8; 19 + MAX_DATA6];
+        match request(self.handle, op::RECV6, &[], &[], &mut reply, &mut []) {
+            Ok((len, _)) if len >= 19 => {
+                let payload = &reply[19..len];
+                let take = payload.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&payload[..take]);
+                let address: Ipv6 = reply[..16].try_into().expect("16 bytes");
+                Ok(Some(ReceivedFrom {
+                    from: IpAddr::from_mapped(address),
+                    port: u16::from_le_bytes([reply[16], reply[17]]),
+                    len: take,
+                    truncated: reply[18] & TRUNCATED != 0 || take < payload.len(),
                 }))
             }
             Ok(_) => Err(NetError::Status(Status::BadRequest)),
@@ -611,6 +816,64 @@ impl TcpStream {
         Ok(Self::new(handle, notification, true))
     }
 
+    /// The `TCP_CONNECT6` request for `address:port`.
+    fn connect6_request(address: Ipv6, port: u16, bits: u64) -> [u8; 26] {
+        let mut data = [0u8; 26];
+        data[..16].copy_from_slice(&address);
+        data[16..18].copy_from_slice(&port.to_le_bytes());
+        data[18..].copy_from_slice(&bits.to_le_bytes());
+        data
+    }
+
+    /// Starts connecting to `address:port`, either family; see
+    /// [`wait_connected`](Self::wait_connected).
+    pub fn connect_ip(net: Handle, address: IpAddr, port: u16) -> Result<Self, NetError> {
+        let address = match address {
+            IpAddr::V4(address) => return Self::connect(net, address, port),
+            IpAddr::V6(address) => address,
+        };
+        let data = Self::connect6_request(address, port, READABLE);
+        let (handle, notification) = open_with_notification(net, op::TCP_CONNECT6, &data)?;
+        Ok(Self::new(handle, notification, true))
+    }
+
+    /// Like [`connect_ip`](Self::connect_ip), signalling `bits` on a
+    /// caller's notification (shared, not owned by the result).
+    pub fn connect_ip_on(
+        net: Handle,
+        address: IpAddr,
+        port: u16,
+        notification: Handle,
+        bits: u64,
+    ) -> Result<Self, NetError> {
+        let handle = match address {
+            IpAddr::V4(address) => {
+                let mut data = [0u8; 14];
+                data[..4].copy_from_slice(&address);
+                data[4..6].copy_from_slice(&port.to_le_bytes());
+                data[6..].copy_from_slice(&bits.to_le_bytes());
+                open_shared(net, op::TCP_CONNECT, &data, notification)?
+            }
+            IpAddr::V6(address) => {
+                let data = Self::connect6_request(address, port, bits);
+                open_shared(net, op::TCP_CONNECT6, &data, notification)?
+            }
+        };
+        Ok(Self::new(handle, notification, false))
+    }
+
+    /// Where the connection stands: `Some(Ok)` up, `Some(Err)` failed,
+    /// `None` still connecting.
+    fn progress(&self) -> Option<Result<(), NetError>> {
+        match self.status() {
+            Err(error) => Some(Err(error)),
+            Ok((_, Some(error))) => Some(Err(NetError::Status(error))),
+            Ok((state::ESTABLISHED | state::CLOSE_WAIT, _)) => Some(Ok(())),
+            Ok((state::SYN_SENT | state::SYN_RECEIVED, _)) => None,
+            Ok(_) => Some(Err(NetError::Status(Status::NotConnected))),
+        }
+    }
+
     /// The notification signalled on every change; also usable for timers
     /// (bits other than [`READABLE`] and bit 1).
     pub fn notification(&self) -> Handle {
@@ -627,11 +890,8 @@ impl TcpStream {
 
     /// Waits until the connection is up, or fails.
     pub fn wait_connected(&self, timeout_ms: u64) -> Result<(), NetError> {
-        wait_until(self.notification, timeout_ms, || match self.status()? {
-            (_, Some(error)) => Err(NetError::Status(error)),
-            (state::ESTABLISHED | state::CLOSE_WAIT, _) => Ok(Some(())),
-            (state::SYN_SENT | state::SYN_RECEIVED, _) => Ok(None),
-            _ => Err(NetError::Status(Status::NotConnected)),
+        wait_until(self.notification, timeout_ms, || {
+            self.progress().transpose()
         })
     }
 
@@ -828,13 +1088,14 @@ impl Drop for TcpListener {
     }
 }
 
-/// Why a name did not resolve.
+/// Why a name did not resolve (or, for [`connect_host`], connect).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolveError {
     BadName,
     /// No DNS server is configured.
     NoServer,
     NotFound,
+    /// The name exists but has no address of a usable kind.
     NoAddress,
     /// The server failed.
     Server,
@@ -848,7 +1109,7 @@ impl ResolveError {
             Self::BadName => "not a valid host name",
             Self::NoServer => "no DNS server configured",
             Self::NotFound => "not found",
-            Self::NoAddress => "has no IPv4 address",
+            Self::NoAddress => "has no address",
             Self::Server => "DNS server failure",
             Self::Timeout => "DNS server did not answer",
             Self::Net(error) => error.message(),
@@ -859,56 +1120,266 @@ impl ResolveError {
 const DNS_TRIES: u32 = 3;
 const DNS_TIMEOUT_MS: u64 = 1_500;
 
-/// The address of `name` (a dotted quad is returned as is), asking the
-/// configured DNS server.
-pub fn resolve(net: Handle, name: &str) -> Result<Ipv4, ResolveError> {
-    if let Some(address) = parse_ipv4(name) {
-        return Ok(address);
-    }
-    let info = info(net).map_err(ResolveError::Net)?;
-    if !info.configured || info.dns == [0; 4] {
-        return Err(ResolveError::NoServer);
-    }
-    resolve_via(net, name, info.dns, oceans_dns::PORT)
+/// What the stack can use now, and the DNS server it was given (DHCP's
+/// first, else a router's RDNSS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reach {
+    pub v4: bool,
+    /// A usable IPv6 address beyond the link.
+    pub v6: bool,
+    pub dns: Option<IpAddr>,
 }
 
-/// Like [`resolve`], asking `server:port`.
-pub fn resolve_via(net: Handle, name: &str, server: Ipv4, port: u16) -> Result<Ipv4, ResolveError> {
-    use oceans_dns::{Answer, build_query, parse_response};
+/// Asks the stack what it can reach.
+pub fn reach(net: Handle) -> Result<Reach, NetError> {
+    let info = info(net)?;
+    // A stack without IPv6 support answers INFO6 with BadRequest.
+    let info6 = match info6(net) {
+        Ok(info6) => info6,
+        Err(NetError::Status(Status::BadRequest)) => NetInfo6::disabled(),
+        Err(error) => return Err(error),
+    };
+    let dns4 = (info.configured && info.dns != [0; 4]).then_some(IpAddr::V4(info.dns));
+    Ok(Reach {
+        v4: info.configured,
+        v6: info6.global(),
+        dns: dns4.or(info6.dns.map(IpAddr::V6)),
+    })
+}
+
+/// The addresses a name has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Addresses {
+    pub v4: Option<Ipv4>,
+    pub v6: Option<Ipv6>,
+}
+
+impl Addresses {
+    /// The addresses in the order to try (RFC 6724 §6, reduced to what one
+    /// interface needs): IPv6 first when the stack has a global IPv6
+    /// address, IPv4 first otherwise; a family the stack cannot use last.
+    pub fn ordered(&self, reach: Reach) -> [Option<IpAddr>; 2] {
+        let v4 = self.v4.map(IpAddr::V4);
+        let v6 = self.v6.map(IpAddr::V6);
+        let [first, second] = if reach.v6 { [v6, v4] } else { [v4, v6] };
+        match first {
+            Some(_) => [first, second],
+            None => [second, None],
+        }
+    }
+}
+
+/// One query for `name`'s records of type `R`, retried on silence.
+fn query<R: oceans_dns::Record>(
+    socket: &Socket,
+    server: IpAddr,
+    port: u16,
+    name: &str,
+) -> Result<oceans_dns::Answer<R>, ResolveError> {
+    use oceans_dns::{build_query_for, parse_response_for};
 
     let mut query = [0u8; oceans_dns::MAX_MESSAGE];
     // Unpredictable ids make forged answers much harder (ADR-0026).
     let id = oceans_rt::random_u64() as u16;
-    let len = build_query(id, name, &mut query).map_err(|_| ResolveError::BadName)?;
-    if len > MAX_DATA {
+    let len = build_query_for::<R>(id, name, &mut query).map_err(|_| ResolveError::BadName)?;
+    if len > MAX_DATA6 {
         return Err(ResolveError::BadName);
     }
-    let (socket, _) = Socket::udp(net, 0).map_err(ResolveError::Net)?;
     for _ in 0..DNS_TRIES {
         socket
-            .send_to(server, port, &query[..len])
+            .send_to_ip(server, port, &query[..len])
             .map_err(ResolveError::Net)?;
         let answer = wait_until(socket.notification(), DNS_TIMEOUT_MS, || {
-            let mut response = [0u8; MAX_DATA];
-            while let Some(received) = socket.recv(&mut response)? {
+            let mut response = [0u8; MAX_DATA6];
+            while let Some(received) = socket.recv_ip(&mut response)? {
                 // Only the server's answer to this query counts.
                 if received.from != server || received.port != port {
                     continue;
                 }
-                if let Ok(answer) = parse_response(id, name, &response[..received.len]) {
+                if let Ok(answer) = parse_response_for::<R>(id, name, &response[..received.len]) {
                     return Ok(Some(answer));
                 }
             }
             Ok(None)
         });
         match answer {
-            Ok(Answer::Address(address, _)) => return Ok(address),
-            Ok(Answer::NotFound) => return Err(ResolveError::NotFound),
-            Ok(Answer::NoAddress) => return Err(ResolveError::NoAddress),
-            Ok(Answer::ServerError(_)) => return Err(ResolveError::Server),
+            Ok(answer) => return Ok(answer),
             Err(NetError::Status(Status::TimedOut)) => continue,
             Err(error) => return Err(ResolveError::Net(error)),
         }
     }
     Err(ResolveError::Timeout)
+}
+
+/// What one record type said: an address, or why not.
+fn record<R>(answer: oceans_dns::Answer<R>) -> Result<Option<R>, ResolveError> {
+    use oceans_dns::Answer;
+    match answer {
+        Answer::Address(address, _) => Ok(Some(address)),
+        Answer::NotFound => Err(ResolveError::NotFound),
+        Answer::NoAddress => Ok(None),
+        Answer::ServerError(_) => Err(ResolveError::Server),
+    }
+}
+
+/// `name`'s IPv4 and IPv6 addresses, asking `server:port`: A and AAAA
+/// records as `want` says (`(A, AAAA)`). A failed query does not hide
+/// what the other found.
+pub fn lookup_via(
+    net: Handle,
+    name: &str,
+    server: IpAddr,
+    port: u16,
+    (want_a, want_aaaa): (bool, bool),
+) -> Result<Addresses, ResolveError> {
+    if !oceans_dns::valid_name(name) {
+        return Err(ResolveError::BadName);
+    }
+    let (socket, _) = Socket::udp(net, 0).map_err(ResolveError::Net)?;
+    let a = want_a.then(|| query::<Ipv4>(&socket, server, port, name).and_then(record));
+    let aaaa = want_aaaa.then(|| query::<Ipv6>(&socket, server, port, name).and_then(record));
+    let found = Addresses {
+        v4: a.and_then(|r| r.ok()).flatten(),
+        v6: aaaa.and_then(|r| r.ok()).flatten(),
+    };
+    if found.v4.is_some() || found.v6.is_some() {
+        return Ok(found);
+    }
+    // Nothing: the first failure explains it, else there is no address.
+    match (a, aaaa) {
+        (Some(Err(error)), _) | (_, Some(Err(error))) => Err(error),
+        _ => Err(ResolveError::NoAddress),
+    }
+}
+
+/// `name`'s addresses from the configured DNS server: both kinds.
+pub fn lookup(net: Handle, name: &str) -> Result<Addresses, ResolveError> {
+    let reach = reach(net).map_err(ResolveError::Net)?;
+    let server = reach.dns.ok_or(ResolveError::NoServer)?;
+    lookup_via(net, name, server, oceans_dns::PORT, (true, true))
+}
+
+/// The address of `name` to use (an address literal is returned as is):
+/// asks for the record kinds the stack can use, and picks as
+/// [`Addresses::ordered`] does.
+pub fn resolve_ip(net: Handle, name: &str) -> Result<IpAddr, ResolveError> {
+    if let Some(address) = parse_ip(name) {
+        return Ok(address);
+    }
+    let reach = reach(net).map_err(ResolveError::Net)?;
+    let server = reach.dns.ok_or(ResolveError::NoServer)?;
+    let want = (reach.v4 || !reach.v6, reach.v6);
+    let addresses = lookup_via(net, name, server, oceans_dns::PORT, want)?;
+    addresses.ordered(reach)[0].ok_or(ResolveError::NoAddress)
+}
+
+/// The IPv4 address of `name` (a dotted quad is returned as is), asking
+/// the configured DNS server.
+pub fn resolve(net: Handle, name: &str) -> Result<Ipv4, ResolveError> {
+    if let Some(address) = parse_ipv4(name) {
+        return Ok(address);
+    }
+    let reach = reach(net).map_err(ResolveError::Net)?;
+    let server = reach.dns.ok_or(ResolveError::NoServer)?;
+    let found = lookup_via(net, name, server, oceans_dns::PORT, (true, false))?;
+    found.v4.ok_or(ResolveError::NoAddress)
+}
+
+/// Like [`resolve`], asking `server:port`.
+pub fn resolve_via(net: Handle, name: &str, server: Ipv4, port: u16) -> Result<Ipv4, ResolveError> {
+    let found = lookup_via(net, name, IpAddr::V4(server), port, (true, false))?;
+    found.v4.ok_or(ResolveError::NoAddress)
+}
+
+/// How long the preferred address gets before the other one is tried too
+/// (RFC 8305's connection attempt delay).
+const ATTEMPT_DELAY_MS: u64 = 250;
+/// Notification bit for that delay.
+const ATTEMPT_TIMER: u64 = 1 << 2;
+
+/// Connects to `host:port`: an address literal, or a name whose
+/// addresses (both families) race as RFC 8305 ("Happy Eyeballs")
+/// describes: the preferred one first, the other after
+/// [`ATTEMPT_DELAY_MS`] or as soon as the first fails. The first
+/// connection up wins.
+pub fn connect_host(
+    net: Handle,
+    host: &str,
+    port: u16,
+    timeout_ms: u64,
+) -> Result<TcpStream, ResolveError> {
+    let candidates = match parse_ip(host) {
+        Some(address) => [Some(address), None],
+        None => {
+            let reach = reach(net).map_err(ResolveError::Net)?;
+            let server = reach.dns.ok_or(ResolveError::NoServer)?;
+            let want = (reach.v4 || !reach.v6, reach.v6);
+            lookup_via(net, host, server, oceans_dns::PORT, want)?.ordered(reach)
+        }
+    };
+    let [Some(first), second] = candidates else {
+        return Err(ResolveError::NoAddress);
+    };
+    race(net, first, second, port, timeout_ms).map_err(ResolveError::Net)
+}
+
+fn race(
+    net: Handle,
+    first: IpAddr,
+    mut second: Option<IpAddr>,
+    port: u16,
+    timeout_ms: u64,
+) -> Result<TcpStream, NetError> {
+    let notification = oceans_rt::notification_create().map_err(NetError::Ipc)?;
+    let mut attempts: [Option<TcpStream>; 2] = [None, None];
+    let mut last_error = None;
+    match TcpStream::connect_ip_on(net, first, port, notification, READABLE) {
+        Ok(stream) => attempts[0] = Some(stream),
+        Err(error) => last_error = Some(error),
+    }
+    let started = oceans_rt::clock_ms();
+    if second.is_some() {
+        let _ = oceans_rt::timer_set(notification, ATTEMPT_TIMER, ATTEMPT_DELAY_MS);
+    }
+    let winner = wait_until(notification, timeout_ms, || {
+        for slot in &mut attempts {
+            match slot.as_ref().and_then(TcpStream::progress) {
+                Some(Ok(())) => return Ok(Some(slot.take().expect("checked"))),
+                Some(Err(error)) => {
+                    last_error = Some(error);
+                    *slot = None;
+                }
+                None => {}
+            }
+        }
+        let head_start_over = oceans_rt::clock_ms() - started >= ATTEMPT_DELAY_MS;
+        if let Some(address) = second
+            && (attempts[0].is_none() || head_start_over)
+        {
+            second = None;
+            match TcpStream::connect_ip_on(net, address, port, notification, READABLE) {
+                Ok(stream) => attempts[1] = Some(stream),
+                Err(error) => last_error = Some(error),
+            }
+            // Its first state change signals the notification.
+        }
+        if attempts.iter().all(Option::is_none) && second.is_none() {
+            return Err(last_error.unwrap_or(NetError::Status(Status::NotConnected)));
+        }
+        Ok(None)
+    });
+    let _ = oceans_rt::timer_set(notification, ATTEMPT_TIMER, 0);
+    // Losers are dropped (closing them) before the winner takes over the
+    // notification.
+    drop(attempts);
+    match winner {
+        Ok(mut stream) => {
+            stream.owned = true;
+            Ok(stream)
+        }
+        Err(error) => {
+            let _ = oceans_rt::close(notification);
+            Err(error)
+        }
+    }
 }

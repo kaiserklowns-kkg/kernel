@@ -23,6 +23,7 @@ oceans-net = { path = "../libs/net" }
 oceans-dns = { path = "../libs/dns" }
 oceans-archive = { path = "../libs/archive" }
 oceans-http = { path = "../libs/http" }
+oceans-inet = { path = "../libs/inet" }
 oceans-tls = { path = "../libs/tls" }
 oceans-usb = { path = "../libs/usb" }
 oceans-elf = { path = "../libs/elf" }

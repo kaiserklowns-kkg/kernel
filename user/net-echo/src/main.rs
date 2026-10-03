@@ -1,6 +1,7 @@
 //! net-echo: the echo service (RFC 862) on UDP and TCP port 7, for network
-//! diagnostics (ADR-0023, ADR-0024). Datagrams go back to their sender;
-//! bytes on a connection go back on it until the peer closes.
+//! diagnostics (ADR-0023, ADR-0024), over IPv4 and IPv6 (ADR-0043).
+//! Datagrams go back to their sender; bytes on a connection go back on it
+//! until the peer closes.
 //!
 //! One thread serves everything: every socket signals the same
 //! notification, and each wake-up services them all.
@@ -10,7 +11,7 @@
 #![no_std]
 #![no_main]
 
-use oceans_net_proto::{MAX_DATA, MAX_STREAM, Read, Socket, TcpListener, TcpStream};
+use oceans_net_proto::{MAX_DATA6, MAX_STREAM, Read, Socket, TcpListener, TcpStream};
 use oceans_rt::{Directory, Handle, Start};
 
 oceans_rt::entry!(main);
@@ -96,10 +97,10 @@ fn main(start: Start) -> i64 {
 }
 
 fn serve_udp(udp: &Socket) {
-    let mut buffer = [0u8; MAX_DATA];
-    while let Ok(Some(received)) = udp.recv(&mut buffer) {
+    let mut buffer = [0u8; MAX_DATA6];
+    while let Ok(Some(received)) = udp.recv_ip(&mut buffer) {
         // Cut datagrams are echoed as received: best effort.
-        let _ = udp.send_to(received.from, received.port, &buffer[..received.len]);
+        let _ = udp.send_to_ip(received.from, received.port, &buffer[..received.len]);
     }
 }
 

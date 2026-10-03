@@ -1,6 +1,6 @@
-//! The Oceans network service (ADR-0023, ADR-0024): the IPv4 stack
-//! (`oceans-net`, with TCP) between a network driver and the programs that
-//! use the network.
+//! The Oceans network service (ADR-0023, ADR-0024, ADR-0043): the IPv4
+//! and IPv6 stack (`oceans-net`, with TCP) between a network driver and
+//! the programs that use the network.
 //!
 //! - Toward the driver (`use = netdev`): a session with a shared frame
 //!   buffer. The driver signals when frames arrive; the stack sends with
@@ -12,8 +12,9 @@
 //!   driver's "frames waiting" and the stack's timer (DHCP and ARP
 //!   retransmissions), so a single thread serves everything.
 //!
-//! The address comes from DHCP. Without a driver the service still runs and
-//! reports `NoDevice`.
+//! The IPv4 address comes from DHCP; IPv6 addresses from stateless
+//! autoconfiguration (a link-local one, then one per advertised prefix).
+//! Without a driver the service still runs and reports `NoDevice`.
 
 #![no_std]
 #![no_main]
@@ -23,11 +24,15 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use core::fmt::Write;
 
-use oceans_net::{Config, Dotted, NetError as StackError, Recv, SocketId, Stack, TcpState};
+use alloc::vec::Vec;
+use oceans_net::{
+    AddressOrigin, AddressState, Colons, Config, Dotted, IpAddr, Ipv6, Ipv6Config,
+    NetError as StackError, Recv, SocketId, Stack, TcpState,
+};
 use oceans_net_proto::netdev::{self, BUFFER_SIZE, RX_AREA, TX_AREA};
 use oceans_net_proto::{
-    MAX_DATA, MAX_STREAM, MAX_STREAM_BUFFER, MIN_STREAM_BUFFER, NetInfo, Status, TRUNCATED, op,
-    state,
+    Address6, MAX_DATA, MAX_DATA6, MAX_STREAM, MAX_STREAM_BUFFER, MIN_STREAM_BUFFER, NetInfo,
+    NetInfo6, Status, TRUNCATED, address_state, op, state,
 };
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 
@@ -59,6 +64,16 @@ struct Net {
     clients: BTreeMap<u64, Client>,
     next_badge: u64,
     announced: Option<Config>,
+    /// IPv6 as last logged: usable and duplicate addresses, router, DNS.
+    announced6: Announced6,
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct Announced6 {
+    usable: Vec<Ipv6>,
+    duplicates: Vec<Ipv6>,
+    router: Option<Ipv6>,
+    dns: Option<Ipv6>,
 }
 
 fn say(log: Handle, args: core::fmt::Arguments<'_>) {
@@ -97,6 +112,16 @@ fn main(start: Start) -> i64 {
     // Keys TCP initial sequence numbers (ADR-0024) with kernel randomness
     // (ADR-0026).
     stack.set_secret(oceans_rt::random_u64());
+    if device.is_some() {
+        // IPv6 interface identifiers (RFC 7217, ADR-0043) are keyed per
+        // boot: addresses are stable while the system runs, and do not
+        // follow the machine from boot to boot or network to network.
+        let mut key = [0u8; 16];
+        match oceans_rt::random(&mut key) {
+            Ok(()) => stack.enable_ipv6(key, oceans_rt::clock_ms()),
+            Err(_) => say(log, format_args!("no randomness: IPv6 stays off")),
+        }
+    }
     let mut net = Net {
         log,
         server,
@@ -106,6 +131,7 @@ fn main(start: Start) -> i64 {
         clients: BTreeMap::new(),
         next_badge: 1,
         announced: None,
+        announced6: Announced6::default(),
     };
     net.serve()
 }
@@ -241,7 +267,12 @@ impl Net {
             );
             let opened = matches!(
                 got.label,
-                op::UDP_OPEN | op::PING_OPEN | op::TCP_CONNECT | op::TCP_LISTEN | op::TCP_ACCEPT
+                op::UDP_OPEN
+                    | op::PING_OPEN
+                    | op::TCP_CONNECT
+                    | op::TCP_CONNECT6
+                    | op::TCP_LISTEN
+                    | op::TCP_ACCEPT
             );
             let (status, len) = match result {
                 Ok(len) => (Status::Ok, len),
@@ -297,6 +328,9 @@ impl Net {
             }
             self.announced = config;
         }
+        if let Some(config) = self.stack.ipv6_config() {
+            self.announce6(&config);
+        }
         let now = oceans_rt::clock_ms();
         let delay = match self.stack.next_deadline() {
             Some(deadline) => deadline.saturating_sub(now).max(1),
@@ -305,6 +339,75 @@ impl Net {
         if self.device.is_some() {
             let _ = oceans_rt::timer_set(self.events, TIMER, delay);
         }
+    }
+
+    /// Logs IPv6 addresses as they become usable or turn out duplicate,
+    /// and router or DNS changes.
+    fn announce6(&mut self, config: &Ipv6Config) {
+        let now = Announced6 {
+            usable: config
+                .addresses
+                .iter()
+                .filter(|a| matches!(a.state, AddressState::Preferred | AddressState::Deprecated))
+                .map(|a| a.address)
+                .collect(),
+            duplicates: config
+                .addresses
+                .iter()
+                .filter(|a| a.state == AddressState::Duplicate)
+                .map(|a| a.address)
+                .collect(),
+            router: config.router,
+            dns: config.dns,
+        };
+        if now == self.announced6 {
+            return;
+        }
+        for address in &config.addresses {
+            let known = self.announced6.usable.contains(&address.address)
+                || self.announced6.duplicates.contains(&address.address);
+            if known {
+                continue;
+            }
+            let origin = match address.origin {
+                AddressOrigin::LinkLocal => "link-local",
+                AddressOrigin::Slaac => "SLAAC",
+            };
+            match address.state {
+                AddressState::Preferred | AddressState::Deprecated => say(
+                    self.log,
+                    format_args!(
+                        "IPv6 {}/{} ({origin})",
+                        Colons(address.address),
+                        address.prefix
+                    ),
+                ),
+                AddressState::Duplicate => say(
+                    self.log,
+                    format_args!(
+                        "IPv6 {} is in use by another node: not used",
+                        Colons(address.address)
+                    ),
+                ),
+                AddressState::Tentative => {}
+            }
+        }
+        if (now.router, now.dns) != (self.announced6.router, self.announced6.dns) {
+            let mut line = Buffer::<120>::new();
+            match now.router {
+                Some(router) => {
+                    let _ = write!(line, "router {}", Colons(router));
+                }
+                None => {
+                    let _ = line.write_str("no router");
+                }
+            }
+            if let Some(dns) = now.dns {
+                let _ = write!(line, " dns {}", Colons(dns));
+            }
+            say(self.log, format_args!("IPv6 {}", line.as_str()));
+        }
+        self.announced6 = now;
     }
 
     fn send_frame(&mut self, frame: &[u8]) {
@@ -406,6 +509,78 @@ impl Net {
                 };
                 reply[..NetInfo::SIZE].copy_from_slice(&info.encode());
                 Ok(NetInfo::SIZE)
+            }
+            (op::INFO6, _) => {
+                let mut info = NetInfo6::disabled();
+                if let Some(config) = self.stack.ipv6_config() {
+                    info.enabled = true;
+                    info.hop_limit = config.hop_limit;
+                    info.mtu = config.mtu;
+                    info.router = config.router;
+                    info.dns = config.dns;
+                    for address in &config.addresses {
+                        let state = match address.state {
+                            AddressState::Tentative => address_state::TENTATIVE,
+                            AddressState::Preferred => address_state::PREFERRED,
+                            AddressState::Deprecated => address_state::DEPRECATED,
+                            AddressState::Duplicate => address_state::DUPLICATE,
+                        };
+                        // The stack holds at most as many as fit.
+                        info.push(Address6 {
+                            address: address.address,
+                            prefix: address.prefix,
+                            state,
+                            link_local: address.origin == AddressOrigin::LinkLocal,
+                        });
+                    }
+                }
+                let mut encoded = [0u8; NetInfo6::MAX_SIZE];
+                let len = info.encode(&mut encoded);
+                reply[..len].copy_from_slice(&encoded[..len]);
+                Ok(len)
+            }
+            (op::TCP_CONNECT6, 0) => {
+                if self.device.is_none() {
+                    return Err(Status::NoDevice);
+                }
+                let bits = bits_at_end(data, 26)?;
+                if received.len() != 1 {
+                    return Err(Status::BadRequest);
+                }
+                let address: Ipv6 = data[..16].try_into().expect("16 bytes");
+                let port = u16::from_le_bytes([data[16], data[17]]);
+                let socket = self
+                    .stack
+                    .tcp_connect(IpAddr::from_mapped(address), port, now)
+                    .map_err(status)?;
+                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                Ok(0)
+            }
+            (op::SEND_TO6, badge) if badge != 0 => {
+                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                if data.len() < 18 || data.len() > 18 + MAX_DATA6 {
+                    return Err(Status::BadRequest);
+                }
+                let address: Ipv6 = data[..16].try_into().expect("16 bytes");
+                let port = u16::from_le_bytes([data[16], data[17]]);
+                self.stack
+                    .send_to(socket, IpAddr::from_mapped(address), port, &data[18..], now)
+                    .map_err(status)?;
+                Ok(0)
+            }
+            (op::RECV6, badge) if badge != 0 => {
+                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let datagram = self.stack.recv(socket).ok_or(Status::Empty)?;
+                let take = datagram.data.len().min(MAX_DATA6);
+                reply[..16].copy_from_slice(&datagram.from.to_mapped());
+                reply[16..18].copy_from_slice(&datagram.port.to_le_bytes());
+                reply[18] = if take < datagram.data.len() {
+                    TRUNCATED
+                } else {
+                    0
+                };
+                reply[19..19 + take].copy_from_slice(&datagram.data[..take]);
+                Ok(19 + take)
             }
             (op::UDP_OPEN | op::PING_OPEN, 0) => {
                 if self.device.is_none() {
@@ -561,9 +736,16 @@ impl Net {
             }
             (op::RECV, badge) if badge != 0 => {
                 let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
-                let datagram = self.stack.recv(socket).ok_or(Status::Empty)?;
+                // This (IPv4) form cannot name an IPv6 sender: such
+                // datagrams are skipped (`RECV6` returns them).
+                let (from, datagram) = loop {
+                    let datagram = self.stack.recv(socket).ok_or(Status::Empty)?;
+                    if let IpAddr::V4(from) = datagram.from {
+                        break (from, datagram);
+                    }
+                };
                 let take = datagram.data.len().min(MAX_DATA);
-                reply[..4].copy_from_slice(&datagram.from);
+                reply[..4].copy_from_slice(&from);
                 reply[4..6].copy_from_slice(&datagram.port.to_le_bytes());
                 reply[6] = if take < datagram.data.len() {
                     TRUNCATED

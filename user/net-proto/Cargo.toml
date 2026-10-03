@@ -1,6 +1,6 @@
 [package]
 name = "oceans-net-proto"
-description = "The Oceans network protocols: netdev (driver to stack) and sockets (stack to programs), with client APIs (ADR-0023)"
+description = "The Oceans network protocols: netdev (driver to stack) and sockets (stack to programs), with client APIs (ADR-0023); IPv6 addresses and dual-stack name resolution (ADR-0043)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -9,3 +9,4 @@ rust-version.workspace = true
 [dependencies]
 oceans-rt.workspace = true
 oceans-dns.workspace = true
+oceans-inet.workspace = true

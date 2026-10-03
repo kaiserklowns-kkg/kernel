@@ -1,5 +1,6 @@
-//! DNS messages (RFC 1035), ADR-0024: building A-record queries and
-//! parsing the responses. No allocation, so any program can resolve names.
+//! DNS messages (RFC 1035), ADR-0024: building A-record (and, ADR-0043,
+//! AAAA-record, RFC 3596) queries and parsing the responses. No
+//! allocation, so any program can resolve names.
 //!
 //! A response is untrusted network input. It must match the query's id and
 //! question; every length, label and compression pointer is bounds-checked,
@@ -9,6 +10,7 @@
 #![no_std]
 
 pub type Ipv4 = [u8; 4];
+pub type Ipv6 = [u8; 16];
 
 /// Longest name in text form (without a trailing dot).
 pub const MAX_NAME: usize = 253;
@@ -18,6 +20,7 @@ pub const PORT: u16 = 53;
 
 const TYPE_A: u16 = 1;
 const TYPE_CNAME: u16 = 5;
+const TYPE_AAAA: u16 = 28;
 const CLASS_IN: u16 = 1;
 const HEADER: usize = 12;
 const MAX_POINTERS: usize = 16;
@@ -34,17 +37,40 @@ pub enum DnsError {
     Truncated,
 }
 
-/// What a valid response says about the name.
+/// What a valid response says about the name; `A` is the kind of
+/// address asked for ([`Ipv4`] for A records, [`Ipv6`] for AAAA).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Answer {
+pub enum Answer<A = Ipv4> {
     /// An address, and how long it may be cached (seconds).
-    Address(Ipv4, u32),
+    Address(A, u32),
     /// The name does not exist (NXDOMAIN).
     NotFound,
-    /// The name exists but has no IPv4 address.
+    /// The name exists but has no address of the kind asked for.
     NoAddress,
     /// The server failed or refused (another RCODE).
     ServerError(u8),
+}
+
+/// An address record type: A ([`Ipv4`]) or AAAA ([`Ipv6`]).
+pub trait Record: Copy + Sized {
+    /// The record (and query) type.
+    const TYPE: u16;
+    /// The record's data, if it has the right length.
+    fn from_data(data: &[u8]) -> Option<Self>;
+}
+
+impl Record for Ipv4 {
+    const TYPE: u16 = TYPE_A;
+    fn from_data(data: &[u8]) -> Option<Self> {
+        data.try_into().ok()
+    }
+}
+
+impl Record for Ipv6 {
+    const TYPE: u16 = TYPE_AAAA;
+    fn from_data(data: &[u8]) -> Option<Self> {
+        data.try_into().ok()
+    }
 }
 
 /// Whether `name` is a host name we will ask for: dot-separated labels of
@@ -65,6 +91,12 @@ pub fn valid_name(name: &str) -> bool {
 
 /// Writes a recursive query for `name`'s A record; returns its length.
 pub fn build_query(id: u16, name: &str, out: &mut [u8]) -> Result<usize, DnsError> {
+    build_query_for::<Ipv4>(id, name, out)
+}
+
+/// Writes a recursive query for `name`'s record of type `R` (A or AAAA);
+/// returns its length.
+pub fn build_query_for<R: Record>(id: u16, name: &str, out: &mut [u8]) -> Result<usize, DnsError> {
     if !valid_name(name) {
         return Err(DnsError::BadName);
     }
@@ -80,7 +112,7 @@ pub fn build_query(id: u16, name: &str, out: &mut [u8]) -> Result<usize, DnsErro
         at += 1 + label.len();
     }
     out[at] = 0;
-    out[at + 1..at + 3].copy_from_slice(&TYPE_A.to_be_bytes());
+    out[at + 1..at + 3].copy_from_slice(&R::TYPE.to_be_bytes());
     out[at + 3..at + 5].copy_from_slice(&CLASS_IN.to_be_bytes());
     Ok(len)
 }
@@ -151,8 +183,17 @@ fn name_is(message: &[u8], at: usize, name: &str) -> Result<(bool, usize), DnsEr
     Ok((equal && expected.next().is_none(), end))
 }
 
-/// Parses the response to query `id` for `name`.
+/// Parses the response to query `id` for `name`'s A record.
 pub fn parse_response(id: u16, name: &str, message: &[u8]) -> Result<Answer, DnsError> {
+    parse_response_for::<Ipv4>(id, name, message)
+}
+
+/// Parses the response to query `id` for `name`'s record of type `R`.
+pub fn parse_response_for<R: Record>(
+    id: u16,
+    name: &str,
+    message: &[u8],
+) -> Result<Answer<R>, DnsError> {
     if message.len() < HEADER || be16(message, 0)? != id {
         return Err(DnsError::Malformed);
     }
@@ -169,7 +210,7 @@ pub fn parse_response(id: u16, name: &str, message: &[u8]) -> Result<Answer, Dns
         return Err(DnsError::Malformed);
     }
     let (asked, mut at) = name_is(message, HEADER, name)?;
-    if !asked || be16(message, at)? != TYPE_A || be16(message, at + 2)? != CLASS_IN {
+    if !asked || be16(message, at)? != R::TYPE || be16(message, at + 2)? != CLASS_IN {
         return Err(DnsError::Malformed);
     }
     at += 4;
@@ -178,7 +219,8 @@ pub fn parse_response(id: u16, name: &str, message: &[u8]) -> Result<Answer, Dns
         3 => return Ok(Answer::NotFound),
         code => return Ok(Answer::ServerError(code)),
     }
-    // Answers: follow the CNAME chain from the asked name to an A record.
+    // Answers: follow the CNAME chain from the asked name to an address
+    // record of the asked type.
     let mut owner_offset: Option<usize> = None; // None: the asked name
     let answers = be16(message, 6)?;
     let mut records = [(0usize, 0u16, 0usize, 0u16, 0u32); 16];
@@ -211,15 +253,13 @@ pub fn parse_response(id: u16, name: &str, message: &[u8]) -> Result<Answer, Dns
                 continue;
             }
             match kind {
-                TYPE_A => {
-                    let address = message.get(data..data + 4).ok_or(DnsError::Malformed)?;
-                    if be16(message, data - 2)? != 4 {
-                        return Err(DnsError::Malformed);
-                    }
-                    return Ok(Answer::Address(
-                        [address[0], address[1], address[2], address[3]],
-                        ttl,
-                    ));
+                kind if kind == R::TYPE => {
+                    let length = usize::from(be16(message, data - 2)?);
+                    let bytes = message
+                        .get(data..data + length)
+                        .ok_or(DnsError::Malformed)?;
+                    let address = R::from_data(bytes).ok_or(DnsError::Malformed)?;
+                    return Ok(Answer::Address(address, ttl));
                 }
                 TYPE_CNAME => next = Some(data),
                 _ => {}
@@ -257,29 +297,54 @@ fn same_name(message: &[u8], a: usize, b: usize) -> Result<bool, DnsError> {
 }
 
 /// Answers `query` with `address` (or NXDOMAIN when `None`), for test
-/// servers. Returns the response length.
+/// servers. Returns the response length. Only A queries get the address;
+/// others are answered without records.
 pub fn respond(query: &[u8], address: Option<Ipv4>, out: &mut [u8]) -> Result<usize, DnsError> {
+    respond_with(query, address, None, out)
+}
+
+/// Answers `query` for a name with these addresses, for test servers:
+/// NXDOMAIN if it has neither, else the record of the asked type (A or
+/// AAAA) or, without one, no records. Returns the response length.
+pub fn respond_with(
+    query: &[u8],
+    a: Option<Ipv4>,
+    aaaa: Option<Ipv6>,
+    out: &mut [u8],
+) -> Result<usize, DnsError> {
     if query.len() < HEADER || be16(query, 4)? != 1 {
         return Err(DnsError::Malformed);
     }
-    let question_end = walk_name(query, HEADER, |_| Ok(()))? + 4;
-    let question = query.get(HEADER..question_end).ok_or(DnsError::Malformed)?;
-    let answer_len = if address.is_some() { 16 } else { 0 };
-    let len = HEADER + question.len() + answer_len;
+    let name_end = walk_name(query, HEADER, |_| Ok(()))?;
+    let question = query.get(HEADER..name_end + 4).ok_or(DnsError::Malformed)?;
+    let qtype = be16(query, name_end)?;
+    let mut data = [0u8; 16];
+    let record: Option<&[u8]> = match (qtype, a, aaaa) {
+        (TYPE_A, Some(address), _) => {
+            data[..4].copy_from_slice(&address);
+            Some(&data[..4])
+        }
+        (TYPE_AAAA, _, Some(address)) => {
+            data.copy_from_slice(&address);
+            Some(&data[..])
+        }
+        _ => None,
+    };
+    let len = HEADER + question.len() + record.map_or(0, |r| 12 + r.len());
     let out = out.get_mut(..len).ok_or(DnsError::TooLarge)?;
     out[..2].copy_from_slice(&query[..2]);
-    let rcode = if address.is_some() { 0 } else { 3 };
+    let rcode = if a.is_some() || aaaa.is_some() { 0 } else { 3 };
     out[2..4].copy_from_slice(&(0x8180u16 | rcode).to_be_bytes());
-    out[4..12].copy_from_slice(&[0, 1, 0, u8::from(address.is_some()), 0, 0, 0, 0]);
+    out[4..12].copy_from_slice(&[0, 1, 0, u8::from(record.is_some()), 0, 0, 0, 0]);
     out[HEADER..HEADER + question.len()].copy_from_slice(question);
-    if let Some(address) = address {
+    if let Some(record) = record {
         let at = HEADER + question.len();
         out[at..at + 2].copy_from_slice(&0xc00cu16.to_be_bytes()); // the question's name
-        out[at + 2..at + 4].copy_from_slice(&TYPE_A.to_be_bytes());
+        out[at + 2..at + 4].copy_from_slice(&qtype.to_be_bytes());
         out[at + 4..at + 6].copy_from_slice(&CLASS_IN.to_be_bytes());
         out[at + 6..at + 10].copy_from_slice(&60u32.to_be_bytes());
-        out[at + 10..at + 12].copy_from_slice(&4u16.to_be_bytes());
-        out[at + 12..at + 16].copy_from_slice(&address);
+        out[at + 10..at + 12].copy_from_slice(&(record.len() as u16).to_be_bytes());
+        out[at + 12..].copy_from_slice(record);
     }
     Ok(len)
 }
@@ -385,6 +450,67 @@ mod tests {
             parse_response(0x1234, "oceans.test", &failed),
             Ok(Answer::ServerError(2))
         );
+    }
+
+    #[test]
+    fn aaaa_queries_and_answers() {
+        let mut out = [0u8; MAX_MESSAGE];
+        let len = build_query_for::<Ipv6>(0x4321, "oceans.test", &mut out).unwrap();
+        let q = out[..len].to_vec();
+        assert_eq!(q[len - 4..], [0, 28, 0, 1], "type AAAA, class IN");
+        let v6: Ipv6 = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3];
+        let mut answer = [0u8; MAX_MESSAGE];
+        let len = respond_with(&q, Some([10, 1, 2, 3]), Some(v6), &mut answer).unwrap();
+        assert_eq!(
+            parse_response_for::<Ipv6>(0x4321, "oceans.test", &answer[..len]),
+            Ok(Answer::Address(v6, 60))
+        );
+        // The answer to an AAAA question is not one to an A question.
+        assert_eq!(
+            parse_response(0x4321, "oceans.test", &answer[..len]),
+            Err(DnsError::Malformed)
+        );
+        // A name with only an IPv4 address: no AAAA records.
+        let len = respond_with(&q, Some([10, 1, 2, 3]), None, &mut answer).unwrap();
+        assert_eq!(
+            parse_response_for::<Ipv6>(0x4321, "oceans.test", &answer[..len]),
+            Ok(Answer::NoAddress)
+        );
+        let len = respond_with(&q, None, None, &mut answer).unwrap();
+        assert_eq!(
+            parse_response_for::<Ipv6>(0x4321, "oceans.test", &answer[..len]),
+            Ok(Answer::NotFound)
+        );
+        // An AAAA record of the wrong length is refused.
+        let len = respond_with(&q, None, Some(v6), &mut answer).unwrap();
+        let mut short = answer[..len - 1].to_vec();
+        let at = short.len() - 15 - 2;
+        short[at..at + 2].copy_from_slice(&15u16.to_be_bytes());
+        assert_eq!(
+            parse_response_for::<Ipv6>(0x4321, "oceans.test", &short),
+            Err(DnsError::Malformed)
+        );
+        // An A record (4 bytes) does not pass as AAAA even if typed so.
+        let a_query = query("oceans.test");
+        let len = respond(&a_query, Some([1, 2, 3, 4]), &mut answer).unwrap();
+        let mut retyped = answer[..len].to_vec();
+        // The record is the last 16 bytes: name pointer, then its type.
+        retyped[len - 14..len - 12].copy_from_slice(&28u16.to_be_bytes());
+        let question_type = a_query.len() - 4;
+        retyped[question_type..question_type + 2].copy_from_slice(&28u16.to_be_bytes());
+        assert_eq!(
+            parse_response_for::<Ipv6>(0x1234, "oceans.test", &retyped),
+            Err(DnsError::Malformed)
+        );
+        // Mutations never panic.
+        let good = answer[..len].to_vec();
+        for at in 0..good.len() {
+            for value in [0u8, 4, 16, 28, 0xc0, 0xff] {
+                let mut mutated = good.clone();
+                mutated[at] = value;
+                let _ = parse_response_for::<Ipv6>(0x1234, "oceans.test", &mutated);
+            }
+        }
     }
 
     #[test]

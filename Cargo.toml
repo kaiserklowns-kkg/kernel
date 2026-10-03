@@ -1,10 +1,10 @@
 [workspace]
 exclude = ["user"]
 resolver = "3"
-members = ["kernel", "libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "tools/xtask"]
+members = ["kernel", "libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "tools/xtask"]
 # The kernel only builds for bare-metal targets; host-side `cargo test`
 # and `cargo build` cover the portable crates and tooling.
-default-members = ["libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "tools/xtask"]
+default-members = ["libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,6 +24,7 @@ oceans-fat = { path = "libs/fat" }
 oceans-frame-allocator = { path = "libs/frame-allocator" }
 oceans-heap = { path = "libs/heap" }
 oceans-http = { path = "libs/http" }
+oceans-inet = { path = "libs/inet" }
 oceans-memory-map = { path = "libs/memory-map" }
 oceans-net = { path = "libs/net" }
 oceans-pci = { path = "libs/pci" }

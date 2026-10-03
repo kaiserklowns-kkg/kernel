@@ -1,11 +1,13 @@
-//! `ping ADDRESS [COUNT]`: ICMP echo round trips (needs `use:net`).
+//! `ping HOST [COUNT]`: ICMP echo (or ICMPv6 echo, ADR-0043) round trips
+//! (needs `use:net`). HOST is an IPv4 or IPv6 address (`fec0::2`,
+//! `[fec0::2]`) or a name.
 
 #![no_std]
 #![no_main]
 
 use core::fmt::Write;
 
-use oceans_net_proto::{Dotted, READABLE, Socket, parse_ipv4};
+use oceans_net_proto::{READABLE, Socket, resolve_ip};
 use oceans_rt::Start;
 use utils::{EXIT_FAILED, EXIT_USAGE, console, require};
 
@@ -29,14 +31,21 @@ fn main(start: Start) -> i64 {
     };
     let args = directory.args();
     let mut words = args.split_whitespace();
-    let address = words.next().and_then(parse_ipv4);
+    let host = words.next();
     let count = match words.next() {
         None => Some(3),
         Some(word) => word.parse().ok().filter(|&n| (1..=MAX_COUNT).contains(&n)),
     };
-    let (Some(address), Some(count)) = (address, count) else {
-        let _ = writeln!(out, "usage: ping ADDRESS [COUNT]   (COUNT 1-{MAX_COUNT})");
+    let (Some(host), Some(count)) = (host, count) else {
+        let _ = writeln!(out, "usage: ping HOST [COUNT]   (COUNT 1-{MAX_COUNT})");
         return EXIT_USAGE;
+    };
+    let address = match resolve_ip(net, host) {
+        Ok(address) => address,
+        Err(error) => {
+            let _ = writeln!(out, "ping: {host}: {}", error.message());
+            return EXIT_FAILED;
+        }
     };
     let socket = match Socket::ping(net) {
         Ok(socket) => socket,
@@ -45,11 +54,11 @@ fn main(start: Start) -> i64 {
             return EXIT_FAILED;
         }
     };
-    let _ = writeln!(out, "PING {} with {} bytes", Dotted(address), PAYLOAD.len());
+    let _ = writeln!(out, "PING {address} with {} bytes", PAYLOAD.len());
     let mut received = 0;
     for sequence in 1..=count {
         let sent_at = oceans_rt::clock_ms();
-        if let Err(error) = socket.send_to(address, 0, PAYLOAD) {
+        if let Err(error) = socket.send_to_ip(address, 0, PAYLOAD) {
             let _ = writeln!(out, "ping: {}", error.message());
             return EXIT_FAILED;
         }
@@ -58,13 +67,13 @@ fn main(start: Start) -> i64 {
         'wait: while let Ok(bits) = socket.wait() {
             if bits & READABLE != 0 {
                 let mut buffer = [0u8; 64];
-                while let Ok(Some(reply)) = socket.recv(&mut buffer) {
+                while let Ok(Some(reply)) = socket.recv_ip(&mut buffer) {
                     // Late replies to earlier requests are skipped.
                     if reply.from == address && u32::from(reply.port) == sequence {
                         let _ = writeln!(
                             out,
                             "reply from {}: seq={sequence} time={} ms",
-                            Dotted(reply.from),
+                            reply.from,
                             oceans_rt::clock_ms() - sent_at
                         );
                         answered = true;

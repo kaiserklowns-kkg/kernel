@@ -38,6 +38,9 @@ pub enum HttpError {
 pub struct Url<'a> {
     /// `https://`: the connection must use TLS (ADR-0031).
     pub secure: bool,
+    /// As written: a name, a dotted quad, or an IPv6 address in brackets
+    /// (`[fec0::2]`, RFC 3986 §3.2.2; ADR-0043). See
+    /// [`hostname`](Self::hostname).
     pub host: &'a str,
     pub port: u16,
     /// Path and query, starting with `/`.
@@ -60,14 +63,33 @@ impl<'a> Url<'a> {
         if authority.contains('@') {
             return Err(HttpError::Unsupported); // credentials in URLs
         }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((host, port)) => (host, port.parse().map_err(|_| HttpError::BadUrl)?),
-            None => (authority, default_port(secure)),
+        let port_of = |text: &str| match text {
+            "" => Ok(default_port(secure)),
+            text => text
+                .strip_prefix(':')
+                .and_then(|p| p.parse().ok())
+                .ok_or(HttpError::BadUrl),
         };
-        let host_ok = !host.is_empty()
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+        let (host, port, host_ok) = if let Some(rest) = authority.strip_prefix('[') {
+            // An IPv6 literal: the brackets stay part of the host.
+            let (inner, after) = rest.split_once(']').ok_or(HttpError::BadUrl)?;
+            let host = &authority[..inner.len() + 2];
+            (
+                host,
+                port_of(after)?,
+                oceans_inet::parse_ipv6(inner).is_some(),
+            )
+        } else {
+            let (host, port) = match authority.rsplit_once(':') {
+                Some((host, port)) => (host, port.parse().map_err(|_| HttpError::BadUrl)?),
+                None => (authority, default_port(secure)),
+            };
+            let host_ok = !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+            (host, port, host_ok)
+        };
         if !host_ok || port == 0 || !printable(target) {
             return Err(HttpError::BadUrl);
         }
@@ -77,6 +99,15 @@ impl<'a> Url<'a> {
             port,
             target,
         })
+    }
+
+    /// The host to resolve or connect to: without an IPv6 literal's
+    /// brackets.
+    pub fn hostname(&self) -> &'a str {
+        self.host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(self.host)
     }
 
     fn scheme(&self) -> &'static [u8] {
@@ -527,6 +558,21 @@ mod tests {
             Url::parse("http://user:pw@host/"),
             Err(HttpError::Unsupported)
         );
+        // IPv6 literals keep their brackets (for Host and redirects).
+        let url = Url::parse("http://[fec0::2]:8080/v6.txt").unwrap();
+        assert_eq!(
+            (url.host, url.hostname(), url.port, url.target),
+            ("[fec0::2]", "fec0::2", 8080, "/v6.txt")
+        );
+        let url = Url::parse("https://[2001:db8::1]").unwrap();
+        assert_eq!(
+            (url.hostname(), url.port, url.target),
+            ("2001:db8::1", 443, "/")
+        );
+        assert_eq!(
+            Url::parse("http://example.com/").unwrap().hostname(),
+            "example.com"
+        );
         for bad in [
             "ftp://x/",
             "http://",
@@ -535,6 +581,12 @@ mod tests {
             "http://ho st/",
             "http://host?q",
             "http://host/a b",
+            "http://[fec0::2/",
+            "http://[fec0::2]8080/",
+            "http://[not-v6]/",
+            "http://[10.0.2.2]/",
+            "http://fec0::2/",
+            "http://[]/",
         ] {
             assert!(Url::parse(bad).is_err(), "{bad}");
         }
@@ -562,6 +614,8 @@ mod tests {
             ("https://example.com/", "Host: example.com\r\n"),
             ("https://example.com:80/", "Host: example.com:80\r\n"),
             ("http://example.com:443/", "Host: example.com:443\r\n"),
+            ("http://[fec0::2]:8080/", "Host: [fec0::2]:8080\r\n"),
+            ("http://[fec0::2]/", "Host: [fec0::2]\r\n"),
         ] {
             let len = get_request(&Url::parse(text).unwrap(), &mut out).unwrap();
             let request = std::str::from_utf8(&out[..len]).unwrap();

@@ -1,5 +1,7 @@
 //! The Oceans network stack core (ADR-0023, ADR-0024): Ethernet II, ARP,
-//! IPv4, ICMP echo, UDP, TCP and a DHCP client.
+//! IPv4, ICMP echo, UDP, TCP and a DHCP client; and IPv6 (ADR-0043) with
+//! ICMPv6, Neighbor Discovery, SLAAC and MLDv2 ([`ipv6`]), UDP and TCP
+//! running over either family.
 //!
 //! A pure state machine with no I/O of its own. The `net` service feeds it
 //! received frames ([`Stack::receive`]) and the time ([`Stack::poll`]), and
@@ -14,6 +16,8 @@
 
 extern crate alloc;
 
+pub mod ipv6;
+mod siphash;
 mod tcp;
 
 use alloc::boxed::Box;
@@ -21,10 +25,14 @@ use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
+pub use ipv6::{
+    Address6, AddressOrigin, AddressState, Ipv6Config, MAX_PING6_PAYLOAD, MAX_UDP6_PAYLOAD,
+    NeighborState,
+};
+pub use oceans_inet::{Colons, Dotted, IpAddr, Ipv4, Ipv6, parse_ip, parse_ipv4, parse_ipv6};
 pub use tcp::{BACKLOG, Recv, TCP_BUFFER, TcpError, TcpState};
 
 pub type Mac = [u8; 6];
-pub type Ipv4 = [u8; 4];
 pub type SocketId = usize;
 
 pub const BROADCAST_MAC: Mac = [0xff; 6];
@@ -101,12 +109,26 @@ pub fn checksum(data: &[u8]) -> u16 {
     checksum_finish(checksum_add(0, data))
 }
 
+fn address_bytes(address: &IpAddr) -> &[u8] {
+    match address {
+        IpAddr::V4(bytes) => bytes,
+        IpAddr::V6(bytes) => bytes,
+    }
+}
+
+/// The partial sum of the pseudo-header upper layers checksum under:
+/// RFC 768/793 for IPv4, RFC 8200 §8.1 for IPv6 (32-bit length, next
+/// header in a 32-bit word; the sums come out the same).
+fn pseudo_sum(src: IpAddr, dst: IpAddr, protocol: u8, len: usize) -> u32 {
+    let mut sum = checksum_add(0, address_bytes(&src));
+    sum = checksum_add(sum, address_bytes(&dst));
+    sum += u32::from(protocol);
+    sum + (len >> 16) as u32 + (len & 0xffff) as u32
+}
+
 /// UDP checksum over the pseudo-header and `segment` (header + data).
-fn udp_checksum(src: Ipv4, dst: Ipv4, segment: &[u8]) -> u16 {
-    let mut sum = checksum_add(0, &src);
-    sum = checksum_add(sum, &dst);
-    sum += u32::from(PROTOCOL_UDP);
-    sum += segment.len() as u32;
+fn udp_checksum(src: IpAddr, dst: IpAddr, segment: &[u8]) -> u16 {
+    let sum = pseudo_sum(src, dst, PROTOCOL_UDP, segment.len());
     match checksum_finish(checksum_add(sum, segment)) {
         0 => 0xffff, // 0 means "no checksum" in UDP
         value => value,
@@ -172,10 +194,10 @@ pub enum NetError {
 }
 
 /// A received datagram: UDP (`port` = source port) or an echo reply
-/// (`port` = sequence number).
+/// (`port` = sequence number), from either family.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Datagram {
-    pub from: Ipv4,
+    pub from: IpAddr,
     pub port: u16,
     pub data: Vec<u8>,
 }
@@ -264,6 +286,8 @@ pub struct Stack {
     /// Keys TCP initial sequence numbers.
     isn_secret: u64,
     stats: Stats,
+    /// IPv6, once [`enable_ipv6`](Self::enable_ipv6) started it.
+    v6: Option<Box<ipv6::V6>>,
 }
 
 impl Stack {
@@ -285,6 +309,7 @@ impl Stack {
             next_ephemeral: *EPHEMERAL_PORTS.start(),
             isn_secret: u64::from_be_bytes([0, 0, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]),
             stats: Stats::default(),
+            v6: None,
         };
         stack.restart_dhcp(0);
         stack
@@ -341,7 +366,11 @@ impl Stack {
             .iter()
             .map(|w| w.last_request + ARP_RETRY_MS)
             .min();
-        [dhcp, arp, self.tcp_deadline()].into_iter().flatten().min()
+        let v6 = self.v6.as_ref().and_then(|v6| v6.deadline());
+        [dhcp, arp, self.tcp_deadline(), v6]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     // ---- Sockets -----------------------------------------------------------
@@ -452,16 +481,21 @@ impl Stack {
         self.sockets.get_mut(id)?.as_mut()?.queue.pop_front()
     }
 
-    /// Sends `data` to `dst`: a UDP datagram to `port`, or an echo request
-    /// (`port` ignored; the sequence number is the socket's next).
+    /// Sends `data` to `dst` (either family): a UDP datagram to `port`, or
+    /// an echo request (`port` ignored; the sequence number is the
+    /// socket's next).
     pub fn send_to(
         &mut self,
         id: SocketId,
-        dst: Ipv4,
+        dst: impl Into<IpAddr>,
         port: u16,
         data: &[u8],
         now: u64,
     ) -> Result<(), NetError> {
+        let dst = match dst.into() {
+            IpAddr::V4(dst) => dst,
+            IpAddr::V6(dst) => return self.send_to6(id, dst, port, data, now),
+        };
         let config = self.config.ok_or(NetError::NotConfigured)?;
         let socket = self
             .sockets
@@ -635,6 +669,7 @@ impl Stack {
     pub fn poll(&mut self, now: u64) {
         self.poll_dhcp(now);
         self.poll_tcp(now);
+        self.poll_v6(now);
         // ARP: retry unanswered requests, then give up on their packets.
         let mut hops: Vec<Ipv4> = Vec::new();
         for waiting in &mut self.waiting {
@@ -906,14 +941,22 @@ impl Stack {
             return;
         }
         let dst: Mac = frame[..6].try_into().expect("6 bytes");
-        if dst != self.mac && dst != BROADCAST_MAC {
+        let multicast = self.v6.as_ref().is_some_and(|v6| v6.wants_mac(&dst));
+        if dst != self.mac && dst != BROADCAST_MAC && !multicast {
             return;
         }
         let src: Mac = frame[6..12].try_into().expect("6 bytes");
+        // Our own frames, looped back by the link: answering them would
+        // make duplicate address detection fail against ourselves.
+        if src == self.mac {
+            self.stats.dropped += 1;
+            return;
+        }
         let payload = &frame[ETH_HEADER..];
         let handled = match be16(frame, 12) {
             ETHERTYPE_ARP => self.on_arp(payload, now),
             ETHERTYPE_IPV4 => self.on_ipv4(src, payload, now),
+            ipv6::ETHERTYPE_IPV6 => self.on_ipv6(payload, now),
             _ => false,
         };
         if !handled {
@@ -982,7 +1025,7 @@ impl Stack {
         match packet[9] {
             PROTOCOL_ICMP => self.on_icmp(src, ours, payload, now),
             PROTOCOL_UDP => self.on_udp(src, dst, ours, &packet[..header_len], payload, now),
-            tcp::PROTOCOL_TCP if ours => self.on_tcp(src, dst, payload, now),
+            tcp::PROTOCOL_TCP if ours => self.on_tcp(src.into(), dst.into(), payload, now),
             _ => false,
         }
     }
@@ -1009,7 +1052,7 @@ impl Stack {
                         self.deliver(
                             id,
                             Datagram {
-                                from: src,
+                                from: src.into(),
                                 port: sequence,
                                 data: message[ICMP_HEADER..].to_vec(),
                             },
@@ -1041,9 +1084,7 @@ impl Stack {
         }
         let segment = &segment[..length];
         if be16(segment, 6) != 0 {
-            let mut sum = checksum_add(0, &src);
-            sum = checksum_add(sum, &dst);
-            sum += u32::from(PROTOCOL_UDP) + length as u32;
+            let sum = pseudo_sum(src.into(), dst.into(), PROTOCOL_UDP, length);
             if checksum_finish(checksum_add(sum, segment)) != 0 {
                 return false;
             }
@@ -1064,7 +1105,7 @@ impl Stack {
                 self.deliver(
                     id,
                     Datagram {
-                        from: src,
+                        from: src.into(),
                         port: src_port,
                         data: data.to_vec(),
                     },
@@ -1088,7 +1129,14 @@ impl Stack {
     }
 }
 
-fn udp_segment(src: Ipv4, dst: Ipv4, src_port: u16, dst_port: u16, data: &[u8]) -> Vec<u8> {
+fn udp_segment(
+    src: impl Into<IpAddr>,
+    dst: impl Into<IpAddr>,
+    src_port: u16,
+    dst_port: u16,
+    data: &[u8],
+) -> Vec<u8> {
+    let (src, dst) = (src.into(), dst.into());
     let length = (UDP_HEADER + data.len()) as u16;
     let mut segment = Vec::with_capacity(usize::from(length));
     segment.extend_from_slice(&src_port.to_be_bytes());
@@ -1112,31 +1160,9 @@ fn icmp_echo(kind: u8, ident: u16, sequence: u16, data: &[u8]) -> Vec<u8> {
     message
 }
 
-/// Parses dotted-quad text (`10.0.2.2`).
-pub fn parse_ipv4(text: &str) -> Option<Ipv4> {
-    let mut address = [0u8; 4];
-    let mut parts = text.split('.');
-    for byte in &mut address {
-        let part = parts.next()?;
-        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        *byte = part.parse().ok()?;
-    }
-    parts.next().is_none().then_some(address)
-}
-
-/// `a.b.c.d` for display.
-pub struct Dotted(pub Ipv4);
-
-impl core::fmt::Display for Dotted {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let [a, b, c, d] = self.0;
-        write!(f, "{a}.{b}.{c}.{d}")
-    }
-}
-
 #[cfg(test)]
 mod tcp_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests6;
