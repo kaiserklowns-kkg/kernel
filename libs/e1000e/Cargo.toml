@@ -1,0 +1,9 @@
+[package]
+name = "oceans-e1000e"
+description = "Intel 82574L (e1000e) Ethernet controller logic: registers, legacy descriptors, ring bookkeeping, NVM and PHY access, without allocation (ADR-0041)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

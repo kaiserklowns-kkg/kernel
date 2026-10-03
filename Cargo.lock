@@ -476,6 +476,10 @@ name = "oceans-dns"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-e1000e"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-elf"
 version = "0.1.0"
 
