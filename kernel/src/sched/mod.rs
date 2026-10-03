@@ -409,6 +409,45 @@ fn on_device_interrupt() {
         scheduler.current_is_idle() && scheduler.queue.has_ready()
     };
     if run_now {
+        preempt_or_defer();
+    }
+}
+
+/// Sections that must not be preempted but must keep interrupts enabled
+/// (console output: receive interrupts must still drain the UART). Nested
+/// counts; single CPU (per-CPU with SMP).
+static PREEMPT_DISABLED: AtomicUsize = AtomicUsize::new(0);
+/// A preemption fell due inside such a section.
+static PREEMPT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// While alive, the current thread is not preempted (interrupts still run).
+/// It must not block.
+pub struct NoPreempt(());
+
+impl NoPreempt {
+    pub fn new() -> Self {
+        PREEMPT_DISABLED.fetch_add(1, Ordering::Acquire);
+        Self(())
+    }
+}
+
+impl Drop for NoPreempt {
+    fn drop(&mut self) {
+        if PREEMPT_DISABLED.fetch_sub(1, Ordering::Release) == 1
+            && PREEMPT_PENDING.swap(false, Ordering::AcqRel)
+        {
+            // Only reached from thread context (interrupt handlers never
+            // hold a NoPreempt across returning).
+            yield_now();
+        }
+    }
+}
+
+/// From interrupt context: switch now, or when the current section ends.
+fn preempt_or_defer() {
+    if PREEMPT_DISABLED.load(Ordering::Acquire) > 0 {
+        PREEMPT_PENDING.store(true, Ordering::Release);
+    } else {
         schedule(Reason::Yield);
     }
 }
@@ -424,7 +463,7 @@ fn on_timer_tick() {
         scheduler.queue.has_ready() && (expired || scheduler.current_is_idle())
     };
     if preempt {
-        schedule(Reason::Yield);
+        preempt_or_defer();
     }
 }
 

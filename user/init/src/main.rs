@@ -37,6 +37,13 @@ const DEFAULT_MAX_RESTARTS: u32 = 5;
 const BACKOFF_BASE_MS: u64 = 100;
 const BACKOFF_MAX_MS: u64 = 2000;
 
+/// Rights handed to services. `DUPLICATE` lets a service (e.g. the shell)
+/// pass narrower copies on to programs it starts; it never widens rights.
+const LOG_RIGHTS: u32 = rights::WRITE | rights::DUPLICATE | rights::TRANSFER;
+const CONSOLE_RIGHTS: u32 = rights::READ | rights::WRITE | rights::DUPLICATE | rights::TRANSFER;
+const USE_RIGHTS: u32 = rights::SEND | rights::DUPLICATE | rights::TRANSFER;
+const MODULE_RIGHTS: u32 = rights::READ | rights::MAP | rights::DUPLICATE | rights::TRANSFER;
+
 /// Exit codes of init itself (only reached in test mode, or on fatal
 /// configuration errors).
 const EXIT_BAD_START: i64 = 2;
@@ -57,6 +64,7 @@ enum Grant {
     Console,
     Provide(&'static str),
     Use(&'static str),
+    Module(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -284,7 +292,10 @@ fn parse(
                 let grant = match (key, value) {
                     ("grant", "log") => Grant::Log,
                     ("grant", "console") => Grant::Console,
-                    ("grant", _) => return error("unknown grant (known: log, console)"),
+                    ("grant", other) => match other.strip_prefix("module:") {
+                        Some(module) if !module.is_empty() => Grant::Module(module),
+                        _ => return error("unknown grant (known: log, console, module:NAME)"),
+                    },
                     ("provide", name) => Grant::Provide(name),
                     (_, name) => Grant::Use(name),
                 };
@@ -363,16 +374,20 @@ impl Init {
             .image
             .and_then(|name| self.module(name))
             .ok_or(Error::InvalidImage)?;
-        let mut handles = [Handle(0); MAX_GRANTS];
+        // The service's capabilities, plus a directory describing them as
+        // the last handle.
+        let mut handles = [Handle(0); MAX_GRANTS + 1];
+        let mut directory = Buffer::<1024>::new();
         let mut count = 0;
         let result = (|| {
             for grant in service.grants.iter().flatten() {
-                handles[count] = match *grant {
-                    Grant::Log => oceans_rt::duplicate(self.log, rights::WRITE | rights::TRANSFER)?,
-                    Grant::Console => oceans_rt::duplicate(
-                        self.console,
-                        rights::READ | rights::WRITE | rights::TRANSFER,
-                    )?,
+                let (handle, kind, name) = match *grant {
+                    Grant::Log => (oceans_rt::duplicate(self.log, LOG_RIGHTS)?, "log", "log"),
+                    Grant::Console => (
+                        oceans_rt::duplicate(self.console, CONSOLE_RIGHTS)?,
+                        "console",
+                        "console",
+                    ),
                     Grant::Provide(name) => {
                         let (server, client) = oceans_rt::endpoint_create()?;
                         if !self.registry.set(name, client) {
@@ -380,15 +395,24 @@ impl Init {
                             let _ = oceans_rt::close(client);
                             return Err(Error::TooLarge);
                         }
-                        server
+                        (server, "provide", name)
                     }
                     Grant::Use(name) => {
                         let client = self.registry.get(name).ok_or(Error::InvalidHandle)?;
-                        oceans_rt::duplicate(client, rights::SEND | rights::TRANSFER)?
+                        (oceans_rt::duplicate(client, USE_RIGHTS)?, "use", name)
+                    }
+                    Grant::Module(name) => {
+                        let module = self.module(name).ok_or(Error::InvalidImage)?;
+                        (oceans_rt::duplicate(module, MODULE_RIGHTS)?, "module", name)
                     }
                 };
+                handles[count] = handle;
+                let _ = writeln!(directory, "{count} {kind} {name}");
                 count += 1;
             }
+            let _ = writeln!(directory, "{count} directory handles");
+            handles[count] = publish(directory.as_bytes())?;
+            count += 1;
             let process =
                 oceans_rt::process_spawn_named(image, 0, &handles[..count], 0, service.name)?;
             oceans_rt::process_watch(process, self.events, 1 << index)?;
@@ -478,4 +502,18 @@ impl Init {
             EXIT_EXPECTATION_FAILED
         }
     }
+}
+
+/// A read-only memory object holding `text`, for handing to a service.
+fn publish(text: &[u8]) -> Result<Handle, Error> {
+    let memory = oceans_rt::memory_create(text.len().max(1) as u64)?;
+    let result = (|| {
+        let page = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)?;
+        // SAFETY: just mapped writable, at least `text.len()` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), page, text.len()) };
+        oceans_rt::memory_unmap(page)?;
+        oceans_rt::duplicate(memory, rights::READ | rights::MAP | rights::TRANSFER)
+    })();
+    let _ = oceans_rt::close(memory);
+    result
 }

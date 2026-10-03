@@ -7,7 +7,7 @@
 //! | 0 | kernel log (`WRITE`, `DUPLICATE`, `TRANSFER`) |
 //! | 1 | boot module table: memory object (`READ`, `MAP`) holding lines `<name> <handle index>` |
 //! | 2 | system console (`READ`, `WRITE`, `DUPLICATE`, `TRANSFER`), ADR-0017 |
-//! | 3… | each boot module as a memory object (`READ`, `MAP`) |
+//! | 3… | each boot module as a memory object (`READ`, `MAP`, `DUPLICATE`, `TRANSFER`) |
 //!
 //! and its argument word: 1 in smoke-test boots (run the test manifest and
 //! report through the exit code), 0 otherwise. Everything else (service
@@ -50,7 +50,8 @@ fn read_only(bytes: &[u8]) -> Option<Capability> {
     object.write(0, bytes).ok()?;
     Some(Capability::new(
         KernelObject::Memory(object),
-        Rights::READ | Rights::MAP,
+        // DUPLICATE + TRANSFER: init hands read-only copies to services.
+        Rights::READ | Rights::MAP | Rights::DUPLICATE | Rights::TRANSFER,
     ))
 }
 

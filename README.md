@@ -17,7 +17,7 @@ controlled set of modern hardware instead of maximum compatibility.
 | 0 — Architecture | ADRs, system architecture, repo layout | **In progress** — see [docs/adr](docs/adr) |
 | 1 — Boot | Boot in QEMU, `OCEANS KERNEL ONLINE` | **Done** — `cargo xtask smoke` passes |
 | 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **Done** — ADRs 0008–0014; exit criterion (isolated processes exchanging IPC) passes in `cargo xtask smoke` |
-| 3 — Userspace | init, service manager, filesystem, shell | **In progress** — ABI v2 (0015); init + service manager (0016); console input via I/O APIC (0017); next: shell, filesystem |
+| 3 — Userspace | init, service manager, filesystem, shell | **In progress** — ABI v2 (0015); init + service manager (0016); console input (0017); **interactive shell (0018)**; next: filesystem service |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 
@@ -28,7 +28,7 @@ x86_64 UEFI firmware (OVMF/edk2, bundled with QEMU on Windows and macOS).
 
 ```bash
 cargo xtask limine   # fetch the Limine UEFI bootloader (once)
-cargo xtask run      # build and boot in QEMU, serial log on this terminal
+cargo xtask run      # boot in QEMU; ends at the interactive `oceans>` shell
 cargo xtask smoke    # headless boot test used by CI
 cargo xtask check    # fmt + clippy + unit tests
 ```

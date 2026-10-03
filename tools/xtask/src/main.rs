@@ -21,7 +21,7 @@ const USER_PROGRAMS: &[&str] = &[
     "echo-service",
     "hello-client",
     "crasher",
-    "console-test",
+    "shell",
     "ipc-test",
 ];
 /// Service manifests for init: normal boots and smoke tests.
@@ -30,13 +30,60 @@ const SMOKE_MANIFEST: &str = "config/services-smoke.conf";
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const LIMINE_BRANCH: &str = "v9.x-binary";
 const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
-/// The smoke test types `CONSOLE_INPUT` into the serial console when the
-/// kernel log shows `CONSOLE_PROMPT` (user/console-test, ADR-0017).
-const CONSOLE_PROMPT: &str = "console-test: waiting for input";
-/// Enter is a carriage return on a serial terminal; QEMU's Windows stdio
-/// backend drops a lone CR from piped input, so send CR LF (the guest
-/// accepts either as Enter).
-const CONSOLE_INPUT: &[u8] = b"hello oceans\r\n";
+/// The smoke test types `SHELL_SCRIPT` into the serial console when the
+/// kernel log shows `SHELL_READY` (user/shell, ADR-0018), then requires
+/// every `SHELL_EXPECT` line in the console output.
+const SHELL_READY: &str = "shell: ready";
+/// Delay between typed bytes.
+const TYPING_DELAY: Duration = Duration::from_millis(2);
+/// Lines end in CR LF: Enter is CR on a serial terminal, and QEMU's Windows
+/// stdio backend drops a lone CR from piped input. 0x7f is Backspace.
+const SHELL_SCRIPT: &[&[u8]] = &[
+    b"help\r\n",
+    b"echo hello from the shell\r\n",
+    b"echo abc\x7fd\r\n",
+    b"grants\r\n",
+    b"call echo ping\r\n",
+    b"run hello-client log use:echo\r\n",
+    b"run crasher log\r\n",
+    b"run hello-client use:nothing\r\n",
+    b"run nosuch\r\n",
+    b"frobnicate\r\n",
+    b"exit\r\n",
+];
+/// Output the script must produce: `Line` must be a whole console line,
+/// `Contains` a substring of one (never text that is also typed input).
+const SHELL_EXPECT: &[Expect] = &[
+    Expect::Contains("Oceans shell."),
+    Expect::Contains("run PROGRAM [GRANT...]"),
+    Expect::Line("hello from the shell"),
+    Expect::Line("abd"),
+    Expect::Contains("module hello-client"),
+    Expect::Line("PING"),
+    Expect::Line("hello-client exited with 0"),
+    Expect::Contains("crasher was killed by CPU exception 14"),
+    Expect::Contains("run: use:nothing: this shell does not hold it"),
+    Expect::Contains("run: no program named nosuch"),
+    Expect::Contains("frobnicate: unknown command"),
+];
+
+#[derive(Clone, Copy, Debug)]
+enum Expect {
+    Line(&'static str),
+    Contains(&'static str),
+}
+
+impl Expect {
+    fn matches(self, line: &str) -> bool {
+        // The console echoes the prompt and typed input; strip it so only
+        // command output can satisfy a `Line`.
+        let output = line.trim_end_matches('\r');
+        match self {
+            Self::Line(expected) => output == expected,
+            Self::Contains(expected) => output.contains(expected),
+        }
+    }
+}
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
 const QEMU_EXIT_SUCCESS: i32 = 33;
@@ -410,18 +457,25 @@ fn smoke(profile: Profile) -> Result {
 
     let deadline = Instant::now() + SMOKE_TIMEOUT;
     let mut online = false;
+    let mut unmet: Vec<Expect> = SHELL_EXPECT.to_vec();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match lines_rx.recv_timeout(remaining) {
             Ok(line) => {
                 println!("  | {line}");
                 online |= line.contains(ONLINE_BANNER);
-                if line.contains(CONSOLE_PROMPT) {
+                unmet.retain(|expect| !expect.matches(&line));
+                if line.contains(SHELL_READY) {
                     // Typed into the guest's serial port (QEMU -serial stdio).
-                    serial_input
-                        .write_all(CONSOLE_INPUT)
-                        .and_then(|()| serial_input.flush())
-                        .map_err(|e| format!("cannot type into the serial console: {e}"))?;
+                    // Paced like typing: the 16-byte UART FIFO overflows if a
+                    // whole script arrives while the guest is busy printing.
+                    for &byte in SHELL_SCRIPT.iter().flat_map(|command| command.iter()) {
+                        serial_input
+                            .write_all(&[byte])
+                            .and_then(|()| serial_input.flush())
+                            .map_err(|e| format!("cannot type into the serial console: {e}"))?;
+                        thread::sleep(TYPING_DELAY);
+                    }
                 }
             }
             // Reader finished: QEMU closed stdout, i.e. exited.
@@ -438,6 +492,9 @@ fn smoke(profile: Profile) -> Result {
     }
 
     let status = child.wait().map_err(|e| format!("waiting for QEMU: {e}"))?;
+    if !unmet.is_empty() {
+        return Err(format!("shell output missing: {unmet:?}"));
+    }
     match (online, status.code()) {
         (true, Some(QEMU_EXIT_SUCCESS)) => {
             println!("smoke test passed: kernel came online");

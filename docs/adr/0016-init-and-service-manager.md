@@ -105,6 +105,10 @@ Manifests live in `config/`: `services.conf` for normal boots and
 `services-smoke.conf` for smoke tests. `cargo xtask` packages the right one
 as `boot/services.conf`.
 
+> **Extended by [ADR-0018](0018-shell.md):** every service also receives a
+> handle directory as its last handle; `grant = module:NAME` grants a
+> program image; granted capabilities include `DUPLICATE`.
+
 ## Consequences
 
 - Authority in the running system is now visible in one file: what each

@@ -1,13 +1,13 @@
 [package]
-name = "console-test"
-description = "Reads a line from the console in the smoke test (ADR-0017)"
+name = "shell"
+description = "The Oceans shell: a capability-explicit command line (ADR-0018)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "console-test"
+name = "shell"
 test = false
 bench = false
 

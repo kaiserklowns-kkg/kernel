@@ -3,13 +3,6 @@
 version = 4
 
 [[package]]
-name = "console-test"
-version = "0.1.0"
-dependencies = [
- "oceans-rt",
-]
-
-[[package]]
 name = "crasher"
 version = "0.1.0"
 dependencies = [
@@ -53,4 +46,11 @@ name = "oceans-rt"
 version = "0.1.0"
 dependencies = [
  "oceans-abi",
+]
+
+[[package]]
+name = "shell"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
 ]

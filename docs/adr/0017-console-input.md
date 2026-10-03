@@ -84,6 +84,8 @@ read. Readers block FIFO and are woken one per interrupt.
   both checksums; truncation; table length and checksum validation;
   RSDT/XSDT entries; MADT I/O APIC and override parsing (polarity and
   trigger); malformed and zero-length entries.
+- *Superseded by the ADR-0018 shell test, which types a whole script.* The
+  original test:
 - Smoke boot: the `console-test` service (granted `log` and `console`)
   announces it is waiting. `cargo xtask smoke` then **types
   `hello oceans⏎` into QEMU's serial input**. The service echoes the bytes,

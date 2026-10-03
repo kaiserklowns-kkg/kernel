@@ -8,7 +8,7 @@ use core::fmt::{self, Write};
 
 use spin::Mutex;
 
-use crate::arch;
+use crate::{arch, sched};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
@@ -33,6 +33,11 @@ impl Level {
 const MAX_LEVEL: Level = Level::Debug;
 
 /// Serialises whole lines so concurrent writers never interleave.
+///
+/// Held with **preemption** disabled but interrupts enabled: serial output
+/// is slow, and the UART receive interrupt must keep draining input while
+/// it runs (ADR-0018). No interrupt handler takes this lock, and holders
+/// never block, so this cannot deadlock.
 static CONSOLE: Mutex<()> = Mutex::new(());
 
 /// Writes one log line, waiting for the console if necessary.
@@ -40,10 +45,17 @@ pub fn write(level: Level, target: &str, args: fmt::Arguments<'_>) {
     if level > MAX_LEVEL {
         return;
     }
-    arch::without_interrupts(|| {
-        let _guard = CONSOLE.lock();
-        emit(level, target, args);
-    });
+    let _no_preempt = sched::NoPreempt::new();
+    let _guard = CONSOLE.lock();
+    emit(level, target, args);
+}
+
+/// Writes raw bytes (user console output) as one unit, never inside a log
+/// line.
+pub fn write_raw(bytes: &[u8]) {
+    let _no_preempt = sched::NoPreempt::new();
+    let _guard = CONSOLE.lock();
+    arch::console_write_bytes(bytes);
 }
 
 /// Writes one log line without ever blocking.
@@ -51,15 +63,6 @@ pub fn write(level: Level, target: &str, args: fmt::Arguments<'_>) {
 /// For panic and fatal-exception paths, where the interrupted code may hold
 /// the console lock. Output may interleave with that writer; losing the
 /// diagnostic would be worse.
-/// Writes raw bytes (user console output) as one unit, never inside a log
-/// line.
-pub fn write_raw(bytes: &[u8]) {
-    arch::without_interrupts(|| {
-        let _guard = CONSOLE.lock();
-        arch::console_write_bytes(bytes);
-    });
-}
-
 pub fn emergency(level: Level, target: &str, args: fmt::Arguments<'_>) {
     arch::without_interrupts(|| {
         let _guard = CONSOLE.try_lock();
