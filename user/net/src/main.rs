@@ -1,5 +1,6 @@
-//! The Oceans network service (ADR-0023): the IPv4 stack (`oceans-net`)
-//! between a network driver and the programs that use the network.
+//! The Oceans network service (ADR-0023, ADR-0024): the IPv4 stack
+//! (`oceans-net`, with TCP) between a network driver and the programs that
+//! use the network.
 //!
 //! - Toward the driver (`use = netdev`): a session with a shared frame
 //!   buffer. The driver signals when frames arrive; the stack sends with
@@ -22,9 +23,9 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use core::fmt::Write;
 
-use oceans_net::{Config, Dotted, NetError as StackError, SocketId, Stack};
+use oceans_net::{Config, Dotted, NetError as StackError, Recv, SocketId, Stack, TcpState};
 use oceans_net_proto::netdev::{self, BUFFER_SIZE, RX_AREA, TX_AREA};
-use oceans_net_proto::{MAX_DATA, NetInfo, Status, TRUNCATED, op};
+use oceans_net_proto::{MAX_DATA, MAX_STREAM, NetInfo, Status, TRUNCATED, op, state};
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 
 oceans_rt::entry!(main);
@@ -87,11 +88,16 @@ fn main(start: Start) -> i64 {
             (None, [0; 6])
         }
     };
+    let mut stack = Stack::new(mac);
+    // Keys TCP initial sequence numbers. The TSC is the best entropy a
+    // process has until the kernel offers a source (ADR-0024).
+    // SAFETY: RDTSC has no side effects and is allowed in user mode.
+    stack.set_secret(unsafe { core::arch::x86_64::_rdtsc() });
     let mut net = Net {
         log,
         server,
         events,
-        stack: Stack::new(mac),
+        stack,
         device,
         clients: BTreeMap::new(),
         next_badge: 1,
@@ -150,7 +156,40 @@ fn status(error: StackError) -> Status {
         StackError::TooLarge => Status::TooLarge,
         StackError::BadSocket => Status::BadRequest,
         StackError::NoBuffers => Status::NoBuffers,
+        StackError::NotConnected => Status::NotConnected,
+        StackError::Closed => Status::Closed,
+        StackError::Refused => Status::Refused,
+        StackError::Reset => Status::Reset,
+        StackError::TimedOut => Status::TimedOut,
     }
+}
+
+fn state_code(state: TcpState) -> u8 {
+    match state {
+        TcpState::Closed => state::CLOSED,
+        TcpState::Listen => state::LISTEN,
+        TcpState::SynSent => state::SYN_SENT,
+        TcpState::SynReceived => state::SYN_RECEIVED,
+        TcpState::Established => state::ESTABLISHED,
+        TcpState::FinWait1 => state::FIN_WAIT_1,
+        TcpState::FinWait2 => state::FIN_WAIT_2,
+        TcpState::CloseWait => state::CLOSE_WAIT,
+        TcpState::Closing => state::CLOSING,
+        TcpState::LastAck => state::LAST_ACK,
+        TcpState::TimeWait => state::TIME_WAIT,
+    }
+}
+
+/// The `[... bits u64]` at the end of an open request.
+fn bits_at_end(data: &[u8], len: usize) -> Result<u64, Status> {
+    if data.len() != len {
+        return Err(Status::BadRequest);
+    }
+    let bits = u64::from_le_bytes(data[len - 8..].try_into().expect("8 bytes"));
+    if bits == 0 {
+        return Err(Status::BadRequest);
+    }
+    Ok(bits)
 }
 
 impl Net {
@@ -175,13 +214,14 @@ impl Net {
             }
             if got.closed {
                 if let Some(client) = self.clients.remove(&got.badge) {
-                    self.stack.close(client.socket);
+                    self.stack.release(client.socket, now);
                     let _ = oceans_rt::close(client.notification);
                 }
                 continue;
             }
             let received = &handles[..got.handles_len];
-            let mut reply = [0u8; 7 + MAX_DATA];
+            // Room for a datagram (7 + MAX_DATA) or a stream read (MAX_STREAM).
+            let mut reply = [0u8; 256];
             let mut reply_handle = None;
             let result = self.handle(
                 got.badge,
@@ -192,7 +232,10 @@ impl Net {
                 &mut reply_handle,
                 now,
             );
-            let opened = matches!(got.label, op::UDP_OPEN | op::PING_OPEN);
+            let opened = matches!(
+                got.label,
+                op::UDP_OPEN | op::PING_OPEN | op::TCP_CONNECT | op::TCP_LISTEN | op::TCP_ACCEPT
+            );
             let (status, len) = match result {
                 Ok(len) => (Status::Ok, len),
                 Err(status) => (status, 0),
@@ -362,12 +405,8 @@ impl Net {
                     return Err(Status::NoDevice);
                 }
                 let udp = label == op::UDP_OPEN;
-                let expected = if udp { 10 } else { 8 };
-                if received.len() != 1 || data.len() != expected {
-                    return Err(Status::BadRequest);
-                }
-                let bits = u64::from_le_bytes(data[expected - 8..].try_into().expect("8 bytes"));
-                if bits == 0 {
+                let bits = bits_at_end(data, if udp { 10 } else { 8 })?;
+                if received.len() != 1 {
                     return Err(Status::BadRequest);
                 }
                 let socket = if udp {
@@ -376,25 +415,82 @@ impl Net {
                     self.stack.ping_open()
                 }
                 .map_err(status)?;
-                let handle = match oceans_rt::endpoint_mint(self.server, self.next_badge) {
-                    Ok(handle) => handle,
-                    Err(_) => {
-                        self.stack.close(socket);
-                        return Err(Status::NoBuffers);
-                    }
-                };
-                self.clients.insert(
-                    self.next_badge,
-                    Client {
-                        socket,
-                        notification: received[0],
-                        bits,
-                    },
-                );
-                self.next_badge += 1;
-                *reply_handle = Some(handle);
+                self.open_client(socket, received[0], bits, reply_handle, now)?;
                 let port = self.stack.local_port(socket).unwrap_or(0);
                 reply[..2].copy_from_slice(&port.to_le_bytes());
+                Ok(2)
+            }
+            (op::TCP_CONNECT, 0) => {
+                if self.device.is_none() {
+                    return Err(Status::NoDevice);
+                }
+                let bits = bits_at_end(data, 14)?;
+                if received.len() != 1 {
+                    return Err(Status::BadRequest);
+                }
+                let address: [u8; 4] = data[..4].try_into().expect("4 bytes");
+                let port = u16::from_le_bytes([data[4], data[5]]);
+                let socket = self.stack.tcp_connect(address, port, now).map_err(status)?;
+                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                Ok(0)
+            }
+            (op::TCP_LISTEN, 0) => {
+                if self.device.is_none() {
+                    return Err(Status::NoDevice);
+                }
+                let bits = bits_at_end(data, 10)?;
+                if received.len() != 1 {
+                    return Err(Status::BadRequest);
+                }
+                let socket = self
+                    .stack
+                    .tcp_listen(u16::from_le_bytes([data[0], data[1]]))
+                    .map_err(status)?;
+                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                Ok(0)
+            }
+            (op::TCP_ACCEPT, badge) if badge != 0 => {
+                let listener = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let bits = bits_at_end(data, 8)?;
+                if received.len() != 1 {
+                    return Err(Status::BadRequest);
+                }
+                let socket = self
+                    .stack
+                    .tcp_accept(listener)
+                    .map_err(status)?
+                    .ok_or(Status::Empty)?;
+                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                Ok(0)
+            }
+            (op::TCP_SEND, badge) if badge != 0 => {
+                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let sent = self.stack.tcp_send(socket, data, now).map_err(status)?;
+                reply[..4].copy_from_slice(&(sent as u32).to_le_bytes());
+                Ok(4)
+            }
+            (op::TCP_RECV, badge) if badge != 0 => {
+                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                match self
+                    .stack
+                    .tcp_recv(socket, &mut reply[..MAX_STREAM], now)
+                    .map_err(status)?
+                {
+                    Recv::Data(len) => Ok(len),
+                    Recv::WouldBlock => Err(Status::Empty),
+                    Recv::Eof => Err(Status::Eof),
+                }
+            }
+            (op::TCP_SHUTDOWN, badge) if badge != 0 => {
+                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                self.stack.tcp_shutdown(socket, now).map_err(status)?;
+                Ok(0)
+            }
+            (op::TCP_STATUS, badge) if badge != 0 => {
+                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let (tcp_state, error) = self.stack.tcp_status(socket).ok_or(Status::BadRequest)?;
+                reply[0] = state_code(tcp_state);
+                reply[1] = error.map_or(0, |e| status(e.into()) as u8);
                 Ok(2)
             }
             (op::SEND_TO, badge) if badge != 0 => {
@@ -425,5 +521,35 @@ impl Net {
             }
             _ => Err(Status::BadRequest),
         }
+    }
+
+    /// Hands out a badged handle for a new socket, signalled through the
+    /// client's notification. On failure the socket is released.
+    fn open_client(
+        &mut self,
+        socket: SocketId,
+        notification: Handle,
+        bits: u64,
+        reply_handle: &mut Option<Handle>,
+        now: u64,
+    ) -> Result<(), Status> {
+        let handle = match oceans_rt::endpoint_mint(self.server, self.next_badge) {
+            Ok(handle) => handle,
+            Err(_) => {
+                self.stack.release(socket, now);
+                return Err(Status::NoBuffers);
+            }
+        };
+        self.clients.insert(
+            self.next_badge,
+            Client {
+                socket,
+                notification,
+                bits,
+            },
+        );
+        self.next_badge += 1;
+        *reply_handle = Some(handle);
+        Ok(())
     }
 }

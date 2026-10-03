@@ -1,5 +1,5 @@
-//! The Oceans network stack core (ADR-0023): Ethernet II, ARP, IPv4, ICMP
-//! echo, UDP and a DHCP client.
+//! The Oceans network stack core (ADR-0023, ADR-0024): Ethernet II, ARP,
+//! IPv4, ICMP echo, UDP, TCP and a DHCP client.
 //!
 //! A pure state machine with no I/O of its own. The `net` service feeds it
 //! received frames ([`Stack::receive`]) and the time ([`Stack::poll`]), and
@@ -14,9 +14,14 @@
 
 extern crate alloc;
 
+mod tcp;
+
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
+
+pub use tcp::{BACKLOG, Recv, TCP_BUFFER, TcpError, TcpState};
 
 pub type Mac = [u8; 6];
 pub type Ipv4 = [u8; 4];
@@ -154,6 +159,16 @@ pub enum NetError {
     BadSocket,
     /// Too many sockets, or the queue toward the network is full.
     NoBuffers,
+    /// TCP: not (or no longer) connected.
+    NotConnected,
+    /// TCP: our side is already shut down.
+    Closed,
+    /// TCP: nothing listens at the destination.
+    Refused,
+    /// TCP: the peer reset the connection.
+    Reset,
+    /// TCP: the peer stopped answering.
+    TimedOut,
 }
 
 /// A received datagram: UDP (`port` = source port) or an echo reply
@@ -170,14 +185,22 @@ pub enum SocketKind {
     Udp,
     /// ICMP echo: requests out, replies with this socket's identifier in.
     Ping,
+    /// A TCP connection.
+    Tcp,
+    /// A TCP listener.
+    Listen,
 }
 
 struct Socket {
     kind: SocketKind,
-    /// UDP: local port. Ping: echo identifier.
+    /// UDP, TCP: local port. Ping: echo identifier.
     port: u16,
     sequence: u16,
     queue: VecDeque<Datagram>,
+    /// TCP: the connection.
+    tcp: Option<Box<tcp::Tcb>>,
+    /// Listener: established connections not yet accepted.
+    backlog: VecDeque<SocketId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +261,8 @@ pub struct Stack {
     ip_id: u16,
     next_ident: u16,
     next_ephemeral: u16,
+    /// Keys TCP initial sequence numbers.
+    isn_secret: u64,
     stats: Stats,
 }
 
@@ -258,6 +283,7 @@ impl Stack {
             ip_id: u16::from_be_bytes([mac[4], mac[5]]),
             next_ident: u16::from_be_bytes([mac[5], mac[3]]) | 1,
             next_ephemeral: *EPHEMERAL_PORTS.start(),
+            isn_secret: u64::from_be_bytes([0, 0, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]),
             stats: Stats::default(),
         };
         stack.restart_dhcp(0);
@@ -315,10 +341,7 @@ impl Stack {
             .iter()
             .map(|w| w.last_request + ARP_RETRY_MS)
             .min();
-        match (dhcp, arp) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [dhcp, arp, self.tcp_deadline()].into_iter().flatten().min()
     }
 
     // ---- Sockets -----------------------------------------------------------
@@ -329,6 +352,8 @@ impl Stack {
             port,
             sequence: 0,
             queue: VecDeque::new(),
+            tcp: None,
+            backlog: VecDeque::new(),
         };
         if let Some(id) = self.sockets.iter().position(Option::is_none) {
             self.sockets[id] = Some(socket);
@@ -398,6 +423,23 @@ impl Stack {
         Some(self.sockets.get(id)?.as_ref()?.port)
     }
 
+    /// The user is done with a socket. UDP and ping sockets go at once;
+    /// TCP connections close gracefully in the background (or are reset
+    /// if data was left unread), listeners reset what was not accepted.
+    pub fn release(&mut self, id: SocketId, now: u64) {
+        match self
+            .sockets
+            .get(id)
+            .and_then(Option::as_ref)
+            .map(|s| s.kind)
+        {
+            Some(SocketKind::Tcp | SocketKind::Listen) => self.tcp_release(id, now),
+            Some(_) => self.close(id),
+            None => {}
+        }
+    }
+
+    /// Frees a UDP or ping socket.
     pub fn close(&mut self, id: SocketId) {
         if let Some(slot) = self.sockets.get_mut(id) {
             *slot = None;
@@ -442,6 +484,7 @@ impl Stack {
                 let message = icmp_echo(ICMP_ECHO_REQUEST, socket.port, socket.sequence, data);
                 self.send_ip(dst, PROTOCOL_ICMP, message, now)
             }
+            SocketKind::Tcp | SocketKind::Listen => Err(NetError::BadSocket),
         }
     }
 
@@ -591,6 +634,7 @@ impl Stack {
     /// (calling more often is harmless).
     pub fn poll(&mut self, now: u64) {
         self.poll_dhcp(now);
+        self.poll_tcp(now);
         // ARP: retry unanswered requests, then give up on their packets.
         let mut hops: Vec<Ipv4> = Vec::new();
         for waiting in &mut self.waiting {
@@ -938,6 +982,7 @@ impl Stack {
         match packet[9] {
             PROTOCOL_ICMP => self.on_icmp(src, ours, payload, now),
             PROTOCOL_UDP => self.on_udp(src, dst, ours, &packet[..header_len], payload, now),
+            tcp::PROTOCOL_TCP if ours => self.on_tcp(src, dst, payload, now),
             _ => false,
         }
     }
@@ -1091,5 +1136,7 @@ impl core::fmt::Display for Dotted {
     }
 }
 
+#[cfg(test)]
+mod tcp_tests;
 #[cfg(test)]
 mod tests;

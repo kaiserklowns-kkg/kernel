@@ -1,0 +1,9 @@
+[package]
+name = "oceans-dns"
+description = "DNS messages for Oceans: A-record queries and validated response parsing, without allocation (ADR-0024)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -57,6 +57,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "net-echo"
+version = "0.1.0"
+dependencies = [
+ "oceans-net-proto",
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-abi"
 version = "0.1.0"
 
@@ -66,6 +74,10 @@ version = "0.1.0"
 dependencies = [
  "oceans-rt",
 ]
+
+[[package]]
+name = "oceans-dns"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-elf"
@@ -90,6 +102,7 @@ version = "0.1.0"
 name = "oceans-net-proto"
 version = "0.1.0"
 dependencies = [
+ "oceans-dns",
  "oceans-rt",
 ]
 
@@ -118,14 +131,6 @@ version = "0.1.0"
 dependencies = [
  "oceans-elf",
  "oceans-fs-proto",
- "oceans-rt",
-]
-
-[[package]]
-name = "udp-echo"
-version = "0.1.0"
-dependencies = [
- "oceans-net-proto",
  "oceans-rt",
 ]
 

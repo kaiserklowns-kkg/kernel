@@ -57,7 +57,8 @@ kept across boots; delete it to start over). File contents are durable once
 the command that wrote them finishes; `sync` forces a commit. Devices:
 `run lspci out devices` (ADR-0021). Network (ADR-0023): QEMU's user
 network gives the guest 10.0.2.15 by DHCP; try `run ifconfig out use:net` and
-`run ping out use:net -- 10.0.2.2`. Quit QEMU with Ctrl+A, X.
+`run ping out use:net -- 10.0.2.2`; TCP and DNS (ADR-0024):
+`run host out use:net -- example.com` and `run nc out use:net -- example.com 80`. Quit QEMU with Ctrl+A, X.
 `cargo xtask smoke` adds `oceans.test=smoke` to the command line: the kernel
 then also runs its self-tests and exits QEMU with the result. Normal boots run
 no tests. Pass `-cpu max` to QEMU to exercise SMEP/SMAP/UMIP and 1 GiB pages.

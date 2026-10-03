@@ -1,4 +1,4 @@
-//! The Oceans network protocols (ADR-0023).
+//! The Oceans network protocols (ADR-0023, ADR-0024).
 //!
 //! - [`netdev`]: a network driver (`virtio-net`) to the stack (`net`).
 //!   Ethernet frames move through a shared buffer; the driver signals the
@@ -8,6 +8,10 @@
 //!   capability; the stack signals the program's notification when it
 //!   becomes readable. Datagram payloads are inline, at most [`MAX_DATA`]
 //!   bytes.
+//! - TCP ([`TcpStream`], [`TcpListener`]): the same model; the notification
+//!   is signalled on every change (connected, data, space, end, error).
+//! - DNS ([`resolve`]): a resolver over a UDP socket, run by the program
+//!   itself (it blocks only its caller), using `oceans-dns`.
 //!
 //! Requests are IPC calls; replies carry a [`Status`] label.
 
@@ -38,6 +42,18 @@ pub enum Status {
     NoBuffers = 7,
     /// No network device.
     NoDevice = 8,
+    /// TCP: nothing listens there.
+    Refused = 9,
+    /// TCP: the peer reset the connection.
+    Reset = 10,
+    /// TCP: the peer stopped answering.
+    TimedOut = 11,
+    /// TCP: not connected.
+    NotConnected = 12,
+    /// TCP: our sending side is shut down.
+    Closed = 13,
+    /// TCP: the peer closed its side; no more data.
+    Eof = 14,
 }
 
 impl Status {
@@ -51,6 +67,12 @@ impl Status {
             6 => Self::Empty,
             7 => Self::NoBuffers,
             8 => Self::NoDevice,
+            9 => Self::Refused,
+            10 => Self::Reset,
+            11 => Self::TimedOut,
+            12 => Self::NotConnected,
+            13 => Self::Closed,
+            14 => Self::Eof,
             _ => Self::BadRequest,
         }
     }
@@ -66,6 +88,12 @@ impl Status {
             Self::Empty => "nothing received",
             Self::NoBuffers => "out of buffers",
             Self::NoDevice => "no network device",
+            Self::Refused => "connection refused",
+            Self::Reset => "connection reset by peer",
+            Self::TimedOut => "timed out",
+            Self::NotConnected => "not connected",
+            Self::Closed => "connection closed",
+            Self::Eof => "end of stream",
         }
     }
 }
@@ -144,6 +172,41 @@ pub mod op {
     /// On a socket: → `[address 4][port u16][flags u8][payload]`, or
     /// `Empty`. Flag 1: the payload was cut to [`MAX_DATA`](super::MAX_DATA).
     pub const RECV: u64 = 5;
+    /// data = `[address 4][port u16][bits u64]`, handle = a notification →
+    /// a connection handle, connecting in the background.
+    pub const TCP_CONNECT: u64 = 6;
+    /// data = `[port u16][bits u64]`, handle = a notification → a listener.
+    pub const TCP_LISTEN: u64 = 7;
+    /// On a listener: data = `[bits u64]`, handle = a notification for the
+    /// new connection → its handle, or `Empty`.
+    pub const TCP_ACCEPT: u64 = 8;
+    /// On a connection: data = bytes → `[accepted u32]` (0: buffer full).
+    pub const TCP_SEND: u64 = 9;
+    /// On a connection: → bytes (at most [`MAX_STREAM`](super::MAX_STREAM)),
+    /// `Empty` (nothing yet) or `Eof`.
+    pub const TCP_RECV: u64 = 10;
+    /// On a connection: no more data from us (FIN after what is queued).
+    pub const TCP_SHUTDOWN: u64 = 11;
+    /// On a connection or listener: → `[state u8][error status u8]`.
+    pub const TCP_STATUS: u64 = 12;
+}
+
+/// Largest TCP payload per send or receive call.
+pub const MAX_STREAM: usize = 248;
+
+/// TCP connection states, as `TCP_STATUS` reports them.
+pub mod state {
+    pub const CLOSED: u8 = 0;
+    pub const LISTEN: u8 = 1;
+    pub const SYN_SENT: u8 = 2;
+    pub const SYN_RECEIVED: u8 = 3;
+    pub const ESTABLISHED: u8 = 4;
+    pub const FIN_WAIT_1: u8 = 5;
+    pub const FIN_WAIT_2: u8 = 6;
+    pub const CLOSE_WAIT: u8 = 7;
+    pub const CLOSING: u8 = 8;
+    pub const LAST_ACK: u8 = 9;
+    pub const TIME_WAIT: u8 = 10;
 }
 
 /// `RECV` flags.
@@ -232,6 +295,8 @@ pub struct Received {
 pub struct Socket {
     handle: Handle,
     notification: Handle,
+    /// The notification is ours to close (not shared with other sockets).
+    owned: bool,
 }
 
 /// Notification bit: the socket is readable.
@@ -267,6 +332,7 @@ impl Socket {
                 Self {
                     handle: handles[0],
                     notification,
+                    owned: true,
                 },
                 u16::from_le_bytes(reply),
             )),
@@ -284,6 +350,25 @@ impl Socket {
     /// A UDP socket on `port` (0: ephemeral); returns it and its port.
     pub fn udp(net: Handle, port: u16) -> Result<(Self, u16), NetError> {
         Self::open(net, op::UDP_OPEN, Some(port))
+    }
+
+    /// A UDP socket that signals `bits` on a notification the caller
+    /// shares among several sockets (and keeps).
+    pub fn udp_on(
+        net: Handle,
+        port: u16,
+        notification: Handle,
+        bits: u64,
+    ) -> Result<Self, NetError> {
+        let mut data = [0u8; 10];
+        data[..2].copy_from_slice(&port.to_le_bytes());
+        data[2..].copy_from_slice(&bits.to_le_bytes());
+        let handle = open_shared(net, op::UDP_OPEN, &data, notification)?;
+        Ok(Self {
+            handle,
+            notification,
+            owned: false,
+        })
     }
 
     /// An ICMP echo socket.
@@ -347,6 +432,387 @@ impl Socket {
 impl Drop for Socket {
     fn drop(&mut self) {
         let _ = oceans_rt::close(self.handle);
-        let _ = oceans_rt::close(self.notification);
+        if self.owned {
+            let _ = oceans_rt::close(self.notification);
+        }
     }
+}
+
+/// Notification bit for timeouts set by these clients.
+const TIMEOUT: u64 = 1 << 1;
+
+/// A notification for a new socket: ours (to wait on) and a `SIGNAL` copy
+/// to hand to the stack.
+fn new_notification() -> Result<(Handle, Handle), NetError> {
+    let notification = oceans_rt::notification_create().map_err(NetError::Ipc)?;
+    match oceans_rt::duplicate(notification, rights::SIGNAL | rights::TRANSFER) {
+        Ok(shared) => Ok((notification, shared)),
+        Err(error) => {
+            let _ = oceans_rt::close(notification);
+            Err(NetError::Ipc(error))
+        }
+    }
+}
+
+/// Opens a socket-like object signalling a caller's notification (shared,
+/// not owned by the result).
+fn open_shared(
+    handle: Handle,
+    op: u64,
+    data: &[u8],
+    notification: Handle,
+) -> Result<Handle, NetError> {
+    let shared = oceans_rt::duplicate(notification, rights::SIGNAL | rights::TRANSFER)
+        .map_err(NetError::Ipc)?;
+    let mut opened = [Handle(0); 1];
+    // Room for replies with data (a UDP open returns its port).
+    let mut reply = [0u8; 8];
+    match request(handle, op, data, &[shared], &mut reply, &mut opened) {
+        Ok((_, 1)) => Ok(opened[0]),
+        Ok(_) => Err(NetError::Status(Status::BadRequest)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Opens a socket-like object: `op` with `data` and a notification.
+fn open_with_notification(
+    handle: Handle,
+    op: u64,
+    data: &[u8],
+) -> Result<(Handle, Handle), NetError> {
+    let (notification, shared) = new_notification()?;
+    let mut opened = [Handle(0); 1];
+    // Room for replies with data (a UDP open returns its port).
+    let mut reply = [0u8; 8];
+    match request(handle, op, data, &[shared], &mut reply, &mut opened) {
+        Ok((_, 1)) => Ok((opened[0], notification)),
+        result => {
+            let _ = oceans_rt::close(notification);
+            Err(result.err().unwrap_or(NetError::Status(Status::BadRequest)))
+        }
+    }
+}
+
+/// Waits on `notification` until `done` says yes, or `timeout_ms` passes.
+fn wait_until<T>(
+    notification: Handle,
+    timeout_ms: u64,
+    mut done: impl FnMut() -> Result<Option<T>, NetError>,
+) -> Result<T, NetError> {
+    let _ = oceans_rt::timer_set(notification, TIMEOUT, timeout_ms);
+    let result = loop {
+        match done() {
+            Ok(Some(value)) => break Ok(value),
+            Ok(None) => {}
+            Err(error) => break Err(error),
+        }
+        match oceans_rt::notification_wait(notification) {
+            Ok(bits) if bits & TIMEOUT != 0 => {
+                // One last look: the event may have come with the timeout.
+                break match done() {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Err(NetError::Status(Status::TimedOut)),
+                    Err(error) => Err(error),
+                };
+            }
+            Ok(_) => {}
+            Err(error) => break Err(NetError::Ipc(error)),
+        }
+    };
+    let _ = oceans_rt::timer_set(notification, TIMEOUT, 0);
+    result
+}
+
+/// What a stream read returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    Data(usize),
+    /// Nothing yet: wait for the notification.
+    WouldBlock,
+    /// The peer finished sending.
+    Eof,
+}
+
+/// A TCP connection.
+pub struct TcpStream {
+    handle: Handle,
+    notification: Handle,
+    owned: bool,
+}
+
+impl TcpStream {
+    /// Starts connecting to `address:port`; see [`wait_connected`](Self::wait_connected).
+    pub fn connect(net: Handle, address: Ipv4, port: u16) -> Result<Self, NetError> {
+        let mut data = [0u8; 14];
+        data[..4].copy_from_slice(&address);
+        data[4..6].copy_from_slice(&port.to_le_bytes());
+        data[6..].copy_from_slice(&READABLE.to_le_bytes());
+        let (handle, notification) = open_with_notification(net, op::TCP_CONNECT, &data)?;
+        Ok(Self {
+            handle,
+            notification,
+            owned: true,
+        })
+    }
+
+    /// The notification signalled on every change; also usable for timers
+    /// (bits other than [`READABLE`] and bit 1).
+    pub fn notification(&self) -> Handle {
+        self.notification
+    }
+
+    /// `(state, error)`: see [`state`].
+    pub fn status(&self) -> Result<(u8, Option<Status>), NetError> {
+        let mut reply = [0u8; 2];
+        request(self.handle, op::TCP_STATUS, &[], &[], &mut reply, &mut [])?;
+        let error = (reply[1] != 0).then(|| Status::from_label(u64::from(reply[1])));
+        Ok((reply[0], error))
+    }
+
+    /// Waits until the connection is up, or fails.
+    pub fn wait_connected(&self, timeout_ms: u64) -> Result<(), NetError> {
+        wait_until(self.notification, timeout_ms, || match self.status()? {
+            (_, Some(error)) => Err(NetError::Status(error)),
+            (state::ESTABLISHED | state::CLOSE_WAIT, _) => Ok(Some(())),
+            (state::SYN_SENT | state::SYN_RECEIVED, _) => Ok(None),
+            _ => Err(NetError::Status(Status::NotConnected)),
+        })
+    }
+
+    /// Queues up to [`MAX_STREAM`] bytes; returns how many (0: full).
+    pub fn send(&self, data: &[u8]) -> Result<usize, NetError> {
+        let take = data.len().min(MAX_STREAM);
+        let mut reply = [0u8; 4];
+        request(
+            self.handle,
+            op::TCP_SEND,
+            &data[..take],
+            &[],
+            &mut reply,
+            &mut [],
+        )?;
+        Ok(u32::from_le_bytes(reply) as usize)
+    }
+
+    /// Sends all of `data`, waiting while the buffer is full.
+    pub fn send_all(&self, mut data: &[u8], timeout_ms: u64) -> Result<(), NetError> {
+        while !data.is_empty() {
+            let sent = wait_until(self.notification, timeout_ms, || {
+                self.send(data).map(|n| (n > 0).then_some(n))
+            })?;
+            data = &data[sent..];
+        }
+        Ok(())
+    }
+
+    /// Copies received bytes into `buffer`.
+    pub fn read(&self, buffer: &mut [u8]) -> Result<Read, NetError> {
+        let mut reply = [0u8; MAX_STREAM];
+        match request(self.handle, op::TCP_RECV, &[], &[], &mut reply, &mut []) {
+            Ok((len, _)) => {
+                let take = len.min(buffer.len());
+                buffer[..take].copy_from_slice(&reply[..take]);
+                Ok(Read::Data(take))
+            }
+            Err(NetError::Status(Status::Empty)) => Ok(Read::WouldBlock),
+            Err(NetError::Status(Status::Eof)) => Ok(Read::Eof),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Reads, waiting up to `timeout_ms` for data or the end of the stream.
+    pub fn read_wait(&self, buffer: &mut [u8], timeout_ms: u64) -> Result<Read, NetError> {
+        wait_until(self.notification, timeout_ms, || {
+            match self.read(buffer)? {
+                Read::WouldBlock => Ok(None),
+                other => Ok(Some(other)),
+            }
+        })
+    }
+
+    /// No more data from us; the peer reads end of stream.
+    pub fn shutdown(&self) -> Result<(), NetError> {
+        request(self.handle, op::TCP_SHUTDOWN, &[], &[], &mut [], &mut []).map(drop)
+    }
+}
+
+impl Drop for TcpStream {
+    fn drop(&mut self) {
+        let _ = oceans_rt::close(self.handle);
+        if self.owned {
+            let _ = oceans_rt::close(self.notification);
+        }
+    }
+}
+
+/// A TCP listener.
+pub struct TcpListener {
+    handle: Handle,
+    notification: Handle,
+    owned: bool,
+}
+
+impl TcpListener {
+    pub fn listen(net: Handle, port: u16) -> Result<Self, NetError> {
+        let mut data = [0u8; 10];
+        data[..2].copy_from_slice(&port.to_le_bytes());
+        data[2..].copy_from_slice(&READABLE.to_le_bytes());
+        let (handle, notification) = open_with_notification(net, op::TCP_LISTEN, &data)?;
+        Ok(Self {
+            handle,
+            notification,
+            owned: true,
+        })
+    }
+
+    /// A listener signalling `bits` on a shared notification.
+    pub fn listen_on(
+        net: Handle,
+        port: u16,
+        notification: Handle,
+        bits: u64,
+    ) -> Result<Self, NetError> {
+        let mut data = [0u8; 10];
+        data[..2].copy_from_slice(&port.to_le_bytes());
+        data[2..].copy_from_slice(&bits.to_le_bytes());
+        let handle = open_shared(net, op::TCP_LISTEN, &data, notification)?;
+        Ok(Self {
+            handle,
+            notification,
+            owned: false,
+        })
+    }
+
+    /// Like [`accept`](Self::accept), the connection signalling `bits` on a
+    /// shared notification.
+    pub fn accept_on(
+        &self,
+        notification: Handle,
+        bits: u64,
+    ) -> Result<Option<TcpStream>, NetError> {
+        match open_shared(
+            self.handle,
+            op::TCP_ACCEPT,
+            &bits.to_le_bytes(),
+            notification,
+        ) {
+            Ok(handle) => Ok(Some(TcpStream {
+                handle,
+                notification,
+                owned: false,
+            })),
+            Err(NetError::Status(Status::Empty)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn notification(&self) -> Handle {
+        self.notification
+    }
+
+    /// An established connection, if one is waiting.
+    pub fn accept(&self) -> Result<Option<TcpStream>, NetError> {
+        match open_with_notification(self.handle, op::TCP_ACCEPT, &READABLE.to_le_bytes()) {
+            Ok((handle, notification)) => Ok(Some(TcpStream {
+                handle,
+                notification,
+                owned: true,
+            })),
+            Err(NetError::Status(Status::Empty)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for TcpListener {
+    fn drop(&mut self) {
+        let _ = oceans_rt::close(self.handle);
+        if self.owned {
+            let _ = oceans_rt::close(self.notification);
+        }
+    }
+}
+
+/// Why a name did not resolve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolveError {
+    BadName,
+    /// No DNS server is configured.
+    NoServer,
+    NotFound,
+    NoAddress,
+    /// The server failed.
+    Server,
+    Timeout,
+    Net(NetError),
+}
+
+impl ResolveError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::BadName => "not a valid host name",
+            Self::NoServer => "no DNS server configured",
+            Self::NotFound => "not found",
+            Self::NoAddress => "has no IPv4 address",
+            Self::Server => "DNS server failure",
+            Self::Timeout => "DNS server did not answer",
+            Self::Net(error) => error.message(),
+        }
+    }
+}
+
+const DNS_TRIES: u32 = 3;
+const DNS_TIMEOUT_MS: u64 = 1_500;
+
+/// The address of `name` (a dotted quad is returned as is), asking the
+/// configured DNS server.
+pub fn resolve(net: Handle, name: &str) -> Result<Ipv4, ResolveError> {
+    if let Some(address) = parse_ipv4(name) {
+        return Ok(address);
+    }
+    let info = info(net).map_err(ResolveError::Net)?;
+    if !info.configured || info.dns == [0; 4] {
+        return Err(ResolveError::NoServer);
+    }
+    resolve_via(net, name, info.dns, oceans_dns::PORT)
+}
+
+/// Like [`resolve`], asking `server:port`.
+pub fn resolve_via(net: Handle, name: &str, server: Ipv4, port: u16) -> Result<Ipv4, ResolveError> {
+    use oceans_dns::{Answer, build_query, parse_response};
+
+    let mut query = [0u8; oceans_dns::MAX_MESSAGE];
+    let id = (oceans_rt::clock_ms() as u16) ^ 0x6f63;
+    let len = build_query(id, name, &mut query).map_err(|_| ResolveError::BadName)?;
+    if len > MAX_DATA {
+        return Err(ResolveError::BadName);
+    }
+    let (socket, _) = Socket::udp(net, 0).map_err(ResolveError::Net)?;
+    for _ in 0..DNS_TRIES {
+        socket
+            .send_to(server, port, &query[..len])
+            .map_err(ResolveError::Net)?;
+        let answer = wait_until(socket.notification(), DNS_TIMEOUT_MS, || {
+            let mut response = [0u8; MAX_DATA];
+            while let Some(received) = socket.recv(&mut response)? {
+                // Only the server's answer to this query counts.
+                if received.from != server || received.port != port {
+                    continue;
+                }
+                if let Ok(answer) = parse_response(id, name, &response[..received.len]) {
+                    return Ok(Some(answer));
+                }
+            }
+            Ok(None)
+        });
+        match answer {
+            Ok(Answer::Address(address, _)) => return Ok(address),
+            Ok(Answer::NotFound) => return Err(ResolveError::NotFound),
+            Ok(Answer::NoAddress) => return Err(ResolveError::NoAddress),
+            Ok(Answer::ServerError(_)) => return Err(ResolveError::Server),
+            Err(NetError::Status(Status::TimedOut)) => continue,
+            Err(error) => return Err(ResolveError::Net(error)),
+        }
+    }
+    Err(ResolveError::Timeout)
 }

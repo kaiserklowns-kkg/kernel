@@ -7,7 +7,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufReader, Read, Write};
-use std::net::UdpSocket;
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
@@ -33,9 +33,11 @@ const USER_PROGRAMS: &[&str] = &[
     "virtio-blk",
     "virtio-net",
     "net",
-    "udp-echo",
+    "net-echo",
     "ifconfig",
     "ping",
+    "host",
+    "nc",
     "ipc-test",
 ];
 /// The virtio disk QEMU attaches (ADR-0021), holding the filesystem
@@ -109,6 +111,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run ifconfig out use:net\r\n",
     b"run ping out use:net -- 10.0.2.2 2\r\n",
     b"run ping out use:net -- 10.0.2.99 1\r\n",
+    // TCP and DNS (ADR-0024), against servers xtask runs on the host
+    // (reached as 10.0.2.2; `$DNS` and `$TCP` are their ports).
+    b"run host out use:net -- oceans.test 10.0.2.2:$DNS\r\n",
+    b"run host out use:net -- missing.test 10.0.2.2:$DNS\r\n",
+    b"run nc out use:net -- 10.0.2.2 $TCP hello over tcp\r\n",
     b"exit\r\n",
 ];
 /// The second smoke boot, on the disk the first one left.
@@ -167,7 +174,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("fs: formatted a blank disk"),
     Expect::Contains("virtio-net: MAC 52:54:00:12:34:56, MSI-X"),
     Expect::Contains("net: configured 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3 (DHCP)"),
-    Expect::Contains("udp-echo: listening on port 7"),
+    Expect::Contains("net-echo: listening on UDP and TCP port 7"),
     Expect::Contains("ifconfig: requests `use:net`"),
     Expect::Line("net0: 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3"),
     Expect::Line("      mac 52:54:00:12:34:56"),
@@ -176,6 +183,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("2 sent, 2 received"),
     Expect::Line("timeout: seq=1"),
     Expect::Line("1 sent, 0 received"),
+    Expect::Line("oceans.test has address 10.1.2.3"),
+    Expect::Contains("host: missing.test: not found"),
+    Expect::Line("hello from the host: hello over tcp"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -196,6 +206,8 @@ impl Expect {
     }
 }
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long the last command waits for the host's echo probes.
+const PROBE_WAIT: Duration = Duration::from_secs(30);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
 const QEMU_EXIT_SUCCESS: i32 = 33;
 
@@ -459,8 +471,8 @@ fn prepare_disk(path: &str, fresh: bool) -> Result {
 /// The MAC QEMU gives the guest's network device.
 const GUEST_MAC: &str = "52:54:00:12:34:56";
 
-/// `udp_forward`: a host UDP port forwarded to the guest's port 7.
-fn qemu_command(headless: bool, disk: &str, udp_forward: Option<u16>) -> Result<Command> {
+/// `forward`: host (UDP, TCP) ports forwarded to the guest's port 7.
+fn qemu_command(headless: bool, disk: &str, forward: Option<(u16, u16)>) -> Result<Command> {
     let qemu = find_qemu()?;
     let firmware = find_firmware(&qemu)?;
 
@@ -481,8 +493,11 @@ fn qemu_command(headless: bool, disk: &str, udp_forward: Option<u16>) -> Result<
     .arg(pflash)
     // Relative path: QEMU's option parser would split an absolute
     // Windows path at the drive-letter colon. `rw:` because QEMU refuses a
-    // read-only vvfat node on a writable IDE disk; the image is rebuilt on
-    // every run, so guest writes are harmless.
+    // read-only vvfat node on a writable IDE disk (and refuses `snapshot`
+    // with `rw`). vvfat writes guest changes back to this directory: the
+    // firmware stores its variables there (NvVars), and the write-back has
+    // rewritten the boot loader itself, so callers rebuild the image before
+    // every boot.
     .args(["-drive", "format=raw,file=fat:rw:build/esp"])
     // A modern-only virtio disk (PCI ID 1af4:1042), driven by the
     // userspace virtio-blk service.
@@ -492,8 +507,10 @@ fn qemu_command(headless: bool, disk: &str, udp_forward: Option<u16>) -> Result<
     // A modern-only virtio NIC (1af4:1041) on QEMU's user network (NAT,
     // DHCP at 10.0.2.2), driven by the userspace virtio-net service.
     .arg("-netdev")
-    .arg(match udp_forward {
-        Some(port) => format!("user,id=net0,hostfwd=udp:127.0.0.1:{port}-:7"),
+    .arg(match forward {
+        Some((udp, tcp)) => {
+            format!("user,id=net0,hostfwd=udp:127.0.0.1:{udp}-:7,hostfwd=tcp:127.0.0.1:{tcp}-:7")
+        }
         None => "user,id=net0".to_string(),
     })
     .arg("-device")
@@ -579,6 +596,8 @@ fn smoke(profile: Profile) -> Result {
     println!("smoke boot 1 of 2: blank disk");
     smoke_boot(SHELL_SCRIPT, SHELL_EXPECT)?;
     println!("smoke boot 2 of 2: the same disk");
+    // A clean boot image: the first boot's firmware wrote into it (vvfat).
+    build_image(profile, Some("oceans.test=smoke"))?;
     smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT)?;
     check_smoke_disk()?;
     println!("smoke test passed: kernel came online, files survived a reboot");
@@ -598,9 +617,19 @@ const SHELL_PROMPT: &[u8] = b"oceans> ";
 /// prompt, and requires every `expected` line, the online banner and a
 /// successful exit.
 fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
-    let port = free_udp_port()?;
-    let echo = udp_echo_probe(port);
-    let mut child = qemu_command(true, SMOKE_DISK_IMAGE, Some(port))?
+    let udp_forward = free_udp_port()?;
+    let tcp_forward = free_tcp_port()?;
+    let udp_echo = udp_echo_probe(udp_forward);
+    let tcp_echo = tcp_echo_probe(tcp_forward);
+    let dns_port = dns_server()?;
+    let tcp_port = tcp_greeter()?;
+    let expand = |command: &[u8]| -> Vec<u8> {
+        String::from_utf8_lossy(command)
+            .replace("$DNS", &dns_port.to_string())
+            .replace("$TCP", &tcp_port.to_string())
+            .into_bytes()
+    };
+    let mut child = qemu_command(true, SMOKE_DISK_IMAGE, Some((udp_forward, tcp_forward)))?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -636,6 +665,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let mut ready = false;
     let mut commands = script.iter();
     let mut unmet: Vec<Expect> = expected.to_vec();
+    let (mut udp_answered, mut tcp_answered) = (false, false);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match events_rx.recv_timeout(remaining) {
@@ -650,7 +680,13 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
             // QEMU's Windows stdio backend ignores backpressure.
             Ok(Console::Prompt) if ready => {
                 if let Some(command) = commands.next() {
-                    for &byte in *command {
+                    // The last command ends the boot: the host's probes into
+                    // the guest's echo service must be done by then.
+                    if commands.len() == 0 {
+                        udp_answered = udp_answered || udp_echo.recv_timeout(PROBE_WAIT).is_ok();
+                        tcp_answered = tcp_answered || tcp_echo.recv_timeout(PROBE_WAIT).is_ok();
+                    }
+                    for byte in expand(command) {
                         serial_input
                             .write_all(&[byte])
                             .and_then(|()| serial_input.flush())
@@ -674,10 +710,13 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     }
 
     let status = child.wait().map_err(|e| format!("waiting for QEMU: {e}"))?;
-    match echo.try_recv() {
-        Ok(()) => println!("UDP echo answered through the guest's network stack"),
-        Err(_) => return Err("the guest's UDP echo service never answered from the host".into()),
+    if !(udp_answered || udp_echo.try_recv().is_ok()) {
+        return Err("the guest's UDP echo service never answered from the host".into());
     }
+    if !(tcp_answered || tcp_echo.try_recv().is_ok()) {
+        return Err("the guest's TCP echo service never answered from the host".into());
+    }
+    println!("UDP and TCP echo answered from the host through the guest's network stack");
     if !unmet.is_empty() {
         return Err(format!("shell output missing: {unmet:?}"));
     }
@@ -794,4 +833,97 @@ fn udp_echo_probe(port: u16) -> mpsc::Receiver<()> {
         }
     });
     done_rx
+}
+
+/// A TCP port free on the host now, for QEMU to forward.
+fn free_tcp_port() -> Result<u16> {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .map_err(|e| format!("cannot find a free TCP port: {e}"))
+}
+
+/// Connects from the host to the guest's TCP echo service (through QEMU's
+/// port forwarding) until a probe comes back; reports success once.
+fn tcp_echo_probe(port: u16) -> mpsc::Receiver<()> {
+    const PROBE: &[u8] = b"oceans tcp echo probe";
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let deadline = Instant::now() + SMOKE_TIMEOUT;
+        while Instant::now() < deadline {
+            let attempt = (|| -> std::io::Result<bool> {
+                let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                stream.write_all(PROBE)?;
+                let mut reply = vec![0u8; PROBE.len()];
+                let mut got = 0;
+                while got < reply.len() {
+                    match stream.read(&mut reply[got..])? {
+                        0 => return Ok(false),
+                        n => got += n,
+                    }
+                }
+                Ok(reply == PROBE)
+            })();
+            if let Ok(true) = attempt {
+                let _ = done_tx.send(());
+                return;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+    });
+    done_rx
+}
+
+/// A DNS server on the host for the guest's resolver: `oceans.test` is
+/// 10.1.2.3, every other name does not exist. Returns its UDP port.
+fn dns_server() -> Result<u16> {
+    let socket =
+        UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("cannot start the DNS server: {e}"))?;
+    let port = socket.local_addr().map_err(|e| e.to_string())?.port();
+    thread::spawn(move || {
+        let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
+        let deadline = Instant::now() + 2 * SMOKE_TIMEOUT;
+        let mut query = [0u8; 512];
+        let mut answer = [0u8; 512];
+        while Instant::now() < deadline {
+            let Ok((len, from)) = socket.recv_from(&mut query) else {
+                continue;
+            };
+            let query = &query[..len];
+            let known = query.get(12..25) == Some(b"\x06oceans\x04test\x00".as_slice());
+            let address = known.then_some([10, 1, 2, 3]);
+            if let Ok(len) = oceans_dns::respond(query, address, &mut answer) {
+                let _ = socket.send_to(&answer[..len], from);
+            }
+        }
+    });
+    Ok(port)
+}
+
+/// A TCP server on the host: answers each line with a greeting, then
+/// closes. Returns its port.
+fn tcp_greeter() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("cannot start the TCP server: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            while let Ok(1) = stream.read(&mut byte) {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                line.push(byte[0]);
+            }
+            let greeting = format!("hello from the host: {}\n", String::from_utf8_lossy(&line));
+            let _ = stream.write_all(greeting.as_bytes());
+        }
+    });
+    Ok(port)
 }

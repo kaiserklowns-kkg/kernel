@@ -1,13 +1,13 @@
 [package]
-name = "udp-echo"
-description = "UDP echo service (RFC 862) on port 7, for network diagnostics (ADR-0023)"
+name = "net-echo"
+description = "Echo service (RFC 862) on UDP and TCP port 7, for network diagnostics (ADR-0023, ADR-0024)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "udp-echo"
+name = "net-echo"
 test = false
 bench = false
 

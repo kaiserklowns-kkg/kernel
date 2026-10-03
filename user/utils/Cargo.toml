@@ -1,6 +1,6 @@
 [package]
 name = "utils"
-description = "Basic Oceans utilities: ps, mem, uptime, uname (ADR-0020); lspci, disk (ADR-0021); ifconfig, ping (ADR-0023)"
+description = "Basic Oceans utilities: ps, mem, uptime, uname (ADR-0020); lspci, disk (ADR-0021); ifconfig, ping (ADR-0023); host, nc (ADR-0024)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -43,6 +43,16 @@ bench = false
 
 [[bin]]
 name = "ping"
+test = false
+bench = false
+
+[[bin]]
+name = "host"
+test = false
+bench = false
+
+[[bin]]
+name = "nc"
 test = false
 bench = false
 
