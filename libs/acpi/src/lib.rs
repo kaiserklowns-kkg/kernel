@@ -1,4 +1,5 @@
-//! Minimal ACPI table parsing (ADR-0017): RSDP, RSDT/XSDT and the MADT.
+//! Minimal ACPI table parsing (ADR-0017, ADR-0021): RSDP, RSDT/XSDT, the MADT
+//! and the MCFG.
 //!
 //! Firmware tables are untrusted input. Every structure is length- and
 //! checksum-validated before use, nothing is read out of bounds, and the
@@ -223,6 +224,52 @@ impl<'a> Madt<'a> {
     }
 }
 
+/// A PCI Express enhanced configuration (ECAM) region: configuration space
+/// of buses `start_bus..=end_bus` in `segment`, 1 MiB per bus from `base`
+/// (ADR-0021).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcamRegion {
+    pub base: u64,
+    pub segment: u16,
+    pub start_bus: u8,
+    pub end_bus: u8,
+}
+
+impl EcamRegion {
+    /// Physical address of the 4 KiB configuration space of
+    /// `bus:device.function`, if this region covers the bus.
+    pub fn function_address(&self, bus: u8, device: u8, function: u8) -> Option<u64> {
+        if bus < self.start_bus || bus > self.end_bus || device > 31 || function > 7 {
+            return None;
+        }
+        let offset = (u64::from(bus - self.start_bus) << 20)
+            | (u64::from(device) << 15)
+            | (u64::from(function) << 12);
+        self.base.checked_add(offset)
+    }
+}
+
+/// The ECAM regions listed by an MCFG table. Entries with an empty or
+/// inverted bus range, or a zero base, are skipped.
+pub fn mcfg_regions<'a>(
+    table: Table<'a>,
+) -> Result<impl Iterator<Item = EcamRegion> + 'a, AcpiError> {
+    if &table.signature() != b"MCFG" {
+        return Err(AcpiError::BadSignature);
+    }
+    // 8 reserved bytes, then 16-byte allocation entries.
+    let entries = table.body().get(8..).ok_or(AcpiError::Truncated)?;
+    Ok(entries.as_chunks::<16>().0.iter().filter_map(|entry| {
+        let region = EcamRegion {
+            base: u64_at(entry, 0),
+            segment: u16_at(entry, 8),
+            start_bus: entry[10],
+            end_bus: entry[11],
+        };
+        (region.base != 0 && region.start_bus <= region.end_bus).then_some(region)
+    }))
+}
+
 /// MPS INTI flags: active low polarity.
 pub fn active_low(flags: u16) -> bool {
     flags & 0b11 == 0b11
@@ -351,6 +398,51 @@ mod tests {
         assert_eq!(gsi, 9);
         assert!(active_low(flags) && level_triggered(flags));
         assert!(!active_low(0) && !level_triggered(0));
+    }
+
+    fn mcfg_entry(base: u64, segment: u16, start: u8, end: u8) -> Vec<u8> {
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&base.to_le_bytes());
+        entry.extend_from_slice(&segment.to_le_bytes());
+        entry.extend_from_slice(&[start, end, 0, 0, 0, 0]);
+        entry
+    }
+
+    #[test]
+    fn parses_mcfg_regions() {
+        let mut body = std::vec![0u8; 8];
+        body.extend(mcfg_entry(0xb000_0000, 0, 0, 255));
+        body.extend(mcfg_entry(0, 1, 0, 3)); // zero base: skipped
+        body.extend(mcfg_entry(0xc000_0000, 2, 9, 4)); // inverted: skipped
+        body.extend(mcfg_entry(0xd000_0000, 3, 16, 31));
+        body.extend_from_slice(&[0; 7]); // trailing partial entry: ignored
+        let bytes = table(b"MCFG", &body);
+        let regions: Vec<EcamRegion> = mcfg_regions(Table::parse(&bytes).unwrap())
+            .unwrap()
+            .collect();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].base, 0xb000_0000);
+        assert_eq!(regions[1].segment, 3);
+
+        let q35 = regions[0];
+        assert_eq!(q35.function_address(0, 0, 0), Some(0xb000_0000));
+        assert_eq!(
+            q35.function_address(1, 2, 3),
+            Some(0xb000_0000 + (1 << 20) + (2 << 15) + (3 << 12))
+        );
+        assert_eq!(q35.function_address(0, 32, 0), None);
+        assert_eq!(q35.function_address(0, 0, 8), None);
+        let high = regions[1];
+        assert_eq!(high.function_address(15, 0, 0), None, "below start bus");
+        assert_eq!(
+            high.function_address(16, 0, 0),
+            Some(0xd000_0000),
+            "start bus is offset 0"
+        );
+
+        assert!(mcfg_regions(Table::parse(&table(b"APIC", &[0; 8])).unwrap()).is_err());
+        let short = table(b"MCFG", &[0; 4]);
+        assert!(mcfg_regions(Table::parse(&short).unwrap()).is_err());
     }
 
     #[test]

@@ -17,7 +17,10 @@ use ::x86_64::instructions::{self as insn, port::Port};
 
 pub use context::{prepare_stack, switch_context};
 pub use cpu::{enable_protections, features as cpu_features};
-pub use interrupts::{TrapFrame, set_after_device_interrupt, set_user_fault_handler};
+pub use interrupts::{
+    DEVICE_VECTORS, TrapFrame, set_after_device_interrupt, set_device_handler,
+    set_user_fault_handler,
+};
 pub use paging::{AddressSpace, activate_root, active_root};
 pub use syscall::{SyscallFrame, enter_user, init as init_syscalls, set_kernel_stack};
 
@@ -144,6 +147,13 @@ pub fn fault_address() -> u64 {
 /// Human-readable name of exception `vector`.
 pub fn exception_name(vector: u64) -> &'static str {
     interrupts::exception_name(vector)
+}
+
+/// The MSI/MSI-X message (address, data) that delivers `vector` to this
+/// CPU: fixed delivery, edge triggered, physical destination (ADR-0021).
+pub fn msi_message(vector: u8) -> (u64, u32) {
+    let address = 0xfee0_0000 | (u64::from(apic::id()) << 12);
+    (address, u32::from(vector))
 }
 
 /// Where received console bytes go (set once by `enable_console_input`).

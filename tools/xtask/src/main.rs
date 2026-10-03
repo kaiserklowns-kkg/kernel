@@ -27,8 +27,21 @@ const USER_PROGRAMS: &[&str] = &[
     "mem",
     "uptime",
     "uname",
+    "lspci",
+    "disk",
+    "virtio-blk",
     "ipc-test",
 ];
+/// The virtio disk QEMU attaches (ADR-0021). `run` keeps its disk across
+/// boots (it is the system's storage); `smoke` starts from a fresh one with
+/// a known first sector and checks the guest's write on the host after.
+const DISK_IMAGE: &str = "build/disk.img";
+const SMOKE_DISK_IMAGE: &str = "build/smoke-disk.img";
+const DISK_SIZE: u64 = 8 * 1024 * 1024;
+const SECTOR_SIZE: usize = 512;
+const SMOKE_DISK_LABEL: &[u8] = b"OCEANS TEST DISK";
+/// What the smoke script writes to sector 1 through the driver.
+const SMOKE_DISK_WRITE: &[u8] = b"written by oceans";
 /// Service manifests for init: normal boots and smoke tests.
 const MANIFEST: &str = "config/services.conf";
 const SMOKE_MANIFEST: &str = "config/services-smoke.conf";
@@ -73,6 +86,15 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"hello-client\r\n",
     b"run nosuch\r\n",
     b"frobnicate\r\n",
+    // Devices and the userspace disk driver (ADR-0021).
+    b"lspci\r\n",
+    b"run lspci out devices\r\n",
+    b"run disk out\r\n",
+    b"run disk out use:block -- info\r\n",
+    b"run disk out use:block -- read 0\r\n",
+    b"run disk out use:block -- write 1 written by oceans\r\n",
+    b"run disk out use:block -- read 1\r\n",
+    b"run disk out use:block -- read 99999999\r\n",
     b"exit\r\n",
 ];
 /// Output the script must produce: `Line` must be a whole console line,
@@ -94,7 +116,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 6)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 7)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -103,6 +125,15 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("hello-client: has no manifest"),
     Expect::Contains("run: nosuch: not found"),
     Expect::Contains("frobnicate: unknown command"),
+    Expect::Contains("lspci: requests `devices`"),
+    Expect::Contains("8086:29c0  host bridge"),
+    Expect::Contains("1af4:1042  mass storage  (driver attached)"),
+    Expect::Contains("disk: needs the block capability"),
+    Expect::Line("disk: 16384 sectors of 512 bytes (8 MiB)"),
+    Expect::Line("OCEANS TEST DISK"),
+    Expect::Line("disk: wrote sector 1"),
+    Expect::Line("written by oceans"),
+    Expect::Line("disk: out of range"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -122,7 +153,7 @@ impl Expect {
         }
     }
 }
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(60);
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(90);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
 const QEMU_EXIT_SUCCESS: i32 = 33;
 
@@ -372,7 +403,19 @@ fn copy(from: &Path, to: &Path) -> Result {
         .map_err(|e| format!("cannot copy {} to {}: {e}", from.display(), to.display()))
 }
 
-fn qemu_command(headless: bool) -> Result<Command> {
+/// Creates a zero-filled disk image whose first sector holds `label`
+/// (replacing an existing one only if `fresh`).
+fn prepare_disk(path: &str, label: &[u8], fresh: bool) -> Result {
+    let path = root().join(path);
+    if path.is_file() && !fresh {
+        return Ok(());
+    }
+    let mut bytes = vec![0u8; DISK_SIZE as usize];
+    bytes[..label.len()].copy_from_slice(label);
+    fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+fn qemu_command(headless: bool, disk: &str) -> Result<Command> {
     let qemu = find_qemu()?;
     let firmware = find_firmware(&qemu)?;
 
@@ -396,6 +439,11 @@ fn qemu_command(headless: bool) -> Result<Command> {
     // read-only vvfat node on a writable IDE disk; the image is rebuilt on
     // every run, so guest writes are harmless.
     .args(["-drive", "format=raw,file=fat:rw:build/esp"])
+    // A modern-only virtio disk (PCI ID 1af4:1042), driven by the
+    // userspace virtio-blk service.
+    .arg("-drive")
+    .arg(format!("if=none,id=disk0,format=raw,file={disk}"))
+    .args(["-device", "virtio-blk-pci,drive=disk0,disable-legacy=on"])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     if headless {
         cmd.args(["-display", "none"]);
@@ -465,13 +513,15 @@ fn find_firmware(qemu: &Path) -> Result<PathBuf> {
 
 fn run(profile: Profile) -> Result {
     build_image(profile, None)?;
-    run_command(&mut qemu_command(false)?)
+    prepare_disk(DISK_IMAGE, b"Oceans data disk", false)?;
+    run_command(&mut qemu_command(false, DISK_IMAGE)?)
 }
 
 fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
+    prepare_disk(SMOKE_DISK_IMAGE, SMOKE_DISK_LABEL, true)?;
 
-    let mut child = qemu_command(true)?
+    let mut child = qemu_command(true, SMOKE_DISK_IMAGE)?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -531,6 +581,7 @@ fn smoke(profile: Profile) -> Result {
     if !unmet.is_empty() {
         return Err(format!("shell output missing: {unmet:?}"));
     }
+    check_smoke_disk()?;
     match (online, status.code()) {
         (true, Some(QEMU_EXIT_SUCCESS)) => {
             println!("smoke test passed: kernel came online");
@@ -541,4 +592,24 @@ fn smoke(profile: Profile) -> Result {
         )),
         (true, _) => Err(format!("kernel came online but QEMU exited with {status}")),
     }
+}
+
+/// The guest's write must have reached the disk image through the driver's
+/// DMA: sector 1 holds exactly the text, zero-padded.
+fn check_smoke_disk() -> Result {
+    let path = root().join(SMOKE_DISK_IMAGE);
+    let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let sector = bytes
+        .get(SECTOR_SIZE..2 * SECTOR_SIZE)
+        .ok_or("smoke disk image is truncated")?;
+    let written = sector.starts_with(SMOKE_DISK_WRITE)
+        && sector[SMOKE_DISK_WRITE.len()..].iter().all(|&b| b == 0);
+    if !written {
+        return Err(format!(
+            "sector 1 of {} does not hold the guest's write",
+            path.display()
+        ));
+    }
+    println!("disk write verified on the host");
+    Ok(())
 }

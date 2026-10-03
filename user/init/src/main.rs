@@ -8,7 +8,10 @@
 //!    declared order: `grant = log` (a log capability), `grant = console`
 //!    (the system console), `provide = NAME`
 //!    (the server end of a new endpoint NAME), `use = NAME` (a client end
-//!    of endpoint NAME, provided by an earlier service).
+//!    of endpoint NAME, provided by an earlier service), `grant = devices`
+//!    (the PCI device list, read-only), `grant = device:VVVV:DDDD` (the
+//!    PCI function with that vendor and device ID, opened exclusively:
+//!    what makes a service its driver, ADR-0021).
 //! 4. Supervises: one notification, a bit per service, signalled by the
 //!    kernel when a service exits. Restart policies `always`, `on-failure`
 //!    and `never`, with exponential backoff and a restart limit.
@@ -44,6 +47,8 @@ const CONSOLE_RIGHTS: u32 = rights::READ | rights::WRITE | rights::DUPLICATE | r
 const SYSINFO_RIGHTS: u32 = rights::READ | rights::DUPLICATE | rights::TRANSFER;
 const USE_RIGHTS: u32 = rights::SEND | rights::DUPLICATE | rights::TRANSFER;
 const MODULE_RIGHTS: u32 = rights::READ | rights::MAP | rights::DUPLICATE | rights::TRANSFER;
+/// The device list only: opening devices stays with init.
+const DEVICES_RIGHTS: u32 = rights::READ | rights::DUPLICATE | rights::TRANSFER;
 
 /// Exit codes of init itself (only reached in test mode, or on fatal
 /// configuration errors).
@@ -64,6 +69,10 @@ enum Grant {
     Log,
     Console,
     SystemInfo,
+    Devices,
+    /// The PCI function with this vendor and device ID; the text is the
+    /// manifest's `VVVV:DDDD`.
+    Device(u16, u16, &'static str),
     Provide(&'static str),
     Use(&'static str),
     Module(&'static str),
@@ -143,6 +152,8 @@ struct Init {
     log: Handle,
     console: Handle,
     sysinfo: Handle,
+    /// The PCI device bus.
+    bus: Handle,
     /// Lines `<module name> <handle index>`.
     module_table: &'static str,
     start: Start,
@@ -155,12 +166,13 @@ struct Init {
 fn main(start: Start) -> i64 {
     let test_mode = start.arg == 1;
     // Boot contract (kernel process::init): log, module table, console,
-    // system information.
-    let (Some(&log), Some(&table), Some(&console), Some(&sysinfo)) = (
+    // system information, device bus.
+    let (Some(&log), Some(&table), Some(&console), Some(&sysinfo), Some(&bus)) = (
         start.handles.first(),
         start.handles.get(1),
         start.handles.get(2),
         start.handles.get(3),
+        start.handles.get(4),
     ) else {
         return EXIT_BAD_START;
     };
@@ -182,6 +194,7 @@ fn main(start: Start) -> i64 {
         log,
         console,
         sysinfo,
+        bus,
         module_table,
         start,
         events,
@@ -299,14 +312,23 @@ fn parse(
                     ("grant", "log") => Grant::Log,
                     ("grant", "console") => Grant::Console,
                     ("grant", "sysinfo") => Grant::SystemInfo,
-                    ("grant", other) => match other.strip_prefix("module:") {
-                        Some(module) if !module.is_empty() => Grant::Module(module),
-                        _ => {
+                    ("grant", "devices") => Grant::Devices,
+                    ("grant", other) => {
+                        if let Some(module) = other.strip_prefix("module:")
+                            && !module.is_empty()
+                        {
+                            Grant::Module(module)
+                        } else if let Some(id) = other.strip_prefix("device:") {
+                            match parse_device_id(id) {
+                                Some((vendor, device)) => Grant::Device(vendor, device, id),
+                                None => return error("device grants are device:VVVV:DDDD (hex)"),
+                            }
+                        } else {
                             return error(
-                                "unknown grant (known: log, console, sysinfo, module:NAME)",
+                                "unknown grant (known: log, console, sysinfo, devices, device:VVVV:DDDD, module:NAME)",
                             );
                         }
-                    },
+                    }
                     ("provide", name) => Grant::Provide(name),
                     (_, name) => Grant::Use(name),
                 };
@@ -403,6 +425,18 @@ impl Init {
                         oceans_rt::duplicate(self.sysinfo, SYSINFO_RIGHTS)?,
                         "sysinfo",
                         "sysinfo",
+                    ),
+                    Grant::Devices => (
+                        oceans_rt::duplicate(self.bus, DEVICES_RIGHTS)?,
+                        "devices",
+                        "devices",
+                    ),
+                    // Exclusive: a restarted driver reopens it once the old
+                    // instance's capability has been closed at its exit.
+                    Grant::Device(vendor, device, id) => (
+                        oceans_rt::device_open(self.bus, vendor, device, 0)?,
+                        "device",
+                        id,
                     ),
                     Grant::Provide(name) => {
                         let (server, client) = oceans_rt::endpoint_create()?;
@@ -518,6 +552,17 @@ impl Init {
             EXIT_EXPECTATION_FAILED
         }
     }
+}
+
+/// `VVVV:DDDD` in hex.
+fn parse_device_id(id: &str) -> Option<(u16, u16)> {
+    let (vendor, device) = id.split_once(':')?;
+    let hex = |text: &str| {
+        (text.len() == 4)
+            .then(|| u16::from_str_radix(text, 16).ok())
+            .flatten()
+    };
+    Some((hex(vendor)?, hex(device)?))
 }
 
 /// A read-only memory object holding `text`, for handing to a service.

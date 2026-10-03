@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 6 (`oceans-abi`, ADR-0014 to ADR-0020).
+//! System call dispatch, ABI version 7 (`oceans-abi`, ADR-0014 to ADR-0021).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -76,6 +76,13 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
         nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
+        nr::DEVICE_LIST => device_list(&process, a0, a1, a2),
+        nr::DEVICE_OPEN => device_open(&process, a0, a1, a2),
+        nr::DEVICE_CONFIG_READ => device_config_read(&process, a0, a1, a2),
+        nr::DEVICE_ENABLE => device_enable(&process, a0),
+        nr::DEVICE_BAR => device_bar(&process, a0, a1),
+        nr::DEVICE_DMA_CREATE => device_dma_create(&process, a0, a1),
+        nr::DEVICE_IRQ => device_irq(&process, a0, a1, a2, a3),
         _ => Err(Error::UnknownSyscall),
     };
     match result {
@@ -223,7 +230,7 @@ fn object_error(error: ObjectError) -> Error {
         ObjectError::WrongType { .. } => Error::WrongType,
         ObjectError::OutOfMemory => Error::OutOfMemory,
         ObjectError::OutOfBounds => Error::BadAddress,
-        ObjectError::WriteExecute => Error::InvalidArgument,
+        ObjectError::WriteExecute | ObjectError::NotRam => Error::InvalidArgument,
     }
 }
 
@@ -799,4 +806,113 @@ fn system_info(process: &Process, raw: u64, kind: u64, ptr: u64, capacity: u64) 
     }
     process.copy_to_user(ptr, &bytes)?;
     Ok((bytes.len() as u64, 0))
+}
+
+// ---- ABI 7 -----------------------------------------------------------------
+
+/// Checks that `raw` names the device bus with `required` rights.
+fn check_bus(process: &Process, raw: u64, required: Rights) -> Result<(), Error> {
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let capability = table.get(handle(raw), Rights::NONE).map_err(cap_error)?;
+        match capability.object() {
+            KernelObject::DeviceBus => capability.check(required).map_err(cap_error),
+            _ => Err(Error::WrongType),
+        }
+    })
+}
+
+fn device(process: &Process, raw: u64, required: Rights) -> Result<Arc<crate::pci::Device>, Error> {
+    arch::without_interrupts(|| {
+        object::device(&mut process.capabilities().lock(), handle(raw), required)
+    })
+    .map_err(object_error)
+}
+
+/// Rights of the memory objects a driver gets for BARs and DMA: map and
+/// use, but never pass on, so they cannot outlive the driver's own
+/// address space in another process.
+const DRIVER_MEMORY_RIGHTS: Rights = Rights::READ.union(Rights::WRITE).union(Rights::MAP);
+
+fn device_list(process: &Process, bus: u64, ptr: u64, capacity: u64) -> SyscallResult {
+    use oceans_abi::device::DeviceRecord;
+
+    check_bus(process, bus, Rights::READ)?;
+    let records = crate::pci::records();
+    let len = records.len() * DeviceRecord::SIZE;
+    if len as u64 > capacity {
+        return Err(Error::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| Error::OutOfMemory)?;
+    for record in records {
+        let mut encoded = [0u8; DeviceRecord::SIZE];
+        record.encode(&mut encoded);
+        bytes.extend_from_slice(&encoded);
+    }
+    process.copy_to_user(ptr, &bytes)?;
+    Ok((len as u64, 0))
+}
+
+fn device_open(process: &Process, bus: u64, selector: u64, index: u64) -> SyscallResult {
+    check_bus(process, bus, Rights::MANAGE)?;
+    let vendor = u16::try_from(selector >> 16).map_err(|_| Error::InvalidArgument)?;
+    let device = crate::pci::open(vendor, selector as u16, index)?;
+    let raw = insert(
+        process,
+        Capability::new(
+            KernelObject::Device(device),
+            default_rights(ObjectKind::Device),
+        ),
+    )?;
+    Ok((raw, 0))
+}
+
+fn device_config_read(process: &Process, raw: u64, offset: u64, width: u64) -> SyscallResult {
+    let device = device(process, raw, Rights::READ)?;
+    Ok((u64::from(device.config_read(offset, width)?), 0))
+}
+
+fn device_enable(process: &Process, raw: u64) -> SyscallResult {
+    device(process, raw, Rights::MANAGE)?.enable();
+    Ok((0, 0))
+}
+
+fn device_bar(process: &Process, raw: u64, index: u64) -> SyscallResult {
+    let memory = device(process, raw, Rights::MANAGE)?.bar(index)?;
+    let size = memory.size();
+    let raw = insert(
+        process,
+        Capability::new(KernelObject::Memory(memory), DRIVER_MEMORY_RIGHTS),
+    )?;
+    Ok((raw, size))
+}
+
+fn device_dma_create(process: &Process, raw: u64, size: u64) -> SyscallResult {
+    let (memory, address) = device(process, raw, Rights::MANAGE)?.dma_create(size)?;
+    let raw = insert(
+        process,
+        Capability::new(KernelObject::Memory(memory), DRIVER_MEMORY_RIGHTS),
+    )?;
+    Ok((raw, address))
+}
+
+fn device_irq(
+    process: &Process,
+    raw: u64,
+    entry: u64,
+    notification: u64,
+    bits: u64,
+) -> SyscallResult {
+    let (device, notification) = arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let device = object::device(&mut table, handle(raw), Rights::MANAGE)?;
+        let notification = object::notification(&mut table, handle(notification), Rights::SIGNAL)?;
+        Ok((device, notification))
+    })
+    .map_err(object_error)?;
+    device.bind_irq(entry, notification, bits)?;
+    Ok((0, 0))
 }

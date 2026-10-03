@@ -1,4 +1,4 @@
-//! The Oceans system call ABI, version 6 (ADR-0014 to ADR-0020).
+//! The Oceans system call ABI, version 7 (ADR-0014 to ADR-0021).
 //!
 //! Shared by the kernel and userspace so both sides agree by construction.
 //! The ABI is versioned: numbers and meanings below never change within a
@@ -17,9 +17,10 @@
 
 /// Version history: 1 = ADR-0014 (syscalls 0–7); 2 = ADR-0015 (8–17);
 /// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24); 5 = ADR-0019 (25–26: badges,
-/// memory size); 6 = ADR-0020 (27: system information). Versions only add;
-/// existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 6;
+/// memory size); 6 = ADR-0020 (27: system information); 7 = ADR-0021
+/// (28–34: devices; errors -15 and -16). Versions only add; existing
+/// numbers keep their meaning.
+pub const ABI_VERSION: u64 = 7;
 
 /// System call numbers.
 pub mod nr {
@@ -123,6 +124,36 @@ pub mod nr {
     /// record(s) of `kind` to `ptr`. Needs `READ` on a system-information
     /// capability. `TooLarge` if `capacity` is too small.
     pub const SYSTEM_INFO: u64 = 27;
+
+    // ABI 7
+
+    /// `(bus, ptr, capacity) -> len` — writes a [`device::DeviceRecord`](super::device::DeviceRecord)
+    /// per PCI function to `ptr`. Needs `READ` on the device bus.
+    /// `TooLarge` if `capacity` is too small.
+    pub const DEVICE_LIST: u64 = 28;
+    /// `(bus, vendor << 16 | device_id, index) -> device` — opens the
+    /// `index`th function with that ID, exclusively. Needs `MANAGE` on the
+    /// device bus. `NotFound` if there is none, `Busy` if it is open.
+    pub const DEVICE_OPEN: u64 = 29;
+    /// `(device, offset, width) -> value` — reads configuration space
+    /// (`width` 1, 2 or 4, aligned). Needs `READ`.
+    pub const DEVICE_CONFIG_READ: u64 = 30;
+    /// `(device) -> 0` — turns on memory decoding and bus mastering (DMA),
+    /// with legacy interrupts off. Needs `MANAGE`.
+    pub const DEVICE_ENABLE: u64 = 31;
+    /// `(device, bar) -> (memory, size)` — a memory object for memory BAR
+    /// `bar`, to map uncached (never executable). Pages holding the MSI-X
+    /// table are left out: the kernel programs interrupts. Needs `MANAGE`.
+    pub const DEVICE_BAR: u64 = 32;
+    /// `(device, size) -> (memory, device_address)` — physically
+    /// contiguous memory the device may access, and the address the device
+    /// uses for it. Kept alive until DMA has been switched off when the
+    /// device closes. Needs `MANAGE`.
+    pub const DEVICE_DMA_CREATE: u64 = 33;
+    /// `(device, entry, notification, bits) -> 0` — delivers MSI-X vector
+    /// `entry` as `bits` on the notification (replacing an earlier binding).
+    /// Needs `MANAGE` on the device and `SIGNAL` on the notification.
+    pub const DEVICE_IRQ: u64 = 34;
 }
 
 /// `IPC_RECEIVE_MSG` result kinds.
@@ -212,6 +243,10 @@ pub enum Error {
     AddressInUse = -13,
     /// The program image is not an acceptable executable.
     InvalidImage = -14,
+    /// No such object (e.g. no device with that ID).
+    NotFound = -15,
+    /// The object is in exclusive use (e.g. a device another driver opened).
+    Busy = -16,
 }
 
 impl Error {
@@ -235,6 +270,8 @@ impl Error {
             -12 => Self::InvalidArgument,
             -13 => Self::AddressInUse,
             -14 => Self::InvalidImage,
+            -15 => Self::NotFound,
+            -16 => Self::Busy,
             _ => return None,
         })
     }
@@ -433,6 +470,72 @@ pub mod sysinfo {
     }
 }
 
+/// `DEVICE_LIST` records (ADR-0021).
+pub mod device {
+    /// One PCI function. Fixed-size and little-endian.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct DeviceRecord {
+        pub segment: u16,
+        pub bus: u8,
+        /// Device number (0–31).
+        pub slot: u8,
+        pub function: u8,
+        pub vendor: u16,
+        pub device: u16,
+        pub class: u8,
+        pub subclass: u8,
+        pub prog_if: u8,
+        pub revision: u8,
+        /// MSI-X vectors (0: none; such devices cannot interrupt yet).
+        pub msix_vectors: u16,
+        /// Opened by a driver.
+        pub open: bool,
+    }
+
+    impl DeviceRecord {
+        pub const SIZE: usize = 16;
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            out[0..2].copy_from_slice(&self.segment.to_le_bytes());
+            out[2] = self.bus;
+            out[3] = self.slot;
+            out[4] = self.function;
+            out[5] = u8::from(self.open);
+            out[6..8].copy_from_slice(&self.vendor.to_le_bytes());
+            out[8..10].copy_from_slice(&self.device.to_le_bytes());
+            out[10] = self.class;
+            out[11] = self.subclass;
+            out[12] = self.prog_if;
+            out[13] = self.revision;
+            out[14..16].copy_from_slice(&self.msix_vectors.to_le_bytes());
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+            Some(Self {
+                segment: u16_at(0),
+                bus: bytes[2],
+                slot: bytes[3],
+                function: bytes[4],
+                open: bytes[5] != 0,
+                vendor: u16_at(6),
+                device: u16_at(8),
+                class: bytes[10],
+                subclass: bytes[11],
+                prog_if: bytes[12],
+                revision: bytes[13],
+                msix_vectors: u16_at(14),
+            })
+        }
+    }
+
+    /// The `vendor << 16 | device` selector `DEVICE_OPEN` takes.
+    pub const fn selector(vendor: u16, device: u16) -> u64 {
+        ((vendor as u64) << 16) | device as u64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,13 +586,37 @@ mod tests {
     }
 
     #[test]
+    fn device_records_round_trip() {
+        use device::*;
+        let record = DeviceRecord {
+            segment: 1,
+            bus: 2,
+            slot: 31,
+            function: 7,
+            vendor: 0x1af4,
+            device: 0x1042,
+            class: 1,
+            subclass: 0,
+            prog_if: 0,
+            revision: 1,
+            msix_vectors: 2,
+            open: true,
+        };
+        let mut bytes = [0u8; DeviceRecord::SIZE];
+        record.encode(&mut bytes);
+        assert_eq!(DeviceRecord::decode(&bytes), Some(record));
+        assert_eq!(DeviceRecord::decode(&bytes[..15]), None);
+        assert_eq!(selector(0x1af4, 0x1042), 0x1af4_1042);
+    }
+
+    #[test]
     fn error_codes_round_trip_and_are_negative() {
-        for code in -14..=-1 {
+        for code in -16..=-1 {
             let error = Error::from_code(code).expect("defined");
             assert_eq!(error.code(), code);
             assert!(error.code() < 0);
         }
         assert_eq!(Error::from_code(0), None);
-        assert_eq!(Error::from_code(-15), None);
+        assert_eq!(Error::from_code(-17), None);
     }
 }

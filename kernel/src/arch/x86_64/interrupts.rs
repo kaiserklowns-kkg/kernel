@@ -27,6 +27,17 @@ pub const VECTOR_TIMER: u8 = 48;
 pub const VECTOR_SERIAL: u8 = 49;
 /// Local APIC spurious interrupt; must not be acknowledged.
 pub const VECTOR_SPURIOUS: u8 = 255;
+/// Vectors for device interrupts (MSI-X), allocated to drivers (ADR-0021).
+pub const DEVICE_VECTORS: core::ops::Range<u8> = 64..128;
+const DEVICE_VECTOR_COUNT: usize = 64;
+
+/// Called on every device interrupt with its vector, before EOI, with
+/// interrupts disabled.
+static DEVICE_HANDLER: Once<fn(u8)> = Once::new();
+
+pub fn set_device_handler(handler: fn(u8)) {
+    DEVICE_HANDLER.call_once(|| handler);
+}
 
 /// Called on every serial interrupt, before EOI, with interrupts disabled.
 static SERIAL_HANDLER: Once<fn()> = Once::new();
@@ -149,6 +160,39 @@ global_asm!(
     common = sym exception_common,
 );
 
+// Device interrupt stubs (MSI-X vectors), same frame layout.
+macro_rules! device_stubs {
+    ($($vector:literal),* $(,)?) => {
+        global_asm!(
+            ".pushsection .text.oceans_exceptions, \"ax\", @progbits",
+            $(
+                concat!("oceans_device_stub_", stringify!($vector), ":"),
+                "push 0",
+                concat!("push ", stringify!($vector)),
+                "jmp {common}",
+            )*
+            ".popsection",
+            ".pushsection .rodata.oceans_exceptions, \"a\", @progbits",
+            ".balign 8",
+            ".global oceans_device_stubs",
+            ".hidden oceans_device_stubs",
+            "oceans_device_stubs:",
+            $( concat!(".quad oceans_device_stub_", stringify!($vector)), )*
+            ".popsection",
+            common = sym exception_common,
+        );
+    };
+}
+
+device_stubs! {
+    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
+}
+
+unsafe extern "C" {
+    #[link_name = "oceans_device_stubs"]
+    static DEVICE_STUBS: [u64; DEVICE_VECTOR_COUNT];
+}
+
 unsafe extern "C" {
     #[link_name = "oceans_exception_stubs"]
     static EXCEPTION_STUBS: [u64; EXCEPTION_COUNT];
@@ -237,6 +281,17 @@ extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
             }
         }
         v if v == u64::from(VECTOR_SPURIOUS) => {}
+        v if (u64::from(DEVICE_VECTORS.start)..u64::from(DEVICE_VECTORS.end)).contains(&v) => {
+            // MSI-X is edge-triggered: signal, then acknowledge. The device
+            // itself is acknowledged by its driver.
+            if let Some(handler) = DEVICE_HANDLER.get() {
+                handler(v as u8);
+            }
+            super::apic::end_of_interrupt();
+            if let Some(hook) = AFTER_DEVICE_INTERRUPT.get() {
+                hook();
+            }
+        }
         _ => fatal_exception(frame),
     }
 }
@@ -362,8 +417,17 @@ pub fn init() {
         gates[usize::from(VECTOR_SERIAL)] = Gate::interrupt(serial, selector, None);
         gates[usize::from(VECTOR_TIMER)] = Gate::interrupt(timer, selector, None);
         gates[usize::from(VECTOR_SPURIOUS)] = Gate::interrupt(spurious, selector, None);
-        // Other vectors stay non-present until interrupt routing exists; a
-        // stray delivery raises #GP/#NP and is reported as fatal.
+        for (index, gate) in gates
+            [usize::from(DEVICE_VECTORS.start)..usize::from(DEVICE_VECTORS.end)]
+            .iter_mut()
+            .enumerate()
+        {
+            // SAFETY: the device stub table has exactly DEVICE_VECTOR_COUNT
+            // entries, one per vector in DEVICE_VECTORS, never written.
+            *gate = Gate::interrupt(unsafe { DEVICE_STUBS[index] }, selector, None);
+        }
+        // Other vectors stay non-present; a stray delivery raises #GP/#NP
+        // and is reported as fatal.
         Idt(gates)
     });
 

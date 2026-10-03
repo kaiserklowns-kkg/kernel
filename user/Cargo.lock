@@ -50,6 +50,13 @@ name = "oceans-abi"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-block-proto"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-elf"
 version = "0.1.0"
 
@@ -86,5 +93,14 @@ name = "utils"
 version = "0.1.0"
 dependencies = [
  "oceans-abi",
+ "oceans-block-proto",
+ "oceans-rt",
+]
+
+[[package]]
+name = "virtio-blk"
+version = "0.1.0"
+dependencies = [
+ "oceans-block-proto",
  "oceans-rt",
 ]

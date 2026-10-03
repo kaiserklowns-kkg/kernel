@@ -9,9 +9,10 @@ mod memory;
 
 use alloc::sync::Arc;
 
-pub use memory::MemoryObject;
+pub use memory::{MAX_HOLES, MemoryObject};
 
 use crate::ipc::{ClientEnd, Notification, ServerEnd};
+use crate::pci::Device;
 use crate::process::Process;
 use oceans_capability::{CapError, Revoker, Rights};
 
@@ -40,6 +41,13 @@ pub enum KernelObject {
     Console,
     /// Read-only system information (`READ`): `SYSTEM_INFO`, ADR-0020.
     SystemInfo,
+    /// The PCI device bus (ADR-0021): `READ` lists functions, `MANAGE`
+    /// opens them.
+    DeviceBus,
+    /// One open PCI function (ADR-0021): `READ` its configuration space,
+    /// `MANAGE` to enable it, map BARs, allocate DMA memory and bind
+    /// interrupts.
+    Device(Arc<Device>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +61,8 @@ pub enum ObjectKind {
     Process,
     Console,
     SystemInfo,
+    DeviceBus,
+    Device,
 }
 
 impl KernelObject {
@@ -67,6 +77,8 @@ impl KernelObject {
             Self::Process(_) => ObjectKind::Process,
             Self::Console => ObjectKind::Console,
             Self::SystemInfo => ObjectKind::SystemInfo,
+            Self::DeviceBus => ObjectKind::DeviceBus,
+            Self::Device(_) => ObjectKind::Device,
         }
     }
 }
@@ -83,6 +95,8 @@ pub enum ObjectError {
     OutOfBounds,
     /// The mapping would make a memory object writable and executable.
     WriteExecute,
+    /// The kernel does not read or write device memory.
+    NotRam,
 }
 
 impl From<CapError> for ObjectError {
@@ -124,6 +138,13 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::WRITE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
+        ObjectKind::DeviceBus => Rights::READ
+            .union(Rights::MANAGE)
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+        // No DUPLICATE: an open device has exactly one capability, so it
+        // has one driver.
+        ObjectKind::Device => Rights::READ.union(Rights::MANAGE).union(Rights::TRANSFER),
         ObjectKind::Process => Rights::WAIT
             .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
@@ -190,6 +211,11 @@ typed_lookup!(
 typed_lookup!(
     /// Looks up a notification (`SIGNAL` to signal, `WAIT` to wait).
     notification, Notification, Notification
+);
+typed_lookup!(
+    /// Looks up an open device (`READ` for configuration space, `MANAGE`
+    /// for everything else).
+    device, Device, Device
 );
 
 /// Revokes through the revoker capability under `handle` (needs MANAGE).

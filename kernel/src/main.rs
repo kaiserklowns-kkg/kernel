@@ -25,6 +25,7 @@ mod klog;
 mod memory;
 mod object;
 mod panic;
+mod pci;
 mod process;
 mod sched;
 mod syscall;
@@ -75,6 +76,7 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     process::init();
     let acpi = acpi::discover(boot);
     console::init(acpi.as_ref());
+    pci::init(acpi.as_ref());
 
     let smoke_test = boot.cmdline_has(SMOKE_TEST_FLAG);
     if smoke_test {
@@ -104,6 +106,7 @@ fn self_test() {
     object::self_test();
     sched::self_test();
     ipc::self_test();
+    pci::self_test();
     process::self_test(boot::info());
     process::init_self_test(boot::info());
     klog::info!("self-tests passed");

@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 6).
+//! Minimal Oceans userspace runtime (ABI version 7).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -534,6 +534,69 @@ pub fn system_info(sysinfo: Handle, kind: u64, buffer: &mut [u8]) -> Result<usiz
         0,
     ];
     call(nr::SYSTEM_INFO, args).map(|(len, _)| len as usize)
+}
+
+// ---- ABI 7: devices (ADR-0021) ---------------------------------------------
+
+/// Copies a `oceans_abi::device::DeviceRecord` per PCI function into
+/// `buffer`; returns the length (needs `READ` on the device bus).
+pub fn device_list(bus: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    let args = [
+        bus.0,
+        buffer.as_mut_ptr() as u64,
+        buffer.len() as u64,
+        0,
+        0,
+        0,
+    ];
+    call(nr::DEVICE_LIST, args).map(|(len, _)| len as usize)
+}
+
+/// Opens the `index`th PCI function with this vendor and device ID,
+/// exclusively (needs `MANAGE` on the device bus).
+pub fn device_open(bus: Handle, vendor: u16, device: u16, index: u64) -> Result<Handle, Error> {
+    let selector = oceans_abi::device::selector(vendor, device);
+    call(nr::DEVICE_OPEN, [bus.0, selector, index, 0, 0, 0]).map(|(h, _)| Handle(h))
+}
+
+/// Reads `width` (1, 2 or 4) bytes of configuration space at `offset`.
+pub fn device_config_read(device: Handle, offset: u16, width: u8) -> Result<u32, Error> {
+    call(
+        nr::DEVICE_CONFIG_READ,
+        [device.0, u64::from(offset), u64::from(width), 0, 0, 0],
+    )
+    .map(|(value, _)| value as u32)
+}
+
+/// Turns on memory decoding and bus mastering.
+pub fn device_enable(device: Handle) -> Result<(), Error> {
+    call(nr::DEVICE_ENABLE, [device.0, 0, 0, 0, 0, 0]).map(drop)
+}
+
+/// A memory object for memory BAR `bar` and its size.
+pub fn device_bar(device: Handle, bar: u8) -> Result<(Handle, u64), Error> {
+    call(nr::DEVICE_BAR, [device.0, u64::from(bar), 0, 0, 0, 0]).map(|(h, size)| (Handle(h), size))
+}
+
+/// Contiguous DMA memory of at least `size` bytes and the address the
+/// device uses for it.
+pub fn device_dma_create(device: Handle, size: u64) -> Result<(Handle, u64), Error> {
+    call(nr::DEVICE_DMA_CREATE, [device.0, size, 0, 0, 0, 0])
+        .map(|(h, address)| (Handle(h), address))
+}
+
+/// Delivers MSI-X vector `entry` as `bits` on `notification`.
+pub fn device_irq(
+    device: Handle,
+    entry: u16,
+    notification: Handle,
+    bits: u64,
+) -> Result<(), Error> {
+    call(
+        nr::DEVICE_IRQ,
+        [device.0, u64::from(entry), notification.0, bits, 0, 0],
+    )
+    .map(drop)
 }
 
 /// Maps a text memory object read-only for the rest of the process's life

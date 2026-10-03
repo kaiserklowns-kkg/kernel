@@ -137,13 +137,17 @@ impl UserSpace {
             executable,
             user: true,
             global: false,
-            cache: Cache::WriteBack,
+            cache: object.cache(),
         };
         let tables = self.tables.as_mut().expect("live until drop");
-        for (index, frame) in object.frames().iter().enumerate() {
-            let virt = start + index as u64 * PAGE_SIZE;
-            if let Err(err) = tables.map(virt, frame.addr(), PageSize::Size4KiB, flags) {
-                // Roll back the pages mapped so far.
+        for index in 0..len / PAGE_SIZE {
+            let virt = start + index * PAGE_SIZE;
+            // Holes (device pages only the kernel may touch) stay unmapped.
+            let Some(phys) = object.page(index) else {
+                continue;
+            };
+            if let Err(err) = tables.map(virt, phys, PageSize::Size4KiB, flags) {
+                // Roll back the pages mapped so far (holes report NotMapped).
                 for undo in (start..virt).step_by(PAGE_SIZE as usize) {
                     let _ = tables.unmap(undo);
                 }
@@ -185,7 +189,13 @@ impl UserSpace {
             .ok_or(Error::InvalidArgument)?;
         let mapping = self.mappings.swap_remove(index);
         let tables = self.tables.as_mut().expect("live until drop");
-        for page in (mapping.start..mapping.start + mapping.len).step_by(PAGE_SIZE as usize) {
+        for (index, page) in (mapping.start..mapping.start + mapping.len)
+            .step_by(PAGE_SIZE as usize)
+            .enumerate()
+        {
+            if mapping.object.page(index as u64).is_none() {
+                continue; // a hole: never mapped
+            }
             // Flushes this CPU's TLB entry; the space is active (we are its
             // only thread). SMP will need a shootdown here.
             tables
@@ -196,10 +206,12 @@ impl UserSpace {
     }
 
     /// Physical address behind user address `virt`, if mapped for user mode
-    /// (and writable, if `write`).
+    /// (and writable, if `write`) and RAM: the kernel never copies through
+    /// device mappings, which are not in the direct map.
     fn translate(&self, virt: u64, write: bool) -> Option<u64> {
         let (phys, flags) = self.tables().translate(virt)?;
-        (flags.user && (flags.writable || !write)).then_some(phys)
+        (flags.user && (flags.writable || !write) && flags.cache == Cache::WriteBack)
+            .then_some(phys)
     }
 }
 

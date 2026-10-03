@@ -1,6 +1,6 @@
 [package]
 name = "utils"
-description = "Basic Oceans utilities: ps, mem, uptime, uname (ADR-0020)"
+description = "Basic Oceans utilities: ps, mem, uptime, uname (ADR-0020); lspci, disk (ADR-0021)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -26,6 +26,17 @@ name = "uname"
 test = false
 bench = false
 
+[[bin]]
+name = "lspci"
+test = false
+bench = false
+
+[[bin]]
+name = "disk"
+test = false
+bench = false
+
 [dependencies]
 oceans-abi.workspace = true
 oceans-rt.workspace = true
+oceans-block-proto.workspace = true

@@ -41,7 +41,10 @@ pub fn init(acpi: Option<&Acpi>) {
         klog::warn!("console input disabled: no ACPI interrupt routing information");
         return;
     };
-    let (gsi, flags) = acpi.isa_irq(COM1_IRQ);
+    let Some((gsi, flags)) = acpi.isa_irq(COM1_IRQ) else {
+        klog::warn!("console input disabled: no ACPI interrupt routing information");
+        return;
+    };
     let Some(io_apic) = acpi.io_apic_for(gsi) else {
         klog::warn!("console input disabled: no I/O APIC serves GSI {gsi}");
         return;

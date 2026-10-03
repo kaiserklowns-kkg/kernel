@@ -1,0 +1,9 @@
+[package]
+name = "oceans-pci"
+description = "PCI configuration space logic for the Oceans kernel: headers, BAR sizing, capabilities, MSI-X (ADR-0021)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

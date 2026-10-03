@@ -1,5 +1,5 @@
 //! Shared start-up for the utilities: find the console output and the
-//! system-information capability in the handle directory.
+//! capabilities they need in the handle directory.
 
 #![no_std]
 
@@ -17,6 +17,8 @@ pub struct Utility {
 pub const EXIT_NO_CONSOLE: i64 = 1;
 pub const EXIT_NO_SYSINFO: i64 = 2;
 pub const EXIT_FAILED: i64 = 3;
+pub const EXIT_MISSING: i64 = 4;
+pub const EXIT_USAGE: i64 = 5;
 
 impl Utility {
     /// `Err(exit code)` (with a message, if possible) when a needed
@@ -33,6 +35,33 @@ impl Utility {
         };
         Ok(Self { out, sysinfo })
     }
+}
+
+/// Console output and the handle directory, for utilities that need other
+/// capabilities than `sysinfo`.
+pub fn console(start: &Start) -> Result<(Out, Directory), i64> {
+    let directory = Directory::from_start(start).ok_or(EXIT_NO_CONSOLE)?;
+    let out = Out(directory.find_kind("console").ok_or(EXIT_NO_CONSOLE)?);
+    Ok((out, directory))
+}
+
+/// The capability of `kind` called `name`, or a message saying how to
+/// grant it and `Err(EXIT_MISSING)`.
+pub fn require(
+    out: &mut Out,
+    directory: &Directory,
+    program: &str,
+    kind: &str,
+    name: &str,
+    grant: &str,
+) -> Result<Handle, i64> {
+    directory.find(kind, name).ok_or_else(|| {
+        let _ = writeln!(
+            out,
+            "{program}: needs the {name} capability (run {program} out {grant} ...)"
+        );
+        EXIT_MISSING
+    })
 }
 
 /// `bytes` as a short human-readable size.

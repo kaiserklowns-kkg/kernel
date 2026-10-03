@@ -224,12 +224,13 @@ impl Shell {
              \x20 grants                     capabilities this shell holds\r\n\
              \x20 call ENDPOINT TEXT         send TEXT to a service endpoint I use\r\n\
              \x20 run PROGRAM [GRANT...]     run a program with only the listed authority:\r\n\
-             \x20                              log, console, out, sysinfo, use:ENDPOINT\r\n\
+             \x20                              log, console, out, sysinfo, devices, use:ENDPOINT\r\n\
              \x20                              (PROGRAM: a granted module, /bin/NAME, or a path;\r\n\
              \x20                              arguments after `--`)\r\n\
              \x20 PROGRAM [ARGS...]          run /bin/PROGRAM with what its manifest requests\r\n\
              \x20                              (granted automatically: out, sysinfo only),\r\n\
-             \x20                              e.g. ps, mem, uptime, uname\r\n\
+             \x20                              e.g. ps, mem, uptime, uname; `run lspci out devices`,\r\n\
+             \x20                              `run disk out use:block -- info`\r\n\
              \x20 ls [PATH]                  list a directory\r\n\
              \x20 cat PATH                   print a file\r\n\
              \x20 write PATH TEXT            replace a file's contents with TEXT\r\n\
@@ -648,6 +649,13 @@ impl Shell {
                 "sysinfo",
                 "sysinfo",
             ),
+            // The PCI device list (ADR-0021): read-only, no device access.
+            "devices" => (
+                self.directory.find("devices", "devices"),
+                rights::READ | rights::TRANSFER,
+                "devices",
+                "devices",
+            ),
             _ => match grant.strip_prefix("use:") {
                 Some(endpoint) => (
                     self.directory.find("use", endpoint),
@@ -657,7 +665,11 @@ impl Shell {
                     // in our own directory text, which lives forever.
                     self.directory.name("use", endpoint).unwrap_or("endpoint"),
                 ),
-                None => return Err("unknown grant (log, console, out, sysinfo, use:ENDPOINT)"),
+                None => {
+                    return Err(
+                        "unknown grant (log, console, out, sysinfo, devices, use:ENDPOINT)",
+                    );
+                }
             },
         };
         let source = source.ok_or("this shell does not hold it")?;

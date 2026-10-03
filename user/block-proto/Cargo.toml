@@ -1,0 +1,10 @@
+[package]
+name = "oceans-block-proto"
+description = "The Oceans block device protocol and client API (ADR-0021)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt.workspace = true

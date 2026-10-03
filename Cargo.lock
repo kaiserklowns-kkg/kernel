@@ -68,6 +68,7 @@ dependencies = [
  "oceans-frame-allocator",
  "oceans-heap",
  "oceans-memory-map",
+ "oceans-pci",
  "oceans-scheduler",
  "spin",
  "x86_64",
@@ -75,6 +76,10 @@ dependencies = [
 
 [[package]]
 name = "oceans-memory-map"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-pci"
 version = "0.1.0"
 
 [[package]]

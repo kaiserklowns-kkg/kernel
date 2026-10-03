@@ -28,5 +28,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0018](0018-shell.md) | The shell: a capability-explicit command line | Accepted |
 | [0019](0019-filesystem.md) | Filesystem service: node handles as capabilities | Accepted |
 | [0020](0020-system-information-and-utilities.md) | System information, program manifests and basic utilities | Accepted |
+| [0021](0021-pci-and-userspace-drivers.md) | PCI, device capabilities and userspace drivers | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.
