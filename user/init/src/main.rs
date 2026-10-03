@@ -10,7 +10,8 @@
 //!    declared order: `grant = log` (a log capability), `grant = console`
 //!    (the system console), `provide = NAME`
 //!    (the server end of a new endpoint NAME), `use = NAME` (a client end
-//!    of endpoint NAME, provided by an earlier service), `grant = devices`
+//!    of endpoint NAME, provided by an earlier service; `use = NAME as
+//!    ALIAS` lists it as ALIAS, ADR-0035), `grant = devices`
 //!    (the PCI device list, read-only), `grant = device:VVVV:DDDD` (the
 //!    PCI function with that vendor and device ID, opened exclusively:
 //!    what makes a service its driver, ADR-0021), `grant =
@@ -88,6 +89,9 @@ enum Grant {
     DeviceClass(u32, &'static str),
     ConsoleInput,
     Provide(&'static str),
+    /// An endpoint: the manifest's `NAME` or `NAME as ALIAS` (named
+    /// `ALIAS` in the service's directory); see [`use_parts`]. One string,
+    /// so a grant stays small (init's tables live on its stack).
     Use(&'static str),
     Module(&'static str),
 }
@@ -359,7 +363,17 @@ fn parse(
                         }
                     }
                     ("provide", name) => Grant::Provide(name),
-                    (_, name) => Grant::Use(name),
+                    (_, value) => {
+                        let (name, alias) = use_parts(value);
+                        if name.is_empty()
+                            || alias.is_empty()
+                            || name.contains(' ')
+                            || alias.contains(' ')
+                        {
+                            return error("use grants are `use = NAME` or `use = NAME as ALIAS`");
+                        }
+                        Grant::Use(value)
+                    }
                 };
                 let Some(slot) = service.grants.iter_mut().find(|g| g.is_none()) else {
                     return error("too many grants");
@@ -384,11 +398,12 @@ fn parse(
             return Err((0, "a service has no image"));
         }
         for grant in service.grants.iter().flatten() {
-            if let Grant::Use(name) = grant {
+            if let Grant::Use(value) = grant {
+                let (name, _) = use_parts(value);
                 let provided = services[..index]
                     .iter()
                     .flat_map(|s| s.grants.iter().flatten())
-                    .any(|g| matches!(g, Grant::Provide(p) if p == name));
+                    .any(|g| matches!(g, Grant::Provide(p) if *p == name));
                 if !provided {
                     return Err((0, "`use` of an endpoint no earlier service provides"));
                 }
@@ -511,9 +526,10 @@ impl Init {
                         }
                         (server, "provide", name)
                     }
-                    Grant::Use(name) => {
+                    Grant::Use(value) => {
+                        let (name, alias) = use_parts(value);
                         let client = self.registry.get(name).ok_or(Error::InvalidHandle)?;
-                        (oceans_rt::duplicate(client, USE_RIGHTS)?, "use", name)
+                        (oceans_rt::duplicate(client, USE_RIGHTS)?, "use", alias)
                     }
                     Grant::Module(name) => {
                         let module = self.module(name).ok_or(Error::InvalidImage)?;
@@ -627,6 +643,15 @@ fn parse_device_id(id: &str) -> Option<(u16, u16)> {
             .flatten()
     };
     Some((hex(vendor)?, hex(device)?))
+}
+
+/// The endpoint and directory name of a `use` grant: `NAME` or `NAME as
+/// ALIAS`.
+fn use_parts(value: &'static str) -> (&'static str, &'static str) {
+    match value.split_once(" as ") {
+        Some((name, alias)) => (name.trim(), alias.trim()),
+        None => (value, value),
+    }
 }
 
 /// `CCSSPP`: class, subclass and programming interface in hex.

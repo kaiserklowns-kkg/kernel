@@ -42,5 +42,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0032](0032-usb.md) | USB: an xHCI driver and boot keyboards | Accepted |
 | [0033](0033-usb-hubs.md) | USB hubs | Accepted |
 | [0034](0034-usb-mass-storage.md) | USB mass storage and class drivers | Accepted |
+| [0035](0035-mounting-removable-media.md) | Mounting removable media | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

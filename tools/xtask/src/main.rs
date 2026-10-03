@@ -53,14 +53,13 @@ const DISK_IMAGE: &str = "build/disk.img";
 const SMOKE_DISK_IMAGE: &str = "build/smoke-disk.img";
 const DISK_SIZE: u64 = 8 * 1024 * 1024;
 /// The USB stick QEMU plugs into the xHCI controller (ADR-0034): `run`
-/// keeps its own, `smoke` starts from a fresh one holding `STICK_TEXT` in
-/// sector 0; the first smoke boot writes `STICK_WRITTEN` to sector 1 and
-/// the second reads it back.
+/// keeps its own, `smoke` starts from a blank one: the first boot gets it
+/// formatted through `/usb` (ADR-0035) and stores `STICK_TEXT` and a
+/// download there, the second reads them back, and the host checks them.
 const STICK_IMAGE: &str = "build/usb-stick.img";
 const SMOKE_STICK_IMAGE: &str = "build/smoke-stick.img";
 const STICK_SIZE: usize = 4 * 1024 * 1024;
-const STICK_TEXT: &str = "hello from a usb stick";
-const STICK_WRITTEN: &str = "written over usb";
+const STICK_TEXT: &str = "kept on a usb stick";
 /// What the first smoke boot stores and the second reads back.
 const KEPT_PATH: [&str; 2] = ["keep", "note.txt"];
 const KEPT_TEXT: &str = "kept across reboots";
@@ -152,13 +151,17 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"lsusb\r\n",
     b"run lsusb out use:usb\r\n",
     b"@usb echo typed on usb\r",
-    // USB mass storage (ADR-0034): the stick through the block protocol,
-    // then unplugged.
+    // USB mass storage (ADR-0034) through the block protocol, and as the
+    // filesystem mounted at /usb (ADR-0035): formatted when first used,
+    // written by the shell and by fetch, synced, then unplugged.
     b"run disk out use:usbdisk -- info\r\n",
-    b"run disk out use:usbdisk -- read 0\r\n",
-    b"run disk out use:usbdisk -- write 1 written over usb\r\n",
-    b"run disk out use:usbdisk -- read 1\r\n",
+    b"ls /usb\r\n",
+    b"write /usb/note.txt kept on a usb stick\r\n",
+    b"cat /usb/note.txt\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /usb/big.bin\r\n",
+    b"sync\r\n",
     b"@monitor device_del stick",
+    b"ls /usb\r\n",
     b"run disk out use:usbdisk -- info\r\n",
     // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
     // and is removed again; then the hub goes, taking its tablet along.
@@ -177,11 +180,15 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"ls /\r\n",
     b"write /bin/evil x\r\n",
     b"uname\r\n",
-    b"run disk out use:usbdisk -- read 1\r\n",
+    b"ls /usb\r\n",
+    b"cat /usb/note.txt\r\n",
     b"exit\r\n",
 ];
 const REBOOT_EXPECT: &[Expect] = &[
-    Expect::Line("written over usb"),
+    Expect::Contains("fs (media): mounted the disk"),
+    Expect::Line("  usb/"),
+    Expect::Line("  big.bin"),
+    Expect::Line("kept on a usb stick"),
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept across reboots"),
     Expect::Line("  note.txt"),
@@ -261,9 +268,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("usb-storage: port 3: QEMU QEMU HARDDISK, 4 MiB (8192 blocks of 512 bytes)"),
     Expect::Line("port 3: 46f4:0001 QEMU USB HARDDRIVE (5 Gb/s) mass storage"),
     Expect::Line("disk: 8192 sectors of 512 bytes (4 MiB)"),
-    Expect::Line("hello from a usb stick"),
-    Expect::Line("disk: wrote sector 1"),
-    Expect::Line("written over usb"),
+    Expect::Contains("fs: /usb: a mounted filesystem"),
+    Expect::Contains("fs (media): ready for removable media"),
+    Expect::Contains("fs (media): formatted a blank disk: "),
+    Expect::Line("kept on a usb stick"),
+    Expect::Contains("fs (media): unmounted the disk (disk removed)"),
+    Expect::Contains("ls: /usb: no disk"),
     Expect::Contains("usb-storage: port 3: disk removed"),
     Expect::Contains("xhci: port 3: device removed"),
     Expect::Contains("disk: I/O error"),
@@ -728,34 +738,42 @@ fn run(profile: Profile) -> Result {
     )?)
 }
 
-/// A USB stick image with `STICK_TEXT` in sector 0; an existing one is
-/// replaced only if `fresh`.
+/// A blank USB stick image; an existing one is replaced only if `fresh`.
 fn prepare_stick(path: &str, fresh: bool) -> Result {
     let path = root().join(path);
     if path.is_file() && !fresh {
         return Ok(());
     }
-    let mut image = vec![0u8; STICK_SIZE];
-    image[..STICK_TEXT.len()].copy_from_slice(STICK_TEXT.as_bytes());
-    fs::write(&path, image).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    fs::write(&path, vec![0u8; STICK_SIZE])
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// What the guest wrote to the stick over USB, read from its image.
+/// The files the guest stored on the stick, read from its image as an
+/// Oceans volume.
 fn check_smoke_stick() -> Result {
+    use oceans_volume::{ROOT, Volume};
+
     let path = root().join(SMOKE_STICK_IMAGE);
     let image = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let sector = image.get(512..1024).ok_or("the stick image shrank")?;
-    let text = &sector[..sector.iter().position(|&b| b == 0).unwrap_or(512)];
-    if text != STICK_WRITTEN.as_bytes() {
-        return Err(format!(
-            "the USB stick's sector 1 holds {:?}",
-            String::from_utf8_lossy(text)
-        ));
+    let (mut volume, _) = Volume::open(ImageFile(image), false)
+        .map_err(|e| format!("the USB stick does not mount on the host: {e:?}"))?;
+    let mut read = |name: &str| -> std::result::Result<Vec<u8>, String> {
+        let node = volume
+            .lookup(ROOT, name)
+            .map_err(|e| format!("/usb/{name}: {e:?}"))?;
+        let mut bytes = vec![0u8; volume.size(node).map_err(|e| format!("{e:?}"))? as usize];
+        volume
+            .read(node, 0, &mut bytes)
+            .map_err(|e| format!("reading /usb/{name}: {e:?}"))?;
+        Ok(bytes)
+    };
+    if read("note.txt")? != format!("{STICK_TEXT}\n").as_bytes() {
+        return Err("/usb/note.txt does not hold what the shell wrote".into());
     }
-    if !image.starts_with(STICK_TEXT.as_bytes()) {
-        return Err("the USB stick's sector 0 changed".into());
+    if read("big.bin")? != big_body() {
+        return Err("/usb/big.bin does not match what the host served".into());
     }
-    println!("the sector written over USB is on the stick image");
+    println!("the files written to /usb are on the stick image");
     Ok(())
 }
 

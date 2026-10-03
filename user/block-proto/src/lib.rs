@@ -278,6 +278,12 @@ impl Disk {
         self.transfer(op::WRITE, sector, count, offset)
     }
 
+    /// Whether the session still reaches its disk: drivers of removable
+    /// media end the sessions of a disk that goes away (ADR-0035).
+    pub fn alive(&self) -> bool {
+        info(self.session).is_ok()
+    }
+
     pub fn flush(&self) -> Result<(), BlockError> {
         request(self.session, op::FLUSH, &[], &[], &mut [], &mut []).map(drop)
     }

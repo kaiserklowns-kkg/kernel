@@ -430,8 +430,9 @@ impl Driver {
     }
 
     /// xhci signalled: a stick came or went. A gone stick's session
-    /// answers GONE.
-    fn usb_event(&mut self) {
+    /// answers GONE. Returns whether a stick went away.
+    fn usb_event(&mut self) -> bool {
+        let mut removed = false;
         if let Some(disk) = self.disk.take() {
             match self.run(&disk, &Command::test_unit_ready()) {
                 Err(Failure::Gone) => {
@@ -440,14 +441,16 @@ impl Driver {
                         format_args!("port {}: disk removed", disk.claim.path()),
                     );
                     let _ = oceans_rt::close(disk.session);
+                    removed = true;
                 }
                 _ => {
                     self.disk = Some(disk);
-                    return;
+                    return false;
                 }
             }
         }
         self.find_disk();
+        removed
     }
 
     fn info(&self) -> Option<Info> {
@@ -476,7 +479,13 @@ impl Driver {
                 }
             };
             if got.signals != 0 {
-                self.usb_event();
+                // Sessions belong to one stick: when it goes, they end, so
+                // a client never writes a volume onto the next stick.
+                if self.usb_event() {
+                    for session in sessions.iter_mut().filter_map(Option::take) {
+                        let _ = oceans_rt::memory_unmap(session.buffer);
+                    }
+                }
                 continue;
             }
             let find = |badge| {
@@ -499,6 +508,8 @@ impl Driver {
             let mut reply_len = 0;
             let mut kept = false;
             let status = match (got.label, session) {
+                // A session of a removed stick learns it here.
+                (op::INFO, None) if got.badge != 0 => Status::BadRequest,
                 (op::INFO, _) => match self.info() {
                     Some(info) => {
                         reply_data = info.encode();

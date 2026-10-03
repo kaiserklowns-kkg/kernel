@@ -111,6 +111,12 @@ pub enum Status {
     IoError = 10,
     /// Data on the disk no longer matches its checksum (ADR-0027).
     Corrupt = 11,
+    /// Removable media (ADR-0035): no disk is present, or the one this
+    /// handle was opened on has been removed.
+    NoMedium = 12,
+    /// The disk holds something other than an Oceans volume (left
+    /// untouched).
+    Unsupported = 13,
 }
 
 impl Status {
@@ -127,6 +133,8 @@ impl Status {
             8 => Self::NoSpace,
             10 => Self::IoError,
             11 => Self::Corrupt,
+            12 => Self::NoMedium,
+            13 => Self::Unsupported,
             _ => Self::BadRequest,
         }
     }
@@ -145,6 +153,8 @@ impl Status {
             Self::BadRequest => "bad request",
             Self::IoError => "I/O error",
             Self::Corrupt => "data corrupted on disk (checksum mismatch)",
+            Self::NoMedium => "no disk",
+            Self::Unsupported => "not an Oceans volume",
         }
     }
 }
