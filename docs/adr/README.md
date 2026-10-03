@@ -20,5 +20,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0010](0010-kernel-heap.md) | Kernel heap: slab caches + buddy page blocks via the direct map | Accepted |
 | [0011](0011-capabilities.md) | Kernel objects and capabilities | Accepted |
 | [0012](0012-threads-and-scheduling.md) | Kernel threads and preemptive round-robin scheduling | Accepted |
+| [0013](0013-ipc.md) | IPC: endpoints (call/reply) and notifications | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

@@ -12,7 +12,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use oceans_scheduler::{RunQueue, TimeSlice};
 use spin::Mutex;
@@ -34,6 +34,9 @@ pub struct Thread {
     /// `switch_context` when the thread is switched out, read when it is
     /// switched in, both with interrupts disabled on the only CPU.
     saved_rsp: UnsafeCell<u64>,
+    /// Set while the thread waits in [`block`] for a [`wake`]. Guards
+    /// against double wake-ups, which would queue a thread twice.
+    blocked: AtomicBool,
     /// The thread's stack; freed when the thread is reaped.
     _stack: KernelStack,
 }
@@ -105,6 +108,7 @@ pub fn init() {
         name: "boot",
         // Filled in by the first switch away from it.
         saved_rsp: UnsafeCell::new(0),
+        blocked: AtomicBool::new(false),
         _stack: stack,
     });
     let idle = new_thread("idle", idle_main, 0)
@@ -149,6 +153,43 @@ pub fn exit() -> ! {
     unreachable!("an exited thread was resumed");
 }
 
+/// The running thread.
+pub fn current() -> Arc<Thread> {
+    arch::without_interrupts(|| SCHEDULER.lock().current.clone().expect("scheduler running"))
+}
+
+/// Blocks the current thread until [`wake`] is called for it.
+///
+/// The caller must have disabled interrupts *before* checking its wait
+/// condition and registering the thread with the object that will wake it:
+/// on a single CPU that makes check-register-block atomic, so no wake-up can
+/// be lost. The registration must keep the thread alive (hold its `Arc`).
+pub fn block() {
+    schedule_to(None, Reason::Block);
+}
+
+/// Like [`block`], but runs `next` (which must be blocked) immediately
+/// instead of the next ready thread: the IPC direct switch.
+pub fn block_and_switch_to(next: Arc<Thread>) {
+    claim_wake(&next);
+    schedule_to(Some(next), Reason::Block);
+}
+
+/// Makes a thread blocked in [`block`] runnable again.
+pub fn wake(thread: Arc<Thread>) {
+    claim_wake(&thread);
+    arch::without_interrupts(|| SCHEDULER.lock().queue.push_ready(thread));
+}
+
+fn claim_wake(thread: &Thread) {
+    if !thread.blocked.swap(false, Ordering::AcqRel) {
+        panic!(
+            "thread {} ({}) woken while not blocked",
+            thread.id.0, thread.name
+        );
+    }
+}
+
 /// Threads that exist (including the idle thread and unreaped zombies).
 pub fn live_threads() -> usize {
     LIVE_THREADS.load(Ordering::Relaxed)
@@ -167,6 +208,7 @@ fn new_thread(name: &'static str, entry: fn(usize), arg: usize) -> Result<Arc<Th
         id: next_id(),
         name,
         saved_rsp: UnsafeCell::new(rsp),
+        blocked: AtomicBool::new(false),
         _stack: stack,
     }))
 }
@@ -192,18 +234,34 @@ enum Reason {
     Yield,
     /// Runnable again at this tick.
     Sleep(u64),
+    /// Waiting for [`wake`]; owned by whatever registered it.
+    Block,
     Exit,
 }
 
 /// Switches away from the current thread. Interrupts must be disabled.
 ///
 /// Protocol: decide under the scheduler lock, release it, then switch. The
-/// outgoing thread stays referenced by the queue, sleep queue or zombie
-/// list, so the `saved_rsp` slot written by the switch remains valid.
+/// outgoing thread stays referenced by the queue, sleep queue, zombie list
+/// or (when blocked) the object it waits on, so the `saved_rsp` slot written by the switch remains valid.
 fn schedule(reason: Reason) {
+    schedule_to(None, reason);
+}
+
+/// [`schedule`], optionally running `target` next instead of the head of the
+/// ready queue (`target` must not be in the ready queue).
+fn schedule_to(target: Option<Arc<Thread>>, reason: Reason) {
     let (save, load) = {
         let mut scheduler = SCHEDULER.lock();
-        let next = match scheduler.queue.pop_ready() {
+        if matches!(reason, Reason::Block) {
+            let current = scheduler.current.as_ref().expect("scheduler running");
+            assert!(
+                !scheduler.current_is_idle(),
+                "the idle thread must never block"
+            );
+            current.blocked.store(true, Ordering::Release);
+        }
+        let next = match target.or_else(|| scheduler.queue.pop_ready()) {
             Some(next) => next,
             // Nothing else to run: a yielding thread just continues.
             None if matches!(reason, Reason::Yield) => {
@@ -219,6 +277,8 @@ fn schedule(reason: Reason) {
             Reason::Yield if was_idle => {}
             Reason::Yield => scheduler.queue.push_ready(previous),
             Reason::Sleep(deadline) => scheduler.queue.sleep_until(previous, deadline),
+            // Kept alive by the object it waits on (see `block`).
+            Reason::Block => drop(previous),
             Reason::Exit => scheduler.zombies.push(previous),
         }
         // SAFETY: `next` is not running, so its saved stack pointer is stable.

@@ -115,3 +115,9 @@ pub fn enable_interrupts() {
 pub fn wait_for_interrupt() {
     insn::interrupts::enable_and_hlt();
 }
+
+/// CPU timestamp counter, for benchmarks (cycles; invariant TSC on Tier 1).
+pub fn cycles() -> u64 {
+    // SAFETY: RDTSC is available on every x86_64 CPU and has no side effects.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}

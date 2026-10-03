@@ -10,6 +10,8 @@ mod memory;
 use alloc::sync::Arc;
 
 pub use memory::MemoryObject;
+
+use crate::ipc::{ClientEnd, Notification, ServerEnd};
 use oceans_capability::{CapError, Revoker, Rights};
 
 /// Capabilities a process may hold unless its resource limits say otherwise.
@@ -24,12 +26,20 @@ pub enum KernelObject {
     Memory(Arc<MemoryObject>),
     /// Authority to revoke a capability derived with `derive_revocable`.
     Revoker(Revoker),
+    /// Receiving side of an IPC endpoint.
+    EndpointServer(Arc<ServerEnd>),
+    /// Calling side of an IPC endpoint.
+    EndpointClient(Arc<ClientEnd>),
+    Notification(Arc<Notification>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectKind {
     Memory,
     Revoker,
+    EndpointServer,
+    EndpointClient,
+    Notification,
 }
 
 impl KernelObject {
@@ -37,6 +47,9 @@ impl KernelObject {
         match self {
             Self::Memory(_) => ObjectKind::Memory,
             Self::Revoker(_) => ObjectKind::Revoker,
+            Self::EndpointServer(_) => ObjectKind::EndpointServer,
+            Self::EndpointClient(_) => ObjectKind::EndpointClient,
+            Self::Notification(_) => ObjectKind::Notification,
         }
     }
 }
@@ -69,6 +82,16 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Revoker => Rights::MANAGE.union(Rights::TRANSFER),
+        ObjectKind::EndpointServer => Rights::RECEIVE
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+        ObjectKind::EndpointClient => Rights::SEND
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+        ObjectKind::Notification => Rights::SIGNAL
+            .union(Rights::WAIT)
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
     }
 }
 
@@ -86,6 +109,38 @@ pub fn memory(
         }),
     }
 }
+
+macro_rules! typed_lookup {
+    ($(#[$doc:meta])* $name:ident, $variant:ident, $ty:ty) => {
+        $(#[$doc])*
+        pub fn $name(
+            table: &mut CapTable,
+            handle: oceans_capability::Handle,
+            required: Rights,
+        ) -> Result<Arc<$ty>, ObjectError> {
+            match table.get(handle, required)?.object() {
+                KernelObject::$variant(object) => Ok(object.clone()),
+                other => Err(ObjectError::WrongType {
+                    expected: ObjectKind::$variant,
+                    found: other.kind(),
+                }),
+            }
+        }
+    };
+}
+
+typed_lookup!(
+    /// Looks up an endpoint server end (`RECEIVE` to receive).
+    server_end, EndpointServer, ServerEnd
+);
+typed_lookup!(
+    /// Looks up an endpoint client end (`SEND` to call).
+    client_end, EndpointClient, ClientEnd
+);
+typed_lookup!(
+    /// Looks up a notification (`SIGNAL` to signal, `WAIT` to wait).
+    notification, Notification, Notification
+);
 
 /// Revokes through the revoker capability under `handle` (needs MANAGE).
 pub fn revoke(table: &mut CapTable, handle: oceans_capability::Handle) -> Result<(), ObjectError> {

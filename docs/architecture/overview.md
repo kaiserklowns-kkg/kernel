@@ -48,7 +48,7 @@ UEFI firmware → Limine → kernel_entry (boot/limine.rs)
   → kernel_main_on_kernel_stack
       → reclaim bootloader memory
       → sched::init       boot code becomes thread 0; idle thread; APIC timer (100 Hz)
-      → self-tests        only with oceans.test=smoke (memory, heap, capabilities, scheduler)
+      → self-tests        only with oceans.test=smoke (memory, heap, capabilities, scheduler, IPC)
       → "OCEANS KERNEL ONLINE"
       → boot thread exits; idle thread runs
 ```

@@ -18,6 +18,7 @@ extern crate alloc;
 
 mod arch;
 mod boot;
+mod ipc;
 mod klog;
 mod memory;
 mod object;
@@ -89,5 +90,6 @@ fn self_test() {
     memory::self_test();
     object::self_test();
     sched::self_test();
+    ipc::self_test();
     klog::info!("self-tests passed");
 }
