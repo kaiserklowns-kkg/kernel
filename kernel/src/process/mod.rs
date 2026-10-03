@@ -1,5 +1,5 @@
-//! Processes (ADR-0014): an isolated address space, a capability table,
-//! and the threads that run in them.
+//! Processes (ADR-0014, ADR-0015): an isolated address space, a capability
+//! table, and the threads that run in them.
 //!
 //! - All user memory is mapped from memory objects (ADR-0011), so frames are
 //!   owned by objects and freed when the last mapping or capability goes.
@@ -7,36 +7,51 @@
 //!   page tables to the backing frames and copies through the direct map, so
 //!   a bad pointer is an error (`BadAddress`), never a kernel fault, and
 //!   SMAP stays enabled.
-//! - A process holds only the capabilities it was given at start or receives
-//!   over IPC. There is no ambient authority, not even for logging.
+//! - A process holds only the capabilities it was given at start, received
+//!   over IPC or created itself. There is no ambient authority, not even for
+//!   logging.
+//! - Exit closes the capabilities at once; the address space is freed when
+//!   the last thread is reaped. The process record (exit code) lives on while
+//!   anyone holds a capability to it.
 
+use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
-use oceans_abi::{Error, start::MAX_INITIAL_HANDLES};
+use oceans_abi::{Error, prot, start::MAX_INITIAL_HANDLES};
 use oceans_elf::{ElfError, Executable, Limits};
 use oceans_memory_map::PAGE_SIZE;
 use spin::Mutex;
 
 use crate::arch::{self, AddressSpace, TrapFrame};
+use crate::klog;
 use crate::memory::layout::USER;
 use crate::memory::paging::{self, Cache, MapError, MapFlags, PageSize};
 use crate::memory::phys_to_virt;
 use crate::object::{CapTable, Capability, DEFAULT_CAP_LIMIT, MemoryObject, ObjectError};
-use crate::{klog, sched};
+use crate::sched::{self, Thread};
+
+mod self_test;
+pub use self_test::self_test;
 
 /// Top of the main thread's stack; the stack grows down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_7fff_f000_0000;
 pub const USER_STACK_SIZE: u64 = 64 * 1024;
 
 /// Where program images may be loaded: above the first 64 KiB (null
-/// pointer guard) and well below the stack.
+/// pointer guard), below the mapping region.
 const IMAGE_LIMITS: Limits = Limits {
     lowest: 0x1_0000,
-    highest: 0x0000_7000_0000_0000,
+    highest: MAP_REGION_START,
     max_total: 256 * 1024 * 1024,
 };
+
+/// Where `MEMORY_MAP` places objects when the caller lets the kernel choose.
+const MAP_REGION_START: u64 = 0x0000_1000_0000_0000;
+const MAP_REGION_END: u64 = 0x0000_7000_0000_0000;
 
 /// Exit code of a process killed by CPU exception `vector`.
 pub const fn killed_by_exception(vector: u64) -> i64 {
@@ -55,19 +70,36 @@ pub enum SpawnError {
     Thread(sched::SpawnError),
 }
 
+impl From<SpawnError> for Error {
+    fn from(error: SpawnError) -> Self {
+        match error {
+            SpawnError::Elf(_) => Error::InvalidImage,
+            SpawnError::TooManyHandles => Error::TooLarge,
+            SpawnError::Memory(_) | SpawnError::Map(_) | SpawnError::Thread(_) => {
+                Error::OutOfMemory
+            }
+        }
+    }
+}
+
 struct Mapping {
-    #[expect(
-        dead_code,
-        reason = "kept for unmapping, which arrives with the memory syscalls"
-    )]
     start: u64,
+    len: u64,
     /// Keeps the backing frames alive while mapped.
-    _object: Arc<MemoryObject>,
+    object: Arc<MemoryObject>,
+}
+
+impl Mapping {
+    fn overlaps(&self, start: u64, len: u64) -> bool {
+        start < self.start + self.len && self.start < start + len
+    }
 }
 
 struct UserSpace {
     tables: Option<AddressSpace>,
     mappings: Vec<Mapping>,
+    /// Next candidate address for kernel-chosen mappings.
+    next_map: u64,
 }
 
 impl UserSpace {
@@ -82,7 +114,22 @@ impl UserSpace {
         object: Arc<MemoryObject>,
         writable: bool,
         executable: bool,
-    ) -> Result<(), MapError> {
+    ) -> Result<(), Error> {
+        let len = object.size();
+        if !start.is_multiple_of(PAGE_SIZE) {
+            return Err(Error::InvalidArgument);
+        }
+        let end = start.checked_add(len).ok_or(Error::BadAddress)?;
+        if start < USER.start || end > USER.end {
+            return Err(Error::BadAddress);
+        }
+        if self.mappings.iter().any(|m| m.overlaps(start, len)) {
+            return Err(Error::AddressInUse);
+        }
+        object
+            .claim_mapping(writable, executable)
+            .map_err(|_| Error::InvalidArgument)?;
+
         let flags = MapFlags {
             writable,
             executable,
@@ -93,13 +140,57 @@ impl UserSpace {
         let tables = self.tables.as_mut().expect("live until drop");
         for (index, frame) in object.frames().iter().enumerate() {
             let virt = start + index as u64 * PAGE_SIZE;
-            tables.map(virt, frame.addr(), PageSize::Size4KiB, flags)?;
+            if let Err(err) = tables.map(virt, frame.addr(), PageSize::Size4KiB, flags) {
+                // Roll back the pages mapped so far.
+                for undo in (start..virt).step_by(PAGE_SIZE as usize) {
+                    let _ = tables.unmap(undo);
+                }
+                return Err(match err {
+                    MapError::OutOfMemory => Error::OutOfMemory,
+                    _ => Error::AddressInUse,
+                });
+            }
         }
-        self.mappings.push(Mapping {
-            start,
-            _object: object,
-        });
+        self.mappings.push(Mapping { start, len, object });
         Ok(())
+    }
+
+    /// A free, page-aligned range of `len` bytes in the mapping region,
+    /// leaving an unmapped guard page after the previous kernel-chosen one.
+    fn choose_address(&mut self, len: u64) -> Result<u64, Error> {
+        let mut candidate = self.next_map;
+        loop {
+            let end = candidate.checked_add(len).ok_or(Error::OutOfMemory)?;
+            if end > MAP_REGION_END {
+                return Err(Error::OutOfMemory);
+            }
+            match self.mappings.iter().find(|m| m.overlaps(candidate, len)) {
+                None => {
+                    self.next_map = end + PAGE_SIZE;
+                    return Ok(candidate);
+                }
+                Some(m) => candidate = m.start + m.len + PAGE_SIZE,
+            }
+        }
+    }
+
+    /// Removes the mapping starting at `start`; its object is released.
+    fn unmap(&mut self, start: u64) -> Result<Arc<MemoryObject>, Error> {
+        let index = self
+            .mappings
+            .iter()
+            .position(|m| m.start == start)
+            .ok_or(Error::InvalidArgument)?;
+        let mapping = self.mappings.swap_remove(index);
+        let tables = self.tables.as_mut().expect("live until drop");
+        for page in (mapping.start..mapping.start + mapping.len).step_by(PAGE_SIZE as usize) {
+            // Flushes this CPU's TLB entry; the space is active (we are its
+            // only thread). SMP will need a shootdown here.
+            tables
+                .unmap(page)
+                .unwrap_or_else(|err| panic!("user mapping page {page:#x}: {err:?}"));
+        }
+        Ok(mapping.object)
     }
 
     /// Physical address behind user address `virt`, if mapped for user mode
@@ -127,19 +218,28 @@ impl Drop for UserSpace {
 
 pub struct Process {
     id: ProcessId,
-    name: &'static str,
+    name: String,
     root: u64,
-    space: Mutex<UserSpace>,
+    /// `None` once the last thread has been reaped.
+    space: Mutex<Option<UserSpace>>,
     capabilities: Mutex<CapTable>,
     exited: AtomicBool,
     exit_code: AtomicI64,
+    /// Threads blocked in `wait_exit`.
+    exit_waiters: Mutex<VecDeque<Arc<Thread>>>,
+}
+
+impl fmt::Debug for Process {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Process({} {})", self.id.0, self.name)
+    }
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Process {
-    pub fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Page-table root of the process's address space.
@@ -158,9 +258,76 @@ impl Process {
             .then(|| self.exit_code.load(Ordering::Relaxed))
     }
 
+    /// Blocks until the process exits; returns its exit code.
+    pub fn wait_exit(&self) -> i64 {
+        arch::without_interrupts(|| {
+            loop {
+                {
+                    let mut waiters = self.exit_waiters.lock();
+                    if let Some(code) = self.exit_status() {
+                        return code;
+                    }
+                    waiters.push_back(sched::current());
+                }
+                sched::block();
+            }
+        })
+    }
+
     fn set_exit(&self, code: i64) {
-        self.exit_code.store(code, Ordering::Relaxed);
-        self.exited.store(true, Ordering::Release);
+        let waiters = arch::without_interrupts(|| {
+            let mut waiters = self.exit_waiters.lock();
+            self.exit_code.store(code, Ordering::Relaxed);
+            self.exited.store(true, Ordering::Release);
+            core::mem::take(&mut *waiters)
+        });
+        for waiter in waiters {
+            sched::wake(waiter);
+        }
+    }
+
+    /// Called when the process's last thread has been reaped (never while
+    /// its address space is active): frees the address space.
+    pub fn release_address_space(&self) {
+        let space = arch::without_interrupts(|| self.space.lock().take());
+        drop(space);
+    }
+
+    fn with_space<R>(
+        &self,
+        f: impl FnOnce(&mut UserSpace) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        arch::without_interrupts(|| match self.space.lock().as_mut() {
+            Some(space) => f(space),
+            None => Err(Error::BadAddress),
+        })
+    }
+
+    /// Maps `object` at `addr` (0: the kernel chooses) with `prot` bits.
+    pub fn map_memory(
+        &self,
+        object: Arc<MemoryObject>,
+        addr: u64,
+        prot_bits: u64,
+    ) -> Result<u64, Error> {
+        let writable = prot_bits & prot::WRITE != 0;
+        let executable = prot_bits & prot::EXECUTE != 0;
+        self.with_space(|space| {
+            let start = if addr == 0 {
+                space.choose_address(object.size())?
+            } else {
+                addr
+            };
+            space.map(start, object, writable, executable)?;
+            Ok(start)
+        })
+    }
+
+    pub fn unmap_memory(&self, addr: u64) -> Result<(), Error> {
+        let object = self.with_space(|space| space.unmap(addr))?;
+        // Released outside the lock: the last reference frees frames.
+        drop(object);
+        Ok(())
     }
 
     /// Copies `out.len()` bytes from user address `addr`.
@@ -194,8 +361,7 @@ impl Process {
             .checked_add(len as u64)
             .filter(|&end| addr >= USER.start && end <= USER.end)
             .ok_or(Error::BadAddress)?;
-        arch::without_interrupts(|| {
-            let space = self.space.lock();
+        self.with_space(|space| {
             // Validate the whole range first, so a failed copy changes nothing.
             let mut page = addr - addr % PAGE_SIZE;
             while page < end {
@@ -229,7 +395,7 @@ impl Drop for Process {
 /// argument word. Its first thread starts with `rdi` = handle count, `rsi` =
 /// pointer to the handles (on its stack), `rdx` = `arg` (ABI `start`).
 pub fn spawn(
-    name: &'static str,
+    name: &str,
     image: &[u8],
     initial: Vec<Capability>,
     arg: u64,
@@ -243,7 +409,9 @@ pub fn spawn(
     let mut space = UserSpace {
         tables: Some(tables),
         mappings: Vec::new(),
+        next_map: MAP_REGION_START,
     };
+    let map_error = |_| SpawnError::Map(MapError::OutOfMemory);
 
     for segment in executable.segments() {
         let start = segment.page_start();
@@ -253,7 +421,7 @@ pub fn spawn(
             .map_err(SpawnError::Memory)?;
         space
             .map(start, object, segment.writable, segment.executable)
-            .map_err(SpawnError::Map)?;
+            .map_err(map_error)?;
     }
 
     let mut capabilities = CapTable::new(DEFAULT_CAP_LIMIT);
@@ -279,26 +447,40 @@ pub fn spawn(
     let user_rsp = handles_addr - 8;
     space
         .map(stack_base, stack, true, false)
-        .map_err(SpawnError::Map)?;
+        .map_err(map_error)?;
 
     let process = Arc::new(Process {
         id: ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
-        name,
+        name: String::from(name),
         root,
-        space: Mutex::new(space),
+        space: Mutex::new(Some(space)),
         capabilities: Mutex::new(capabilities),
         exited: AtomicBool::new(false),
         exit_code: AtomicI64::new(0),
+        exit_waiters: Mutex::new(VecDeque::new()),
     });
     let args = [handles.len() as u64, handles_addr, arg];
-    sched::spawn_user(name, process.clone(), executable.entry(), user_rsp, args)
-        .map_err(SpawnError::Thread)?;
+    sched::spawn_user(
+        "user-main",
+        process.clone(),
+        executable.entry(),
+        user_rsp,
+        args,
+    )
+    .map_err(SpawnError::Thread)?;
     klog::debug!(
         "process {} ({name}) started at {:#x}",
         process.id.0,
         executable.entry()
     );
     Ok(process)
+}
+
+/// Checks that `image` is a loadable executable, without loading it.
+pub fn validate_image(image: &[u8]) -> Result<(), Error> {
+    Executable::parse(image, IMAGE_LIMITS)
+        .map(drop)
+        .map_err(|_| Error::InvalidImage)
 }
 
 /// Enables user mode: syscalls and the ring-3 fault handler.
@@ -316,12 +498,12 @@ pub fn init() {
 pub fn exit_current(code: i64) -> ! {
     let thread = sched::current();
     if let Some(process) = thread.process() {
-        process.set_exit(code);
         let capabilities = arch::without_interrupts(|| {
             core::mem::replace(&mut *process.capabilities.lock(), CapTable::new(0))
         });
         // Dropped outside the lock: closing endpoint ends wakes other threads.
         drop(capabilities);
+        process.set_exit(code);
     }
     drop(thread);
     sched::exit()
@@ -347,94 +529,4 @@ fn on_user_fault(frame: &TrapFrame) -> ! {
     }
     drop(thread);
     exit_current(killed_by_exception(frame.vector))
-}
-
-/// Phase 2 exit criterion, for smoke-test boots: isolated user processes
-/// exchange IPC messages, bad requests are rejected, and a process touching
-/// kernel memory is killed without harming anyone else.
-pub fn self_test(boot: &crate::boot::BootInfo) {
-    use alloc::vec;
-
-    use crate::ipc::endpoint::Endpoint;
-    use crate::object::{KernelObject, ObjectKind, default_rights};
-    use crate::time;
-
-    // Roles understood by the `ipc-test` program (user/ipc-test).
-    const SERVER: u64 = 1;
-    const CLIENT: u64 = 2;
-    const INTRUDER: u64 = 3;
-
-    let module = boot
-        .module("ipc-test")
-        .expect("smoke image ships the ipc-test module");
-    // SAFETY: boot modules stay mapped read-only in the direct map for the
-    // kernel's lifetime (ADR-0009) and are never written.
-    let image = unsafe {
-        core::slice::from_raw_parts(
-            phys_to_virt(module.physical_base).cast_const(),
-            module.size as usize,
-        )
-    };
-    let log = || Capability::new(KernelObject::Log, default_rights(ObjectKind::Log));
-
-    let (server_end, client_end) = Endpoint::create();
-    let server = spawn(
-        "ipc-server",
-        image,
-        vec![
-            log(),
-            Capability::new(
-                KernelObject::EndpointServer(server_end),
-                default_rights(ObjectKind::EndpointServer),
-            ),
-        ],
-        SERVER,
-    )
-    .expect("spawn server process");
-    let client = spawn(
-        "ipc-client",
-        image,
-        vec![
-            log(),
-            Capability::new(
-                KernelObject::EndpointClient(client_end),
-                default_rights(ObjectKind::EndpointClient),
-            ),
-        ],
-        CLIENT,
-    )
-    .expect("spawn client process");
-    let intruder = spawn("intruder", image, vec![log()], INTRUDER).expect("spawn intruder");
-
-    let processes = [&server, &client, &intruder];
-    let deadline = time::ticks() + 10 * u64::from(time::HZ);
-    while processes.iter().any(|p| p.exit_status().is_none()) {
-        assert!(time::ticks() < deadline, "user processes did not finish");
-        sched::sleep_ms(10);
-    }
-    assert_eq!(server.exit_status(), Some(0), "server process failed");
-    assert_eq!(client.exit_status(), Some(0), "client process failed");
-    assert_eq!(
-        intruder.exit_status(),
-        Some(killed_by_exception(14)),
-        "intruder was not killed by its page fault"
-    );
-
-    // All three are destroyed once their threads are reaped: address
-    // spaces, page tables, memory objects and capability tables freed.
-    let alive = [
-        Arc::downgrade(&server),
-        Arc::downgrade(&client),
-        Arc::downgrade(&intruder),
-    ];
-    drop((server, client, intruder));
-    let deadline = time::ticks() + 2 * u64::from(time::HZ);
-    while alive.iter().any(|p| p.upgrade().is_some()) {
-        assert!(
-            time::ticks() < deadline,
-            "exited processes were not destroyed"
-        );
-        sched::sleep_ms(10);
-    }
-    klog::info!("user process self-test passed: 2 processes exchanged IPC, intruder killed");
 }

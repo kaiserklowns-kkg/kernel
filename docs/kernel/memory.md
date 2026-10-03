@@ -10,8 +10,8 @@ Implemented incrementally (master spec §15). State per step:
 | 4 | Kernel heap | **Done** — ADR-0010, `kernel/src/memory/heap.rs`, `libs/heap` |
 | 5 | User address spaces | **Done** — ADR-0014 (`kernel/src/process`) |
 | 6 | Memory protection (NX, W^X, SMEP/SMAP/UMIP) | **Done** for the kernel — ADR-0009; user side with processes |
-| 7 | Shared memory (capability-mediated) | Phase 2, with IPC |
-| 8 | Memory mapping | Phase 3 |
+| 7 | Shared memory (capability-mediated) | **Done** — memory objects mapped by capability, W^X across mappings (ADR-0015) |
+| 8 | Memory mapping | **Done** — `MEMORY_MAP`/`MEMORY_UNMAP` (ADR-0015) |
 
 ## Discovery (Phase 1)
 

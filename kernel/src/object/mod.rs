@@ -12,6 +12,7 @@ use alloc::sync::Arc;
 pub use memory::MemoryObject;
 
 use crate::ipc::{ClientEnd, Notification, ServerEnd};
+use crate::process::Process;
 use oceans_capability::{CapError, Revoker, Rights};
 
 /// Capabilities a process may hold unless its resource limits say otherwise.
@@ -33,6 +34,8 @@ pub enum KernelObject {
     Notification(Arc<Notification>),
     /// Permission to write to the kernel log (`WRITE`).
     Log,
+    /// A process: `WAIT` for its exit.
+    Process(Arc<Process>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +46,7 @@ pub enum ObjectKind {
     EndpointClient,
     Notification,
     Log,
+    Process,
 }
 
 impl KernelObject {
@@ -54,6 +58,7 @@ impl KernelObject {
             Self::EndpointClient(_) => ObjectKind::EndpointClient,
             Self::Notification(_) => ObjectKind::Notification,
             Self::Log => ObjectKind::Log,
+            Self::Process(_) => ObjectKind::Process,
         }
     }
 }
@@ -68,6 +73,8 @@ pub enum ObjectError {
     OutOfMemory,
     /// An offset or length outside the object.
     OutOfBounds,
+    /// The mapping would make a memory object writable and executable.
+    WriteExecute,
 }
 
 impl From<CapError> for ObjectError {
@@ -81,6 +88,7 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
     match kind {
         ObjectKind::Memory => Rights::READ
             .union(Rights::WRITE)
+            .union(Rights::EXECUTE)
             .union(Rights::MAP)
             .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
@@ -97,6 +105,10 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Log => Rights::WRITE
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+        ObjectKind::Process => Rights::WAIT
+            .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
     }
@@ -153,6 +165,10 @@ typed_lookup!(
 typed_lookup!(
     /// Looks up an endpoint client end (`SEND` to call).
     client_end, EndpointClient, ClientEnd
+);
+typed_lookup!(
+    /// Looks up a process (`WAIT` to wait for its exit).
+    process, Process, Process
 );
 typed_lookup!(
     /// Looks up a notification (`SIGNAL` to signal, `WAIT` to wait).
@@ -235,3 +251,19 @@ pub fn self_test() {
     );
     crate::klog::info!("capability self-test passed");
 }
+
+// The ABI's right bits are the kernel's.
+const _: () = {
+    use oceans_abi::rights as abi;
+    assert!(Rights::READ.bits() == abi::READ);
+    assert!(Rights::WRITE.bits() == abi::WRITE);
+    assert!(Rights::EXECUTE.bits() == abi::EXECUTE);
+    assert!(Rights::MAP.bits() == abi::MAP);
+    assert!(Rights::SEND.bits() == abi::SEND);
+    assert!(Rights::RECEIVE.bits() == abi::RECEIVE);
+    assert!(Rights::SIGNAL.bits() == abi::SIGNAL);
+    assert!(Rights::WAIT.bits() == abi::WAIT);
+    assert!(Rights::MANAGE.bits() == abi::MANAGE);
+    assert!(Rights::DUPLICATE.bits() == abi::DUPLICATE);
+    assert!(Rights::TRANSFER.bits() == abi::TRANSFER);
+};

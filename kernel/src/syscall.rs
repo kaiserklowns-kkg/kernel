@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 1 (`oceans-abi`, ADR-0014).
+//! System call dispatch, ABI version 2 (`oceans-abi`, ADR-0014, ADR-0015).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -8,13 +8,20 @@
 //! lock holder would otherwise deadlock the CPU).
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
-use oceans_abi::{DEBUG_WRITE_MAX, Error, IPC_MAX_INLINE, nr};
+use oceans_abi::{
+    DEBUG_WRITE_MAX, Error, IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc, SPAWN_MAX_IMAGE, nr,
+    prot, start::MAX_INITIAL_HANDLES,
+};
 use oceans_capability::{CapError, Handle, Rights};
 
 use crate::arch::{self, SyscallFrame};
+use crate::ipc::endpoint::Endpoint;
 use crate::ipc::{IpcError, Message};
-use crate::object::{self, KernelObject, ObjectError};
+use crate::object::{
+    self, Capability, KernelObject, MemoryObject, ObjectError, ObjectKind, default_rights,
+};
 use crate::process::{self, Process};
 use crate::{klog, sched};
 
@@ -48,6 +55,16 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::IPC_CALL => ipc_call(&process, a0, a1, a2, a3, a4, a5),
         nr::IPC_RECEIVE => ipc_receive(&process, a0, a1, a2),
         nr::IPC_REPLY => ipc_reply(&process, a0, a1, a2),
+        nr::HANDLE_DUPLICATE => duplicate(&process, a0, a1),
+        nr::ENDPOINT_CREATE => endpoint_create(&process),
+        nr::IPC_CALL_MSG => ipc_call_msg(&process, a0, a1, a2),
+        nr::IPC_RECEIVE_MSG => ipc_receive_msg(&process, a0, a1),
+        nr::IPC_REPLY_MSG => ipc_reply_msg(&process, a0),
+        nr::MEMORY_CREATE => memory_create(&process, a0),
+        nr::MEMORY_MAP => memory_map(&process, a0, a1, a2),
+        nr::MEMORY_UNMAP => process.unmap_memory(a0).map(|()| (0, 0)),
+        nr::PROCESS_SPAWN => process_spawn(&process, a0, a1, a2, a3, a4),
+        nr::PROCESS_WAIT => process_wait(&process, a0),
         _ => Err(Error::UnknownSyscall),
     };
     match result {
@@ -195,6 +212,7 @@ fn object_error(error: ObjectError) -> Error {
         ObjectError::WrongType { .. } => Error::WrongType,
         ObjectError::OutOfMemory => Error::OutOfMemory,
         ObjectError::OutOfBounds => Error::BadAddress,
+        ObjectError::WriteExecute => Error::InvalidArgument,
     }
 }
 
@@ -205,4 +223,334 @@ fn ipc_error(error: IpcError) -> Error {
         IpcError::MessageTooLarge | IpcError::TooManyCapabilities => Error::TooLarge,
         IpcError::OutOfMemory => Error::OutOfMemory,
     }
+}
+
+// ---- ABI 2 -----------------------------------------------------------------
+
+/// Inserts `capability` into the caller's table.
+fn insert(process: &Process, capability: Capability) -> Result<u64, Error> {
+    arch::without_interrupts(|| process.capabilities().lock().insert(capability))
+        .map(Handle::raw)
+        .map_err(cap_error)
+}
+
+fn duplicate(process: &Process, raw: u64, rights: u64) -> SyscallResult {
+    let rights = u32::try_from(rights)
+        .ok()
+        .and_then(Rights::from_bits)
+        .ok_or(Error::InvalidArgument)?;
+    let derived =
+        arch::without_interrupts(|| process.capabilities().lock().derive(handle(raw), rights));
+    Ok((derived.map_err(cap_error)?.raw(), 0))
+}
+
+fn endpoint_create(process: &Process) -> SyscallResult {
+    let (server, client) = Endpoint::create();
+    let server = insert(
+        process,
+        Capability::new(
+            KernelObject::EndpointServer(server),
+            default_rights(ObjectKind::EndpointServer),
+        ),
+    )?;
+    let client = insert(
+        process,
+        Capability::new(
+            KernelObject::EndpointClient(client),
+            default_rights(ObjectKind::EndpointClient),
+        ),
+    );
+    match client {
+        Ok(client) => Ok((server, client)),
+        Err(error) => {
+            // Do not leave half an endpoint behind.
+            let _ = close(process, server);
+            Err(error)
+        }
+    }
+}
+
+const DESC_WORDS: usize = size_of::<MessageDesc>() / 8;
+
+fn read_desc(process: &Process, ptr: u64) -> Result<MessageDesc, Error> {
+    let mut bytes = [0u8; size_of::<MessageDesc>()];
+    process.copy_from_user(ptr, &mut bytes)?;
+    let mut words = [0u64; DESC_WORDS];
+    for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
+    }
+    let [label, data, data_len, handles, handles_len] = words;
+    Ok(MessageDesc {
+        label,
+        data,
+        data_len,
+        handles,
+        handles_len,
+    })
+}
+
+fn write_desc(process: &Process, ptr: u64, desc: &MessageDesc) -> Result<(), Error> {
+    let words = [
+        desc.label,
+        desc.data,
+        desc.data_len,
+        desc.handles,
+        desc.handles_len,
+    ];
+    let mut bytes = [0u8; size_of::<MessageDesc>()];
+    for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    process.copy_to_user(ptr, &bytes)
+}
+
+/// Reads `count` (at most `max`) distinct handles from user memory.
+fn read_handles(
+    process: &Process,
+    ptr: u64,
+    count: usize,
+    max: usize,
+) -> Result<Vec<Handle>, Error> {
+    if count > max || count > MAX_INITIAL_HANDLES {
+        return Err(Error::TooLarge);
+    }
+    let mut bytes = [0u8; 8 * MAX_INITIAL_HANDLES];
+    process.copy_from_user(ptr, &mut bytes[..8 * count])?;
+    let handles: Vec<Handle> = bytes[..8 * count]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| Handle::from_raw(u64::from_le_bytes(*chunk)))
+        .collect();
+    // A handle listed twice would be moved twice.
+    for (i, a) in handles.iter().enumerate() {
+        if handles[..i].contains(a) {
+            return Err(Error::InvalidArgument);
+        }
+    }
+    Ok(handles)
+}
+
+/// Removes `handles` from the caller's table for transfer: all or nothing,
+/// each needing `TRANSFER`.
+fn take_for_transfer(process: &Process, handles: &[Handle]) -> Result<Vec<Capability>, Error> {
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        for &h in handles {
+            table.get(h, Rights::TRANSFER).map_err(cap_error)?;
+        }
+        Ok(handles
+            .iter()
+            .map(|&h| table.remove(h).expect("validated above"))
+            .collect())
+    })
+}
+
+/// Builds a message from a user `MessageDesc`, moving its handles out of
+/// the caller's table as the last step (nothing can fail afterwards).
+fn take_message(process: &Process, desc: &MessageDesc) -> Result<Message, Error> {
+    let len = len_arg(desc.data_len, IPC_MAX_INLINE)?;
+    let count = len_arg(desc.handles_len, IPC_MAX_HANDLES)?;
+    let mut data = [0u8; IPC_MAX_INLINE];
+    process.copy_from_user(desc.data, &mut data[..len])?;
+    let handles = read_handles(process, desc.handles, count, IPC_MAX_HANDLES)?;
+    let mut message = Message::new(desc.label, &data[..len]).map_err(ipc_error)?;
+    for capability in take_for_transfer(process, &handles)? {
+        message.attach(capability).map_err(ipc_error)?;
+    }
+    Ok(message)
+}
+
+/// Delivers `message` into the buffers described by the user `MessageDesc`
+/// at `desc_ptr`, inserting its capabilities into the caller's table. On
+/// failure the message's capabilities are closed, never leaked.
+fn deliver_message(process: &Process, mut message: Message, desc_ptr: u64) -> Result<(), Error> {
+    let mut desc = read_desc(process, desc_ptr)?;
+    let capabilities = message.take_capabilities();
+    let capacity = usize::try_from(desc.data_len).unwrap_or(usize::MAX);
+    let handle_capacity = usize::try_from(desc.handles_len).unwrap_or(usize::MAX);
+    if message.data().len() > capacity || capabilities.len() > handle_capacity {
+        return Err(Error::TooLarge);
+    }
+    process.copy_to_user(desc.data, message.data())?;
+
+    let mut inserted = Vec::new();
+    for capability in capabilities {
+        match insert(process, capability) {
+            Ok(raw) => inserted.push(raw),
+            Err(error) => {
+                undo_inserts(process, &inserted);
+                return Err(error);
+            }
+        }
+    }
+    let mut raw = [0u8; 8 * IPC_MAX_HANDLES];
+    for (chunk, h) in raw.as_chunks_mut::<8>().0.iter_mut().zip(&inserted) {
+        chunk.copy_from_slice(&h.to_le_bytes());
+    }
+    let written = process
+        .copy_to_user(desc.handles, &raw[..8 * inserted.len()])
+        .and_then(|()| {
+            desc.label = message.label;
+            desc.data_len = message.data().len() as u64;
+            desc.handles_len = inserted.len() as u64;
+            write_desc(process, desc_ptr, &desc)
+        });
+    if written.is_err() {
+        undo_inserts(process, &inserted);
+    }
+    written
+}
+
+fn undo_inserts(process: &Process, handles: &[u64]) {
+    for &h in handles {
+        let _ = close(process, h);
+    }
+}
+
+fn ipc_call_msg(process: &Process, client: u64, request_ptr: u64, reply_ptr: u64) -> SyscallResult {
+    let end = arch::without_interrupts(|| {
+        object::client_end(
+            &mut process.capabilities().lock(),
+            handle(client),
+            Rights::SEND,
+        )
+    })
+    .map_err(object_error)?;
+    // Check the reply descriptor is readable before handles leave the table.
+    read_desc(process, reply_ptr)?;
+    let request = take_message(process, &read_desc(process, request_ptr)?)?;
+    let reply = end.call(request).map_err(ipc_error)?;
+    drop(end);
+    deliver_message(process, reply, reply_ptr).map(|()| (0, 0))
+}
+
+fn ipc_receive_msg(process: &Process, server: u64, desc_ptr: u64) -> SyscallResult {
+    read_desc(process, desc_ptr)?;
+    let end = arch::without_interrupts(|| {
+        object::server_end(
+            &mut process.capabilities().lock(),
+            handle(server),
+            Rights::RECEIVE,
+        )
+    })
+    .map_err(object_error)?;
+    let (request, token) = end.receive().map_err(ipc_error)?;
+    drop(end);
+    let thread = sched::current();
+    let previous = arch::without_interrupts(|| thread.pending_call().lock().replace(token));
+    drop(previous);
+    deliver_message(process, request, desc_ptr).map(|()| (0, 0))
+}
+
+fn ipc_reply_msg(process: &Process, desc_ptr: u64) -> SyscallResult {
+    let thread = sched::current();
+    let has_pending = arch::without_interrupts(|| thread.pending_call().lock().is_some());
+    if !has_pending {
+        return Err(Error::NoPendingCall);
+    }
+    let reply = take_message(process, &read_desc(process, desc_ptr)?)?;
+    let token = arch::without_interrupts(|| thread.pending_call().lock().take())
+        .ok_or(Error::NoPendingCall)?;
+    token.reply(reply);
+    Ok((0, 0))
+}
+
+fn memory_create(process: &Process, size: u64) -> SyscallResult {
+    let object = MemoryObject::new(size).map_err(|error| match error {
+        ObjectError::OutOfBounds => Error::InvalidArgument,
+        other => object_error(other),
+    })?;
+    let raw = insert(
+        process,
+        Capability::new(
+            KernelObject::Memory(object),
+            default_rights(ObjectKind::Memory),
+        ),
+    )?;
+    Ok((raw, 0))
+}
+
+fn memory_map(process: &Process, raw: u64, addr: u64, prot_bits: u64) -> SyscallResult {
+    let known = prot::READ | prot::WRITE | prot::EXECUTE;
+    let writable = prot_bits & prot::WRITE != 0;
+    let executable = prot_bits & prot::EXECUTE != 0;
+    if prot_bits & !known != 0 || (writable && executable) {
+        return Err(Error::InvalidArgument);
+    }
+    let mut required = Rights::MAP | Rights::READ;
+    if writable {
+        required = required | Rights::WRITE;
+    }
+    if executable {
+        required = required | Rights::EXECUTE;
+    }
+    let object = arch::without_interrupts(|| {
+        object::memory(&mut process.capabilities().lock(), handle(raw), required)
+    })
+    .map_err(object_error)?;
+    Ok((process.map_memory(object, addr, prot_bits)?, 0))
+}
+
+fn process_spawn(
+    process: &Process,
+    image: u64,
+    image_len: u64,
+    handles_ptr: u64,
+    handles_len: u64,
+    arg: u64,
+) -> SyscallResult {
+    let object = arch::without_interrupts(|| {
+        object::memory(
+            &mut process.capabilities().lock(),
+            handle(image),
+            Rights::READ,
+        )
+    })
+    .map_err(object_error)?;
+    // 0 means "the whole object".
+    let len = if image_len == 0 {
+        object.size()
+    } else {
+        image_len
+    };
+    if len > object.size() || len > SPAWN_MAX_IMAGE as u64 {
+        return Err(Error::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len as usize)
+        .map_err(|_| Error::OutOfMemory)?;
+    bytes.resize(len as usize, 0);
+    object.read(0, &mut bytes).map_err(object_error)?;
+    drop(object);
+    // Reject a bad image before any handle leaves the caller's table.
+    process::validate_image(&bytes)?;
+
+    let count = len_arg(handles_len, MAX_INITIAL_HANDLES)?;
+    let handles = read_handles(process, handles_ptr, count, MAX_INITIAL_HANDLES)?;
+    let initial = take_for_transfer(process, &handles)?;
+    let name = alloc::format!("{}.child", process.name());
+    let child = process::spawn(&name, &bytes, initial, arg)?;
+    let raw = insert(
+        process,
+        Capability::new(
+            KernelObject::Process(child),
+            default_rights(ObjectKind::Process),
+        ),
+    )?;
+    Ok((raw, 0))
+}
+
+fn process_wait(process: &Process, raw: u64) -> SyscallResult {
+    let child = arch::without_interrupts(|| {
+        object::process(
+            &mut process.capabilities().lock(),
+            handle(raw),
+            Rights::WAIT,
+        )
+    })
+    .map_err(object_error)?;
+    let code = child.wait_exit();
+    Ok((0, code as u64))
 }

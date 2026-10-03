@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 1).
+//! Minimal Oceans userspace runtime (ABI version 2).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -10,6 +10,7 @@ use core::arch::asm;
 use core::fmt;
 
 pub use oceans_abi::Error;
+pub use oceans_abi::{MessageDesc, prot, rights};
 use oceans_abi::{nr, start::MAX_INITIAL_HANDLES};
 
 /// A capability handle in this process's table.
@@ -166,6 +167,142 @@ pub fn ipc_reply(label: u64, data: &[u8]) -> Result<(), Error> {
         [label, data.as_ptr() as u64, data.len() as u64, 0, 0, 0],
     )
     .map(drop)
+}
+
+// ---- ABI 2 -----------------------------------------------------------------
+
+/// Derives a handle with a subset of `handle`'s rights (`oceans_abi::rights`).
+pub fn duplicate(handle: Handle, rights: u32) -> Result<Handle, Error> {
+    call(
+        nr::HANDLE_DUPLICATE,
+        [handle.0, u64::from(rights), 0, 0, 0, 0],
+    )
+    .map(|(h, _)| Handle(h))
+}
+
+/// A new IPC endpoint: (server end, client end).
+pub fn endpoint_create() -> Result<(Handle, Handle), Error> {
+    call(nr::ENDPOINT_CREATE, [0; 6]).map(|(server, client)| (Handle(server), Handle(client)))
+}
+
+/// What a `*_msg` receive delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Received {
+    pub label: u64,
+    pub data_len: usize,
+    pub handles_len: usize,
+}
+
+fn send_desc(label: u64, data: &[u8], handles: &[Handle]) -> MessageDesc {
+    MessageDesc {
+        label,
+        data: data.as_ptr() as u64,
+        data_len: data.len() as u64,
+        handles: handles.as_ptr() as u64,
+        handles_len: handles.len() as u64,
+    }
+}
+
+fn receive_desc(data: &mut [u8], handles: &mut [Handle]) -> MessageDesc {
+    MessageDesc {
+        label: 0,
+        data: data.as_mut_ptr() as u64,
+        data_len: data.len() as u64,
+        handles: handles.as_mut_ptr() as u64,
+        handles_len: handles.len() as u64,
+    }
+}
+
+fn received(desc: &MessageDesc) -> Received {
+    Received {
+        label: desc.label,
+        data_len: desc.data_len as usize,
+        handles_len: desc.handles_len as usize,
+    }
+}
+
+/// Calls the server behind `client`, moving `handles` to it (each needs
+/// `TRANSFER`); the reply's data and handles land in the reply buffers.
+pub fn ipc_call_msg(
+    client: Handle,
+    label: u64,
+    data: &[u8],
+    handles: &[Handle],
+    reply_data: &mut [u8],
+    reply_handles: &mut [Handle],
+) -> Result<Received, Error> {
+    let request = send_desc(label, data, handles);
+    let mut reply = receive_desc(reply_data, reply_handles);
+    let args = [
+        client.0,
+        &raw const request as u64,
+        &raw mut reply as u64,
+        0,
+        0,
+        0,
+    ];
+    call(nr::IPC_CALL_MSG, args)?;
+    Ok(received(&reply))
+}
+
+/// Waits for a call on `server`, receiving its data and handles.
+pub fn ipc_receive_msg(
+    server: Handle,
+    data: &mut [u8],
+    handles: &mut [Handle],
+) -> Result<Received, Error> {
+    let mut desc = receive_desc(data, handles);
+    call(
+        nr::IPC_RECEIVE_MSG,
+        [server.0, &raw mut desc as u64, 0, 0, 0, 0],
+    )?;
+    Ok(received(&desc))
+}
+
+/// Answers the pending call, moving `handles` to the caller.
+pub fn ipc_reply_msg(label: u64, data: &[u8], handles: &[Handle]) -> Result<(), Error> {
+    let desc = send_desc(label, data, handles);
+    call(nr::IPC_REPLY_MSG, [&raw const desc as u64, 0, 0, 0, 0, 0]).map(drop)
+}
+
+/// A zero-filled memory object of at least `size` bytes.
+pub fn memory_create(size: u64) -> Result<Handle, Error> {
+    call(nr::MEMORY_CREATE, [size, 0, 0, 0, 0, 0]).map(|(h, _)| Handle(h))
+}
+
+/// Maps the whole object at `addr` (0: the kernel chooses) with
+/// `oceans_abi::prot` bits; returns the address.
+pub fn memory_map(memory: Handle, addr: u64, prot: u64) -> Result<*mut u8, Error> {
+    call(nr::MEMORY_MAP, [memory.0, addr, prot, 0, 0, 0]).map(|(a, _)| a as *mut u8)
+}
+
+/// Removes the mapping that starts at `addr`.
+pub fn memory_unmap(addr: *mut u8) -> Result<(), Error> {
+    call(nr::MEMORY_UNMAP, [addr as u64, 0, 0, 0, 0, 0]).map(drop)
+}
+
+/// Starts a process from the ELF image in `image` (`len` 0: whole object),
+/// moving `handles` to it; returns a process handle.
+pub fn process_spawn(
+    image: Handle,
+    len: u64,
+    handles: &[Handle],
+    arg: u64,
+) -> Result<Handle, Error> {
+    let args = [
+        image.0,
+        len,
+        handles.as_ptr() as u64,
+        handles.len() as u64,
+        arg,
+        0,
+    ];
+    call(nr::PROCESS_SPAWN, args).map(|(h, _)| Handle(h))
+}
+
+/// Blocks until the process exits; returns its exit code.
+pub fn process_wait(process: Handle) -> Result<i64, Error> {
+    call(nr::PROCESS_WAIT, [process.0, 0, 0, 0, 0, 0]).map(|(_, code)| code as i64)
 }
 
 /// Fixed-capacity text buffer for formatting without an allocator.

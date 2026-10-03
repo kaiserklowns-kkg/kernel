@@ -69,6 +69,12 @@ unsafe impl Send for Thread {}
 impl Drop for Thread {
     fn drop(&mut self) {
         klog::debug!("thread {} ({}) reaped", self.id.0, self.name);
+        // Processes have one thread for now, so its reaping ends the
+        // process's use of its address space. Reaping runs after a switch,
+        // so the space is no longer active.
+        if let Some(process) = &self.process {
+            process.release_address_space();
+        }
         LIVE_THREADS.fetch_sub(1, Ordering::Relaxed);
     }
 }

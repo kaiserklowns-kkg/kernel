@@ -17,7 +17,7 @@ controlled set of modern hardware instead of maximum compatibility.
 | 0 — Architecture | ADRs, system architecture, repo layout | **In progress** — see [docs/adr](docs/adr) |
 | 1 — Boot | Boot in QEMU, `OCEANS KERNEL ONLINE` | **Done** — `cargo xtask smoke` passes |
 | 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **Done** — ADRs 0008–0014; exit criterion (isolated processes exchanging IPC) passes in `cargo xtask smoke` |
-| 3 — Userspace | init, service manager, filesystem, shell | Next |
+| 3 — Userspace | init, service manager, filesystem, shell | **In progress** — ABI v2 (ADR-0015): IPC with capabilities, memory, spawn/wait |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 
@@ -52,7 +52,7 @@ libs/frame-allocator/ host-testable buddy allocator for physical frames
 libs/heap/          host-testable slab + page-block kernel heap
 libs/capability/    host-testable capability tables, rights, revocation
 libs/scheduler/     host-testable scheduling policy (run queue, sleep, slices)
-libs/abi/           system call ABI shared by kernel and userspace
+libs/abi/           system call ABI (v2) shared by kernel and userspace
 libs/elf/           strict ELF64 executable parser
 user/               userspace workspace: oceans-rt runtime, ipc-test
 tools/xtask/       build, image and QEMU tooling (`cargo xtask`)

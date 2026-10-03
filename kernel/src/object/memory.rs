@@ -4,6 +4,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use oceans_frame_allocator::Frame;
 use oceans_memory_map::PAGE_SIZE;
@@ -14,10 +15,18 @@ use crate::memory::{frames, phys_to_virt};
 /// Largest memory object, bounding a single request's frame consumption.
 const MAX_SIZE: u64 = 1 << 30;
 
+/// `mapping_mode` bits: has the object ever been mapped writable / executable.
+const MAPPED_WRITABLE: u8 = 1 << 0;
+const MAPPED_EXECUTABLE: u8 = 1 << 1;
+
 #[derive(Debug)]
 pub struct MemoryObject {
     frames: Vec<Frame>,
     size: u64,
+    /// W^X across mappings: once mapped writable an object can never be
+    /// mapped executable, and vice versa, so two mappings of one object
+    /// cannot be combined into writable code.
+    mapping_mode: AtomicU8,
 }
 
 impl MemoryObject {
@@ -31,6 +40,7 @@ impl MemoryObject {
         let mut object = Self {
             frames: Vec::new(),
             size: pages as u64 * PAGE_SIZE,
+            mapping_mode: AtomicU8::new(0),
         };
         object
             .frames
@@ -49,6 +59,21 @@ impl MemoryObject {
     /// Size in bytes (a multiple of the page size).
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Records that the object is about to be mapped with these
+    /// permissions; fails if that would make it both writable and
+    /// executable over its lifetime.
+    pub fn claim_mapping(&self, writable: bool, executable: bool) -> Result<(), ObjectError> {
+        let wanted = if writable { MAPPED_WRITABLE } else { 0 }
+            | if executable { MAPPED_EXECUTABLE } else { 0 };
+        self.mapping_mode
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |mode| {
+                let mode = mode | wanted;
+                (mode != MAPPED_WRITABLE | MAPPED_EXECUTABLE).then_some(mode)
+            })
+            .map(drop)
+            .map_err(|_| ObjectError::WriteExecute)
     }
 
     /// Physical frames backing the object, in order.
