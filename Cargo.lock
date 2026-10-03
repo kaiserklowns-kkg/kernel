@@ -79,6 +79,10 @@ name = "oceans-memory-map"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-net"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-pci"
 version = "0.1.0"
 

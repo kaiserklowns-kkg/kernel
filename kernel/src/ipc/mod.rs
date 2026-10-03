@@ -30,6 +30,8 @@ pub enum IpcError {
     TooManyCapabilities,
     /// No memory for the call's bookkeeping.
     OutOfMemory,
+    /// The notification is bound to another endpoint.
+    Busy,
 }
 
 /// IPC self-tests and round-trip benchmark, for smoke-test boots.

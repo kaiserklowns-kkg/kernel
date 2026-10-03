@@ -1,0 +1,10 @@
+[package]
+name = "oceans-virtio"
+description = "virtio 1.x over PCI for Oceans userspace drivers: transport, feature negotiation, split virtqueues (ADR-0021, ADR-0023)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt.workspace = true

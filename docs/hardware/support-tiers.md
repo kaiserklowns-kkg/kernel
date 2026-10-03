@@ -26,6 +26,6 @@ value. Exact chipsets are added only after research and a test device.
 | Buses | PCI Express via ACPI MCFG/ECAM (ADR-0021) | — |
 | Storage | virtio-blk (modern, `1af4:1042`), userspace driver (ADR-0021) | NVMe |
 | USB | — | xHCI |
-| Network | — | virtio-net, Intel and Realtek Ethernet |
+| Network | virtio-net (modern, `1af4:1041`), userspace driver (ADR-0023) | Intel and Realtek Ethernet |
 
 Tier 3 explicitly: legacy BIOS boot, 32-bit x86, ISA, IDE/PATA, floppy.

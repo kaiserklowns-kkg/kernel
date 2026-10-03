@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 7 (`oceans-abi`, ADR-0014 to ADR-0021).
+//! System call dispatch, ABI version 8 (`oceans-abi`, ADR-0014 to ADR-0023).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -11,8 +11,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use oceans_abi::{
-    CONSOLE_IO_MAX, DEBUG_WRITE_MAX, EVENT_CALL, EVENT_CLOSED, Error, IPC_MAX_HANDLES,
-    IPC_MAX_INLINE, MessageDesc, PROCESS_NAME_MAX, SPAWN_MAX_IMAGE, nr, prot,
+    CONSOLE_IO_MAX, DEBUG_WRITE_MAX, EVENT_CALL, EVENT_CLOSED, EVENT_NOTIFICATION, Error,
+    IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc, PROCESS_NAME_MAX, SPAWN_MAX_IMAGE, nr, prot,
     start::MAX_INITIAL_HANDLES,
 };
 use oceans_capability::{CapError, Handle, Rights};
@@ -83,6 +83,9 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DEVICE_BAR => device_bar(&process, a0, a1),
         nr::DEVICE_DMA_CREATE => device_dma_create(&process, a0, a1),
         nr::DEVICE_IRQ => device_irq(&process, a0, a1, a2, a3),
+        nr::ENDPOINT_BIND => endpoint_bind(&process, a0, a1),
+        nr::TIMER_SET => timer_set(&process, a0, a1, a2),
+        nr::CLOCK => Ok((crate::time::ticks() * 1000 / u64::from(crate::time::HZ), 0)),
         _ => Err(Error::UnknownSyscall),
     };
     match result {
@@ -240,6 +243,7 @@ fn ipc_error(error: IpcError) -> Error {
         IpcError::NoReply => Error::NoReply,
         IpcError::MessageTooLarge | IpcError::TooManyCapabilities => Error::TooLarge,
         IpcError::OutOfMemory => Error::OutOfMemory,
+        IpcError::Busy => Error::Busy,
     }
 }
 
@@ -453,7 +457,7 @@ fn ipc_receive_msg(process: &Process, server: u64, desc_ptr: u64) -> SyscallResu
         )
     })
     .map_err(object_error)?;
-    let event = end.receive_event().map_err(ipc_error)?;
+    let event = end.receive_event(true).map_err(ipc_error)?;
     drop(end);
     let (request, badge, token) = match event {
         Event::Call {
@@ -462,6 +466,7 @@ fn ipc_receive_msg(process: &Process, server: u64, desc_ptr: u64) -> SyscallResu
             token,
         } => (request, badge, token),
         Event::Closed { badge } => return Ok((EVENT_CLOSED, badge)),
+        Event::Notification { bits } => return Ok((EVENT_NOTIFICATION, bits)),
     };
     let thread = sched::current();
     let previous = arch::without_interrupts(|| thread.pending_call().lock().replace(token));
@@ -914,5 +919,32 @@ fn device_irq(
     })
     .map_err(object_error)?;
     device.bind_irq(entry, notification, bits)?;
+    Ok((0, 0))
+}
+
+// ---- ABI 8 -----------------------------------------------------------------
+
+fn endpoint_bind(process: &Process, server: u64, notification: u64) -> SyscallResult {
+    let (end, notification) = arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let end = object::server_end(&mut table, handle(server), Rights::RECEIVE)?;
+        let notification = object::notification(&mut table, handle(notification), Rights::WAIT)?;
+        Ok((end, notification))
+    })
+    .map_err(object_error)?;
+    end.bind(notification).map_err(ipc_error)?;
+    Ok((0, 0))
+}
+
+fn timer_set(process: &Process, raw: u64, bits: u64, ms: u64) -> SyscallResult {
+    let notification = arch::without_interrupts(|| {
+        object::notification(
+            &mut process.capabilities().lock(),
+            handle(raw),
+            Rights::SIGNAL,
+        )
+    })
+    .map_err(object_error)?;
+    crate::ipc::notification::set_timer(&notification, bits, ms);
     Ok((0, 0))
 }

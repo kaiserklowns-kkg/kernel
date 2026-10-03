@@ -19,8 +19,10 @@ pub const MAX_MEMORY_REGIONS: usize = 256;
 /// Longest kernel command line kept; longer ones are truncated with a warning.
 pub const MAX_CMDLINE_LEN: usize = 512;
 
-/// Boot modules (program images loaded by the bootloader) kept.
-pub const MAX_MODULES: usize = 16;
+/// Boot modules (program images loaded by the bootloader) kept: as many as
+/// init can receive (32 initial handles, 5 of them fixed). A packed archive
+/// will replace one module per program once that limit nears.
+pub const MAX_MODULES: usize = 27;
 const MAX_MODULE_NAME: usize = 64;
 
 /// A file the bootloader loaded into memory for the kernel.

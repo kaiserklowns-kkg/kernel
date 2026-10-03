@@ -1,0 +1,17 @@
+[package]
+name = "net"
+description = "The Oceans network service: the IPv4 stack (oceans-net) between a network driver and socket clients (ADR-0023)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "net"
+test = false
+bench = false
+
+[dependencies]
+oceans-net.workspace = true
+oceans-net-proto.workspace = true
+oceans-rt = { workspace = true, features = ["alloc"] }

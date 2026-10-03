@@ -1,0 +1,16 @@
+[package]
+name = "udp-echo"
+description = "UDP echo service (RFC 862) on port 7, for network diagnostics (ADR-0023)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "udp-echo"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-net-proto.workspace = true

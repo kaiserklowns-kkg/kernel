@@ -1,4 +1,4 @@
-//! The Oceans system call ABI, version 7 (ADR-0014 to ADR-0021).
+//! The Oceans system call ABI, version 8 (ADR-0014 to ADR-0023).
 //!
 //! Shared by the kernel and userspace so both sides agree by construction.
 //! The ABI is versioned: numbers and meanings below never change within a
@@ -18,9 +18,10 @@
 /// Version history: 1 = ADR-0014 (syscalls 0–7); 2 = ADR-0015 (8–17);
 /// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24); 5 = ADR-0019 (25–26: badges,
 /// memory size); 6 = ADR-0020 (27: system information); 7 = ADR-0021
-/// (28–34: devices; errors -15 and -16). Versions only add; existing
-/// numbers keep their meaning.
-pub const ABI_VERSION: u64 = 7;
+/// (28–34: devices; errors -15 and -16); 8 = ADR-0023 (35–37: bound
+/// notifications, timers, clock). Versions only add; existing numbers keep
+/// their meaning.
+pub const ABI_VERSION: u64 = 8;
 
 /// System call numbers.
 pub mod nr {
@@ -154,11 +155,30 @@ pub mod nr {
     /// `entry` as `bits` on the notification (replacing an earlier binding).
     /// Needs `MANAGE` on the device and `SIGNAL` on the notification.
     pub const DEVICE_IRQ: u64 = 34;
+
+    // ABI 8
+
+    /// `(server, notification) -> 0` — binds the notification to the
+    /// endpoint: `IPC_RECEIVE_MSG` also returns when it is signalled, with
+    /// kind [`EVENT_NOTIFICATION`](super::EVENT_NOTIFICATION) and the bits
+    /// (cleared). Needs `RECEIVE` on the server end and `WAIT` on the
+    /// notification. `Busy` if the notification is bound elsewhere.
+    pub const ENDPOINT_BIND: u64 = 35;
+    /// `(notification, bits, milliseconds) -> 0` — signals `bits` once the
+    /// delay has passed (rounded up to the 10 ms tick), replacing the
+    /// notification's pending timer; 0 milliseconds cancels it. Needs
+    /// `SIGNAL`.
+    pub const TIMER_SET: u64 = 36;
+    /// `() -> milliseconds` — monotonic time since boot (10 ms resolution).
+    pub const CLOCK: u64 = 37;
 }
 
 /// `IPC_RECEIVE_MSG` result kinds.
 pub const EVENT_CALL: u64 = 0;
 pub const EVENT_CLOSED: u64 = 1;
+/// ABI 8: the bound notification was signalled; the second result holds the
+/// bits. The descriptor is not written and nothing is to be answered.
+pub const EVENT_NOTIFICATION: u64 = 2;
 
 /// `MEMORY_MAP` protection bits. Writable and executable together are
 /// refused (`InvalidArgument`), and so is any mapping that would make one

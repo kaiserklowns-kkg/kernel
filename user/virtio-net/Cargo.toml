@@ -1,17 +1,17 @@
 [package]
-name = "virtio-blk"
-description = "virtio block device driver: a userspace service holding one device capability (ADR-0021)"
+name = "virtio-net"
+description = "virtio network device driver: a userspace service holding one device capability (ADR-0023)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "virtio-blk"
+name = "virtio-net"
 test = false
 bench = false
 
 [dependencies]
 oceans-rt.workspace = true
-oceans-block-proto.workspace = true
+oceans-net-proto.workspace = true
 oceans-virtio.workspace = true

@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 7).
+//! Minimal Oceans userspace runtime (ABI version 8).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -197,6 +197,9 @@ pub struct Received {
     /// Receive only (ABI 5): not a call but the close of badged end
     /// `badge`; nothing was received and nothing is to be answered.
     pub closed: bool,
+    /// Receive only (ABI 8): not a call but these bits of the bound
+    /// notification (non-zero); nothing is to be answered.
+    pub signals: u64,
 }
 
 fn send_desc(label: u64, data: &[u8], handles: &[Handle]) -> MessageDesc {
@@ -226,6 +229,7 @@ fn received(desc: &MessageDesc) -> Received {
         handles_len: desc.handles_len as usize,
         badge: 0,
         closed: false,
+        signals: 0,
     }
 }
 
@@ -265,13 +269,16 @@ pub fn ipc_receive_msg(
         nr::IPC_RECEIVE_MSG,
         [server.0, &raw mut desc as u64, 0, 0, 0, 0],
     )?;
-    if kind == oceans_abi::EVENT_CLOSED {
+    if kind == oceans_abi::EVENT_CLOSED || kind == oceans_abi::EVENT_NOTIFICATION {
+        let notification = kind == oceans_abi::EVENT_NOTIFICATION;
         return Ok(Received {
             label: 0,
             data_len: 0,
             handles_len: 0,
-            badge,
-            closed: true,
+            badge: if notification { 0 } else { badge },
+            closed: !notification,
+            // `badge` carries the bits for a notification event.
+            signals: if notification { badge } else { 0 },
         });
     }
     Ok(Received {
@@ -597,6 +604,25 @@ pub fn device_irq(
         [device.0, u64::from(entry), notification.0, bits, 0, 0],
     )
     .map(drop)
+}
+
+// ---- ABI 8: events and time (ADR-0023) --------------------------------------
+
+/// Binds `notification` to the endpoint behind `server`: `ipc_receive_msg`
+/// then also returns when it is signalled (`Received::signals`).
+pub fn endpoint_bind(server: Handle, notification: Handle) -> Result<(), Error> {
+    call(nr::ENDPOINT_BIND, [server.0, notification.0, 0, 0, 0, 0]).map(drop)
+}
+
+/// Signals `bits` on `notification` after `ms` milliseconds, replacing its
+/// pending timer; `ms` 0 cancels.
+pub fn timer_set(notification: Handle, bits: u64, ms: u64) -> Result<(), Error> {
+    call(nr::TIMER_SET, [notification.0, bits, ms, 0, 0, 0]).map(drop)
+}
+
+/// Milliseconds since boot (monotonic, 10 ms resolution).
+pub fn clock_ms() -> u64 {
+    call(nr::CLOCK, [0; 6]).map_or(0, |(ms, _)| ms)
 }
 
 /// Maps a text memory object read-only for the rest of the process's life

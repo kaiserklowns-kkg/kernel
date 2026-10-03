@@ -30,5 +30,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0020](0020-system-information-and-utilities.md) | System information, program manifests and basic utilities | Accepted |
 | [0021](0021-pci-and-userspace-drivers.md) | PCI, device capabilities and userspace drivers | Accepted (amended by 0022) |
 | [0022](0022-filesystem-on-disk.md) | The filesystem on disk (OceansFS) | Accepted |
+| [0023](0023-network.md) | Networking: virtio-net, the IPv4 stack and sockets | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

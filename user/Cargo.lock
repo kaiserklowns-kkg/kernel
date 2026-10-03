@@ -48,6 +48,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "net"
+version = "0.1.0"
+dependencies = [
+ "oceans-net",
+ "oceans-net-proto",
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-abi"
 version = "0.1.0"
 
@@ -74,11 +83,29 @@ name = "oceans-heap"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-net"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-net-proto"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-rt"
 version = "0.1.0"
 dependencies = [
  "oceans-abi",
  "oceans-heap",
+]
+
+[[package]]
+name = "oceans-virtio"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
 ]
 
 [[package]]
@@ -95,11 +122,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "udp-echo"
+version = "0.1.0"
+dependencies = [
+ "oceans-net-proto",
+ "oceans-rt",
+]
+
+[[package]]
 name = "utils"
 version = "0.1.0"
 dependencies = [
  "oceans-abi",
  "oceans-block-proto",
+ "oceans-net-proto",
  "oceans-rt",
 ]
 
@@ -109,4 +145,14 @@ version = "0.1.0"
 dependencies = [
  "oceans-block-proto",
  "oceans-rt",
+ "oceans-virtio",
+]
+
+[[package]]
+name = "virtio-net"
+version = "0.1.0"
+dependencies = [
+ "oceans-net-proto",
+ "oceans-rt",
+ "oceans-virtio",
 ]

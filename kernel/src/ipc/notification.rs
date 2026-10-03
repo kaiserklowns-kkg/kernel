@@ -6,17 +6,28 @@
 //! never blocks, so it is safe from interrupt handlers (future IRQ
 //! delivery to userspace drivers).
 
+//!
+//! A notification can be **bound** to one endpoint (ADR-0023): its signals
+//! then also wake the endpoint's receiver, which gets them as an event, so
+//! a single-threaded service waits for calls and events (IRQs, timers,
+//! "data ready") at once. **Timers** signal a notification after a delay.
+
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
-use crate::arch;
+use super::endpoint::Endpoint;
 use crate::sched::{self, Thread};
+use crate::{arch, time};
 
 struct State {
     bits: u64,
     waiters: VecDeque<Arc<Thread>>,
+    /// The endpoint whose receiver this notification also wakes.
+    bound: Option<Weak<Endpoint>>,
 }
 
 pub struct Notification {
@@ -35,6 +46,7 @@ impl Notification {
             state: Mutex::new(State {
                 bits: 0,
                 waiters: VecDeque::new(),
+                bound: None,
             }),
         })
     }
@@ -44,15 +56,50 @@ impl Notification {
             return;
         }
         arch::without_interrupts(|| {
-            let waiter = {
+            let (waiter, endpoint) = {
                 let mut state = self.state.lock();
                 state.bits |= bits;
-                state.waiters.pop_front()
+                (
+                    state.waiters.pop_front(),
+                    state.bound.as_ref().and_then(Weak::upgrade),
+                )
             };
+            // Our lock is released first: the endpoint takes its own lock
+            // and then ours (`take_bits`), never the other way round.
             if let Some(waiter) = waiter {
                 sched::wake(waiter);
             }
+            if let Some(endpoint) = endpoint {
+                endpoint.wake_receiver();
+            }
         });
+    }
+
+    /// Takes (and clears) the pending bits without blocking.
+    pub fn take_bits(&self) -> u64 {
+        arch::without_interrupts(|| core::mem::take(&mut self.state.lock().bits))
+    }
+
+    /// Binds to `endpoint`; fails if bound to another live endpoint.
+    pub fn bind(&self, endpoint: Weak<Endpoint>) -> Result<(), ()> {
+        arch::without_interrupts(|| {
+            let mut state = self.state.lock();
+            match &state.bound {
+                Some(current)
+                    if current.strong_count() > 0 && !Weak::ptr_eq(current, &endpoint) =>
+                {
+                    Err(())
+                }
+                _ => {
+                    state.bound = Some(endpoint);
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    pub fn unbind(&self) {
+        arch::without_interrupts(|| self.state.lock().bound = None);
     }
 
     /// Blocks until a signal arrives; returns (and clears) all pending bits.
@@ -70,6 +117,61 @@ impl Notification {
             }
         })
     }
+}
+
+/// A pending one-shot timer. Weak: a timer never keeps its notification
+/// alive, so timers cannot outlive the capabilities that set them.
+struct Timer {
+    deadline: u64,
+    notification: Weak<Notification>,
+    bits: u64,
+}
+
+static TIMERS: Mutex<Vec<Timer>> = Mutex::new(Vec::new());
+/// Earliest deadline (`u64::MAX`: none), so most ticks skip the lock.
+static NEXT_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Signals `bits` on `notification` once `ms` milliseconds have passed
+/// (rounded up to whole ticks), replacing the notification's earlier timer.
+/// `ms` 0 only cancels.
+pub fn set_timer(notification: &Arc<Notification>, bits: u64, ms: u64) {
+    let deadline = time::ticks().saturating_add(time::ms_to_ticks(ms).max(1));
+    let weak = Arc::downgrade(notification);
+    arch::without_interrupts(|| {
+        let mut timers = TIMERS.lock();
+        timers
+            .retain(|t| t.notification.strong_count() > 0 && !Weak::ptr_eq(&t.notification, &weak));
+        if ms > 0 && bits != 0 {
+            timers.push(Timer {
+                deadline,
+                notification: weak,
+                bits,
+            });
+        }
+        let next = timers.iter().map(|t| t.deadline).min().unwrap_or(u64::MAX);
+        NEXT_DEADLINE.store(next, Ordering::Relaxed);
+    });
+}
+
+/// Timer interrupt (interrupts disabled): signals every expired timer.
+pub fn fire_timers(now: u64) {
+    if now < NEXT_DEADLINE.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut timers = TIMERS.lock();
+    let mut index = 0;
+    while index < timers.len() {
+        if timers[index].deadline <= now {
+            let timer = timers.swap_remove(index);
+            if let Some(notification) = timer.notification.upgrade() {
+                notification.signal(timer.bits);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    let next = timers.iter().map(|t| t.deadline).min().unwrap_or(u64::MAX);
+    NEXT_DEADLINE.store(next, Ordering::Relaxed);
 }
 
 /// Notification self-test, for smoke-test boots.
@@ -120,5 +222,20 @@ pub fn self_test() {
     notification.signal(0b010);
     notification.signal(0b100);
     assert_eq!(notification.wait(), 0b110);
+
+    // Timers: fire once after the delay; setting again replaces; 0 cancels.
+    let start = time::ticks();
+    set_timer(&notification, 0b1000, 500);
+    set_timer(&notification, 0b1000, 30);
+    assert_eq!(notification.wait(), 0b1000);
+    let waited = time::ticks() - start;
+    assert!(
+        (time::ms_to_ticks(30)..time::ms_to_ticks(500)).contains(&waited),
+        "timer fired after {waited} ticks"
+    );
+    set_timer(&notification, 0b1, 20);
+    set_timer(&notification, 0b1, 0);
+    sched::sleep_ms(60);
+    assert_eq!(notification.take_bits(), 0, "cancelled timer fired");
     klog::info!("notification self-test passed");
 }

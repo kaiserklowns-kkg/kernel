@@ -16,13 +16,17 @@
 //! one endpoint can stand for many objects (e.g. open files). When a badged
 //! end is closed, the server receives a close event for its badge, so it can
 //! release per-handle state.
+//!
+//! **Bound notifications** (ADR-0023): a notification bound to the endpoint
+//! wakes its receiver too, and `receive_event` reports its bits as an
+//! event, so one thread serves calls and handles asynchronous events.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
 use spin::Mutex;
 
-use super::{IpcError, Message};
+use super::{IpcError, Message, Notification};
 use crate::arch;
 use crate::sched::{self, Thread};
 
@@ -45,6 +49,8 @@ struct State {
     server_open: bool,
     /// Live client ends.
     clients: usize,
+    /// The notification whose signals are delivered as events.
+    bound: Option<Arc<Notification>>,
 }
 
 pub struct Endpoint {
@@ -61,6 +67,7 @@ impl Endpoint {
                 closed: VecDeque::new(),
                 server_open: true,
                 clients: 1,
+                bound: None,
             }),
         });
         (
@@ -69,6 +76,14 @@ impl Endpoint {
             }),
             Arc::new(ClientEnd { endpoint, badge: 0 }),
         )
+    }
+
+    /// A bound notification was signalled: wake a waiting receiver.
+    pub fn wake_receiver(&self) {
+        let receiver = arch::without_interrupts(|| self.state.lock().receivers.pop_front());
+        if let Some(receiver) = receiver {
+            sched::wake(receiver);
+        }
     }
 }
 
@@ -107,6 +122,8 @@ pub enum Event {
     },
     /// The last capability to the client end with `badge` was closed.
     Closed { badge: u64 },
+    /// The bound notification was signalled with these bits.
+    Notification { bits: u64 },
 }
 
 impl ClientEnd {
@@ -152,8 +169,30 @@ impl ServerEnd {
         })
     }
 
-    /// Blocks until a call or a close event arrives.
-    pub fn receive_event(&self) -> Result<Event, IpcError> {
+    /// Binds `notification`: its signals become events of this endpoint,
+    /// replacing an earlier binding. Fails if it is bound elsewhere.
+    pub fn bind(&self, notification: Arc<Notification>) -> Result<(), IpcError> {
+        notification
+            .bind(Arc::downgrade(&self.endpoint))
+            .map_err(|()| IpcError::Busy)?;
+        let old = arch::without_interrupts(|| {
+            self.endpoint
+                .state
+                .lock()
+                .bound
+                .replace(notification.clone())
+        });
+        if let Some(old) = old
+            && !Arc::ptr_eq(&old, &notification)
+        {
+            old.unbind();
+        }
+        Ok(())
+    }
+
+    /// Blocks until a call or a close event arrives, or (if
+    /// `notifications`) the bound notification is signalled.
+    pub fn receive_event(&self, notifications: bool) -> Result<Event, IpcError> {
         arch::without_interrupts(|| {
             loop {
                 {
@@ -173,6 +212,12 @@ impl ServerEnd {
                     if let Some(badge) = state.closed.pop_front() {
                         return Ok(Event::Closed { badge });
                     }
+                    if notifications && let Some(bound) = &state.bound {
+                        let bits = bound.take_bits();
+                        if bits != 0 {
+                            return Ok(Event::Notification { bits });
+                        }
+                    }
                     if state.clients == 0 {
                         return Err(IpcError::PeerClosed);
                     }
@@ -187,7 +232,7 @@ impl ServerEnd {
     /// request and the token that answers it.
     pub fn receive(&self) -> Result<(Message, ReplyToken), IpcError> {
         loop {
-            if let Event::Call { request, token, .. } = self.receive_event()? {
+            if let Event::Call { request, token, .. } = self.receive_event(false)? {
                 return Ok((request, token));
             }
         }
@@ -197,12 +242,15 @@ impl ServerEnd {
 impl Drop for ServerEnd {
     fn drop(&mut self) {
         arch::without_interrupts(|| {
-            let pending = {
+            let (pending, bound) = {
                 let mut state = self.endpoint.state.lock();
                 state.server_open = false;
                 state.closed.clear();
-                core::mem::take(&mut state.pending)
+                (core::mem::take(&mut state.pending), state.bound.take())
             };
+            if let Some(bound) = bound {
+                bound.unbind();
+            }
             for slot in pending {
                 complete(&slot, Err(IpcError::PeerClosed));
             }
@@ -448,12 +496,13 @@ pub fn self_test() {
         // Expected sequence: call with badge 7, close of 7, then PeerClosed.
         let mut log = 0u64;
         loop {
-            match end.receive_event() {
+            match end.receive_event(false) {
                 Ok(Event::Call { badge, token, .. }) => {
                     log = log * 10 + badge;
                     token.reply(Message::new(PING, &[]).expect("fits"));
                 }
                 Ok(Event::Closed { badge }) => log = log * 10 + 100 + badge,
+                Ok(Event::Notification { .. }) => unreachable!("not requested"),
                 Err(_) => break,
             }
         }
@@ -476,6 +525,51 @@ pub fn self_test() {
     wait_for(&BADGE_DONE, "badge server exit");
     // 7 (call), then 107 (close of 7): 7 * 10 + 107 = 177.
     assert_eq!(BADGES_SEEN.load(Ordering::Relaxed), 177);
+
+    // 7. A bound notification wakes the receiver with its bits; calls still
+    //    come first, and a notification binds to one endpoint only.
+    static EVENTS_SEEN: AtomicU64 = AtomicU64::new(0);
+    static EVENTS_DONE: AtomicBool = AtomicBool::new(false);
+    fn event_server(arg: usize) {
+        // SAFETY: as for `server`.
+        let end = unsafe { Box::from_raw(arg as *mut Arc<ServerEnd>) };
+        let mut log = 0u64;
+        while let Ok(event) = end.receive_event(true) {
+            match event {
+                Event::Call { token, .. } => {
+                    log = log * 10 + 1;
+                    token.reply(Message::new(PING, &[]).expect("fits"));
+                }
+                Event::Notification { bits } => log = log * 10 + bits,
+                Event::Closed { .. } => {}
+            }
+        }
+        EVENTS_SEEN.store(log, Ordering::Relaxed);
+        EVENTS_DONE.store(true, Ordering::Release);
+    }
+    let (server_end, client) = Endpoint::create();
+    let notification = Notification::new();
+    server_end.bind(notification.clone()).expect("bind");
+    let (other, _other_client) = Endpoint::create();
+    assert_eq!(other.bind(notification.clone()).err(), Some(IpcError::Busy));
+    sched::spawn(
+        "ipc-events",
+        event_server,
+        Box::into_raw(Box::new(server_end)) as usize,
+    )
+    .expect("spawn event server");
+    sched::sleep_ms(20); // let it block in receive
+    notification.signal(4);
+    sched::sleep_ms(20);
+    client
+        .call(Message::new(PING, &[]).expect("fits"))
+        .expect("call");
+    notification.signal(2);
+    sched::sleep_ms(20);
+    drop(client);
+    wait_for(&EVENTS_DONE, "event server exit");
+    // 4 (signal), 1 (call), 2 (signal): 412.
+    assert_eq!(EVENTS_SEEN.load(Ordering::Relaxed), 412);
 
     klog::info!("endpoint self-test passed");
 }
