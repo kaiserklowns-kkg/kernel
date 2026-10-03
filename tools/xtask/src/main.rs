@@ -60,6 +60,10 @@ const STICK_IMAGE: &str = "build/usb-stick.img";
 const SMOKE_STICK_IMAGE: &str = "build/smoke-stick.img";
 const STICK_SIZE: usize = 4 * 1024 * 1024;
 const STICK_TEXT: &str = "kept on a usb stick";
+/// A second stick, plugged in during the first smoke boot: FAT16 in an MBR
+/// partition, made by mkfs.fat and mtools (libs/fat/testdata, ADR-0036).
+const SMOKE_FAT_IMAGE: &str = "build/smoke-fat.img";
+const FAT_FIXTURE: &[u8] = include_bytes!("../../../libs/fat/testdata/fat16.sparse");
 /// What the first smoke boot stores and the second reads back.
 const KEPT_PATH: [&str; 2] = ["keep", "note.txt"];
 const KEPT_TEXT: &str = "kept across reboots";
@@ -73,10 +77,15 @@ const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
 /// kernel log shows `SHELL_READY` (user/shell, ADR-0018), then requires
 /// every `SHELL_EXPECT` line in the console output.
 const SHELL_READY: &str = "shell: ready";
-/// The last USB log lines of a boot: the device behind the hub, and the
-/// stick's class driver. They would otherwise land in the middle of the
-/// first commands' output, so typing waits for them.
-const USB_SETTLED: [&str; 2] = ["xhci: port 6.1: ", "usb-storage: port 3: "];
+/// The last boot-time log lines: the USB device behind the hub, the
+/// stick's class driver, and the end of the crasher's restarts. They would
+/// otherwise land in the middle of the first commands' output, and while
+/// the log is busy QEMU (on Windows) drops typed bytes, so typing waits.
+const USB_SETTLED: [&str; 3] = [
+    "xhci: port 6.1: ",
+    "usb-storage: port 3: ",
+    "crasher exited with -142; giving up",
+];
 /// Delay between typed bytes.
 const TYPING_DELAY: Duration = Duration::from_millis(2);
 /// Lines end in CR LF: Enter is CR on a serial terminal, and QEMU's Windows
@@ -163,6 +172,12 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor device_del stick",
     b"ls /usb\r\n",
     b"run disk out use:usbdisk -- info\r\n",
+    // A stick formatted elsewhere (ADR-0036): FAT, read-only at /usb.
+    b"@monitor device_add usb-storage,bus=usb.0,port=4,drive=fatstick,id=fatstick",
+    b"ls /usb\r\n",
+    b"cat /usb/long-file-name.txt\r\n",
+    b"cat /usb/docs/notes/deep.txt\r\n",
+    b"write /usb/new.txt nope\r\n",
     // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
     // and is removed again; then the hub goes, taking its tablet along.
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.2,id=hotplug",
@@ -274,6 +289,14 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("kept on a usb stick"),
     Expect::Contains("fs (media): unmounted the disk (disk removed)"),
     Expect::Contains("ls: /usb: no disk"),
+    Expect::Contains("fs (media): mounted a FAT16 volume \"OCEANS16\", read-only"),
+    Expect::Line("  HELLO.TXT"),
+    Expect::Line("  A long file name.txt"),
+    Expect::Line("  ไฟล์ภาษาไทย.txt"),
+    Expect::Line("  Docs/"),
+    Expect::Line("long names work"),
+    Expect::Line("deep"),
+    Expect::Contains("write: /usb/new.txt: permission denied"),
     Expect::Contains("usb-storage: port 3: disk removed"),
     Expect::Contains("xhci: port 3: device removed"),
     Expect::Contains("disk: I/O error"),
@@ -584,11 +607,14 @@ fn prepare_disk(path: &str, fresh: bool) -> Result {
 const GUEST_MAC: &str = "52:54:00:12:34:56";
 
 /// `forward`: host (UDP, TCP) ports forwarded to the guest's port 7;
-/// `monitor`: a host port for QEMU's monitor (to press USB keys).
+/// `monitor`: a host port for QEMU's monitor (to press USB keys);
+/// `spare_stick`: an image QEMU knows but has not plugged in (the monitor
+/// plugs it in as `fatstick`).
 fn qemu_command(
     headless: bool,
     disk: &str,
     stick: &str,
+    spare_stick: Option<&str>,
     forward: Option<(u16, u16)>,
     monitor: Option<u16>,
 ) -> Result<Command> {
@@ -655,6 +681,11 @@ fn qemu_command(
     .args(["-device", "usb-hub,bus=usb.0,port=2,id=hub"])
     .args(["-device", "usb-tablet,bus=usb.0,port=2.1"])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
+    if let Some(spare) = spare_stick {
+        cmd.arg("-drive").arg(format!(
+            "if=none,id=fatstick,format=raw,readonly=on,file={spare}"
+        ));
+    }
     if let Some(port) = monitor {
         cmd.arg("-monitor")
             .arg(format!("tcp:127.0.0.1:{port},server=on,wait=off"));
@@ -735,7 +766,29 @@ fn run(profile: Profile) -> Result {
         STICK_IMAGE,
         None,
         None,
+        None,
     )?)
+}
+
+/// The FAT stick: the fixture, expanded (`OCSPARSE`: size, then runs of
+/// offset, length, bytes; see libs/fat/testdata/sparse.py).
+fn prepare_fat_stick() -> Result {
+    let blob = FAT_FIXTURE;
+    let u64_at = |at: usize| u64::from_le_bytes(blob[at..at + 8].try_into().expect("8 bytes"));
+    if !blob.starts_with(b"OCSPARSE") {
+        return Err("the FAT fixture is not a sparse image".into());
+    }
+    let mut image = vec![0u8; u64_at(8) as usize];
+    let mut at = 16;
+    while at < blob.len() {
+        let offset = u64_at(at) as usize;
+        let len = u32::from_le_bytes(blob[at + 8..at + 12].try_into().expect("4 bytes")) as usize;
+        at += 12;
+        image[offset..offset + len].copy_from_slice(&blob[at..at + len]);
+        at += len;
+    }
+    let path = root().join(SMOKE_FAT_IMAGE);
+    fs::write(&path, image).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// A blank USB stick image; an existing one is replaced only if `fresh`.
@@ -781,6 +834,7 @@ fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
     prepare_disk(SMOKE_DISK_IMAGE, true)?;
     prepare_stick(SMOKE_STICK_IMAGE, true)?;
+    prepare_fat_stick()?;
     println!("smoke boot 1 of 2: blank disk");
     smoke_boot(SHELL_SCRIPT, SHELL_EXPECT)?;
     println!("smoke boot 2 of 2: the same disk");
@@ -827,6 +881,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
         true,
         SMOKE_DISK_IMAGE,
         SMOKE_STICK_IMAGE,
+        Some(SMOKE_FAT_IMAGE),
         Some((udp_forward, tcp_forward)),
         Some(monitor_port),
     )?

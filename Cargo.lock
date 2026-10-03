@@ -480,6 +480,10 @@ name = "oceans-elf"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-fat"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-frame-allocator"
 version = "0.1.0"
 dependencies = [

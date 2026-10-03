@@ -349,13 +349,19 @@ impl Shell {
             match read_at(&file, shared.as_ref(), offset, &mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
-                    // Files use LF; the terminal needs CR LF.
-                    for (i, part) in chunk[..n].split(|&b| b == b'\n').enumerate() {
-                        if i > 0 {
-                            self.write(b"\r\n");
+                    // Files use LF; the terminal needs CR LF. One write per
+                    // chunk, so a log line cannot split a line of text.
+                    let mut out = [0u8; 2 * CAT_BUFFER];
+                    let mut len = 0;
+                    for &byte in &chunk[..n] {
+                        if byte == b'\n' {
+                            out[len] = b'\r';
+                            len += 1;
                         }
-                        self.write(part);
+                        out[len] = byte;
+                        len += 1;
                     }
+                    self.write(&out[..len]);
                     offset += n as u64;
                 }
                 Err(error) => {

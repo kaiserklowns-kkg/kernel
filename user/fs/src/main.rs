@@ -24,7 +24,8 @@
 //!   `block`, the service serves a disk that may come and go (a USB stick):
 //!   it mounts it when a request arrives (formatting a blank one, leaving
 //!   any other contents untouched), checks before each request that the
-//!   disk is still there, and unmounts when it is gone. Handles opened on
+//!   disk is still there, and unmounts when it is gone. A disk holding a
+//!   FAT volume (ADR-0036) is served read-only. Handles opened on
 //!   a removed disk answer `NoMedium`; nothing is ever written to a disk
 //!   other than the one the volume was read from.
 //! - **Mount points** (ADR-0035). Each `use = X as mount:NAME` grant is
@@ -40,17 +41,21 @@
 
 extern crate alloc;
 
+mod store;
+
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use oceans_block_proto::{Disk, SECTOR_SIZE};
+use oceans_fat::Fat;
 use oceans_fs_proto::{Kind, MAX_DATA, MAX_NAME, MAX_SHARED, MIN_SHARED, Status, flags, op};
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 use oceans_volume::{
     BLOCK_SIZE, BlockBuf, BlockDevice, FsError, IoError, MountError, NodeId, Opened, ROOT, Volume,
 };
+use store::{FatDisk, Store};
 
 oceans_rt::entry!(main);
 
@@ -105,7 +110,7 @@ struct Remote {
 struct Fs {
     server: Handle,
     log: Handle,
-    volume: Volume<DiskDevice>,
+    volume: Store,
     handles: BTreeMap<u64, Open>,
     /// Shared buffers of open handles (ADR-0030), mapped here.
     buffers: BTreeMap<u64, (*mut u8, usize)>,
@@ -198,8 +203,8 @@ fn main(start: Start) -> i64 {
     let media = directory.find("use", "media");
     MEDIA.store(media.is_some(), Ordering::Relaxed);
     let volume = match media {
-        Some(_) => Volume::memory(),
-        None => mount(log, directory.find("use", "block")),
+        Some(_) => Store::memory(),
+        None => Store::Oceans(mount(log, directory.find("use", "block"))),
     };
     let mut mounts = Vec::new();
     for line in directory.lines() {
@@ -365,7 +370,10 @@ fn read_memory(memory: Handle) -> Option<Vec<u8>> {
 impl Fs {
     /// `/bin`: the granted program images, read-only and in memory only.
     fn publish_programs(&mut self, directory: &Directory) -> usize {
-        let bin = match self.volume.create_volatile_directory(ROOT, "bin", true) {
+        let Some(volume) = self.volume.oceans() else {
+            return 0;
+        };
+        let bin = match volume.create_volatile_directory(ROOT, "bin", true) {
             Ok(bin) => bin,
             Err(error) => {
                 say(self.log, format_args!("cannot create /bin: {error:?}"));
@@ -383,7 +391,10 @@ impl Fs {
                 continue;
             };
             if let Some(bytes) = read_memory(memory)
-                && self.volume.publish(bin, name, bytes).is_ok()
+                && self
+                    .volume
+                    .oceans()
+                    .is_some_and(|v| v.publish(bin, name, bytes).is_ok())
             {
                 published += 1;
             }
@@ -437,7 +448,7 @@ impl Fs {
     /// disk is still there, otherwise whatever disk is there now.
     fn check_media(&mut self) -> Result<(), Status> {
         if self.mounted {
-            if self.volume.device().is_some_and(|d| d.disk.alive()) {
+            if self.volume.alive() {
                 return Ok(());
             }
             self.unmount("disk removed");
@@ -457,9 +468,9 @@ impl Fs {
         };
         match Volume::open(device, true) {
             Ok((volume, opened)) => {
-                self.volume = volume;
+                let (used, total) = volume.usage();
+                self.volume = Store::Oceans(volume);
                 self.mounted = true;
-                let (used, total) = self.volume.usage();
                 let kib = |blocks: u64| blocks * BLOCK_SIZE as u64 / 1024;
                 match opened {
                     Opened::Formatted => say(
@@ -473,12 +484,38 @@ impl Fs {
                 }
                 Ok(())
             }
-            Err(MountError::UnknownContents) => {
-                Err(self.refuse("it holds something other than an Oceans volume"))
-            }
+            Err(MountError::UnknownContents) => self.mount_fat(block),
             Err(MountError::Corrupt(why)) => Err(self.refuse(why)),
             Err(MountError::TooSmall) => Err(self.refuse("it is too small")),
             Err(MountError::Io | MountError::Blank) => Err(Status::NoMedium),
+        }
+    }
+
+    /// A disk that is not an Oceans volume: a FAT volume on it is served
+    /// read-only (ADR-0036); anything else is refused.
+    fn mount_fat(&mut self, block: Handle) -> Result<(), Status> {
+        let disk = Disk::open(block, BLOCK_SIZE).map_err(|_| Status::NoMedium)?;
+        let sectors = disk.info.sectors;
+        match Fat::open(FatDisk { disk, sectors }) {
+            Ok(fat) => {
+                say(
+                    self.log,
+                    format_args!(
+                        "mounted a {} volume \"{}\", read-only: {} KiB",
+                        fat.kind().name(),
+                        fat.label(),
+                        fat.capacity() / 1024
+                    ),
+                );
+                self.volume = Store::Fat(fat);
+                self.mounted = true;
+                Ok(())
+            }
+            Err(oceans_fat::Error::Io) => Err(Status::NoMedium),
+            Err(oceans_fat::Error::NotFat) => {
+                Err(self.refuse("it holds neither an Oceans nor a FAT volume"))
+            }
+            Err(_) => Err(self.refuse("its FAT volume is damaged")),
         }
     }
 
@@ -502,7 +539,7 @@ impl Fs {
             let _ = oceans_rt::memory_unmap(base);
         }
         self.handles.clear();
-        self.volume = Volume::memory();
+        self.volume = Store::memory();
         self.mounted = false;
         self.refusal_logged = false;
         say(self.log, format_args!("unmounted the disk ({why})"));
@@ -802,7 +839,7 @@ impl Fs {
         Ok(Reply::ok(&data))
     }
 
-    fn list(&self, open: Open, data: &[u8]) -> Result<Reply, Status> {
+    fn list(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {
         let mut index = u32_at(data, 0).ok_or(Status::BadRequest)? as usize;
         // Mount points come first in the root.
         if open.node == ROOT && self.media.is_none() {

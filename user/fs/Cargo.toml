@@ -15,4 +15,5 @@ bench = false
 oceans-fs-proto.workspace = true
 oceans-block-proto.workspace = true
 oceans-volume.workspace = true
+oceans-fat.workspace = true
 oceans-rt = { workspace = true, features = ["alloc"] }

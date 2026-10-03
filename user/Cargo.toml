@@ -27,6 +27,7 @@ oceans-tls = { path = "../libs/tls" }
 oceans-usb = { path = "../libs/usb" }
 oceans-elf = { path = "../libs/elf" }
 oceans-volume = { path = "../libs/volume" }
+oceans-fat = { path = "../libs/fat" }
 
 [profile.release]
 # Programs are loaded through the filesystem (ADR-0019): keep them small.

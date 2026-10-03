@@ -304,6 +304,7 @@ name = "fs"
 version = "0.1.0"
 dependencies = [
  "oceans-block-proto",
+ "oceans-fat",
  "oceans-fs-proto",
  "oceans-rt",
  "oceans-volume",
@@ -505,6 +506,10 @@ version = "0.1.0"
 
 [[package]]
 name = "oceans-elf"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-fat"
 version = "0.1.0"
 
 [[package]]
