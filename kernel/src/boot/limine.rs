@@ -4,7 +4,7 @@ use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, HhdmRequest, MemoryMapRequest,
-    ModuleRequest, RequestsEndMarker, RequestsStartMarker,
+    ModuleRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
 };
 use oceans_memory_map::{Region, RegionKind};
 
@@ -43,6 +43,10 @@ static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static MODULES: ModuleRequest = ModuleRequest::new();
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static RSDP: RsdpRequest = RsdpRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
@@ -85,6 +89,16 @@ extern "C" fn kernel_entry() -> ! {
                 Err(_) => klog::warn!("ignoring kernel command line: not valid UTF-8"),
             }
         }
+
+        // Base revision 3 reports the RSDP physically; older ones used the
+        // direct map. Accept both.
+        info.rsdp = RSDP.get_response().map(|r| {
+            let address = r.address() as u64;
+            match info.direct_map_offset {
+                Some(offset) if address >= offset => address - offset,
+                _ => address,
+            }
+        });
 
         if let (Some(modules), Some(offset)) = (MODULES.get_response(), info.direct_map_offset) {
             for module in modules.modules() {

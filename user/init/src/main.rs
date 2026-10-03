@@ -5,7 +5,8 @@
 //! 2. Parses the manifest: services in start order, each with an image, a
 //!    restart policy and the capabilities it is granted.
 //! 3. Starts each service with exactly the declared capabilities, in the
-//!    declared order: `grant = log` (a log capability), `provide = NAME`
+//!    declared order: `grant = log` (a log capability), `grant = console`
+//!    (the system console), `provide = NAME`
 //!    (the server end of a new endpoint NAME), `use = NAME` (a client end
 //!    of endpoint NAME, provided by an earlier service).
 //! 4. Supervises: one notification, a bit per service, signalled by the
@@ -53,6 +54,7 @@ enum Restart {
 #[derive(Clone, Copy)]
 enum Grant {
     Log,
+    Console,
     Provide(&'static str),
     Use(&'static str),
 }
@@ -129,6 +131,7 @@ impl Registry {
 
 struct Init {
     log: Handle,
+    console: Handle,
     /// Lines `<module name> <handle index>`.
     module_table: &'static str,
     start: Start,
@@ -140,7 +143,12 @@ struct Init {
 
 fn main(start: Start) -> i64 {
     let test_mode = start.arg == 1;
-    let (Some(&log), Some(&table)) = (start.handles.first(), start.handles.get(1)) else {
+    // Boot contract (kernel process::init): log, module table, console.
+    let (Some(&log), Some(&table), Some(&console)) = (
+        start.handles.first(),
+        start.handles.get(1),
+        start.handles.get(2),
+    ) else {
         return EXIT_BAD_START;
     };
     let say = |args: core::fmt::Arguments<'_>| {
@@ -159,6 +167,7 @@ fn main(start: Start) -> i64 {
     };
     let mut init = Init {
         log,
+        console,
         module_table,
         start,
         events,
@@ -274,7 +283,8 @@ fn parse(
             "grant" | "provide" | "use" => {
                 let grant = match (key, value) {
                     ("grant", "log") => Grant::Log,
-                    ("grant", _) => return error("unknown grant (known: log)"),
+                    ("grant", "console") => Grant::Console,
+                    ("grant", _) => return error("unknown grant (known: log, console)"),
                     ("provide", name) => Grant::Provide(name),
                     (_, name) => Grant::Use(name),
                 };
@@ -359,6 +369,10 @@ impl Init {
             for grant in service.grants.iter().flatten() {
                 handles[count] = match *grant {
                     Grant::Log => oceans_rt::duplicate(self.log, rights::WRITE | rights::TRANSFER)?,
+                    Grant::Console => oceans_rt::duplicate(
+                        self.console,
+                        rights::READ | rights::WRITE | rights::TRANSFER,
+                    )?,
                     Grant::Provide(name) => {
                         let (server, client) = oceans_rt::endpoint_create()?;
                         if !self.registry.set(name, client) {

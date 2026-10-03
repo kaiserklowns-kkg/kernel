@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 3 (`oceans-abi`, ADR-0014, ADR-0015, ADR-0016).
+//! System call dispatch, ABI version 4 (`oceans-abi`, ADR-0014 to ADR-0017).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -11,8 +11,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use oceans_abi::{
-    DEBUG_WRITE_MAX, Error, IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc, PROCESS_NAME_MAX,
-    SPAWN_MAX_IMAGE, nr, prot, start::MAX_INITIAL_HANDLES,
+    CONSOLE_IO_MAX, DEBUG_WRITE_MAX, Error, IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc,
+    PROCESS_NAME_MAX, SPAWN_MAX_IMAGE, nr, prot, start::MAX_INITIAL_HANDLES,
 };
 use oceans_capability::{CapError, Handle, Rights};
 
@@ -23,7 +23,7 @@ use crate::object::{
     self, Capability, KernelObject, MemoryObject, ObjectError, ObjectKind, default_rights,
 };
 use crate::process::{self, Process};
-use crate::{klog, sched};
+use crate::{console, klog, sched};
 
 type SyscallResult = Result<(u64, u64), Error>;
 
@@ -70,6 +70,8 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::NOTIFICATION_WAIT => notification_wait(&process, a0),
         nr::PROCESS_WATCH => process_watch(&process, a0, a1, a2),
         nr::SLEEP => sleep(a0),
+        nr::CONSOLE_READ => console_read(&process, a0, a1, a2),
+        nr::CONSOLE_WRITE => console_write(&process, a0, a1, a2),
         _ => Err(Error::UnknownSyscall),
     };
     match result {
@@ -632,4 +634,47 @@ fn process_watch(process: &Process, raw: u64, notification: u64, bits: u64) -> S
 fn sleep(ms: u64) -> SyscallResult {
     sched::sleep_ms(ms);
     Ok((0, 0))
+}
+
+// ---- ABI 4 -----------------------------------------------------------------
+
+/// Bytes written to the console per lock hold, bounding how long output
+/// keeps interrupts disabled.
+const CONSOLE_WRITE_CHUNK: usize = 64;
+
+fn check_console(process: &Process, raw: u64, required: Rights) -> Result<(), Error> {
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let capability = table.get(handle(raw), Rights::NONE).map_err(cap_error)?;
+        match capability.object() {
+            KernelObject::Console => capability.check(required).map_err(cap_error),
+            _ => Err(Error::WrongType),
+        }
+    })
+}
+
+fn console_read(process: &Process, raw: u64, ptr: u64, capacity: u64) -> SyscallResult {
+    check_console(process, raw, Rights::READ)?;
+    let capacity = len_arg(capacity, CONSOLE_IO_MAX)?;
+    if capacity == 0 {
+        return Ok((0, 0));
+    }
+    let mut buffer = [0u8; CONSOLE_IO_MAX];
+    // Validate the destination before consuming input, so a bad pointer
+    // does not lose keystrokes.
+    process.copy_to_user(ptr, &buffer[..capacity])?;
+    let count = console::read(&mut buffer[..capacity]);
+    process.copy_to_user(ptr, &buffer[..count])?;
+    Ok((count as u64, 0))
+}
+
+fn console_write(process: &Process, raw: u64, ptr: u64, len: u64) -> SyscallResult {
+    check_console(process, raw, Rights::WRITE)?;
+    let len = len_arg(len, CONSOLE_IO_MAX)?;
+    let mut buffer = [0u8; CONSOLE_IO_MAX];
+    process.copy_from_user(ptr, &mut buffer[..len])?;
+    for chunk in buffer[..len].chunks(CONSOLE_WRITE_CHUNK) {
+        console::write(chunk);
+    }
+    Ok((len as u64, 0))
 }

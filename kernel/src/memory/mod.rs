@@ -104,3 +104,33 @@ fn discover(boot: &BootInfo) {
         None => panic!("bootloader did not provide a physical memory direct map"),
     }
 }
+
+/// Copies physical memory at `phys` into `out`: through the direct map when
+/// the whole range is RAM mapped there, else through a read-only uncached
+/// mapping (firmware tables in reserved memory).
+pub fn read_physical(phys: u64, out: &mut [u8]) -> Result<(), paging::MapError> {
+    let end = phys
+        .checked_add(out.len() as u64)
+        .ok_or(paging::MapError::Misaligned { virt: 0, phys })?;
+    let offset = *DIRECT_MAP_OFFSET
+        .get()
+        .expect("memory::init sets the direct map first");
+    let mut page = phys - phys % PAGE_SIZE;
+    let mut direct = true;
+    while page < end {
+        if paging::translate(offset + page) != Some((page, paging::MapFlags::KERNEL_DATA)) {
+            direct = false;
+            break;
+        }
+        page += PAGE_SIZE;
+    }
+    let source = if direct {
+        phys_to_virt(phys).cast_const()
+    } else {
+        paging::map_physical_readonly(phys, out.len() as u64)?
+    };
+    // SAFETY: `source..+len` is mapped readable (checked or just mapped) and
+    // is plain memory; reading it has no side effects.
+    unsafe { core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), out.len()) };
+    Ok(())
+}

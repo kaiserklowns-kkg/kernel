@@ -6,7 +6,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
@@ -21,6 +21,7 @@ const USER_PROGRAMS: &[&str] = &[
     "echo-service",
     "hello-client",
     "crasher",
+    "console-test",
     "ipc-test",
 ];
 /// Service manifests for init: normal boots and smoke tests.
@@ -29,6 +30,13 @@ const SMOKE_MANIFEST: &str = "config/services-smoke.conf";
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const LIMINE_BRANCH: &str = "v9.x-binary";
 const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
+/// The smoke test types `CONSOLE_INPUT` into the serial console when the
+/// kernel log shows `CONSOLE_PROMPT` (user/console-test, ADR-0017).
+const CONSOLE_PROMPT: &str = "console-test: waiting for input";
+/// Enter is a carriage return on a serial terminal; QEMU's Windows stdio
+/// backend drops a lone CR from piped input, so send CR LF (the guest
+/// accepts either as Enter).
+const CONSOLE_INPUT: &[u8] = b"hello oceans\r\n";
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
 const QEMU_EXIT_SUCCESS: i32 = 33;
@@ -49,7 +57,8 @@ commands:
 environment:
   OCEANS_QEMU   path to qemu-system-x86_64
   OCEANS_OVMF   path to the x86_64 UEFI firmware code image (OVMF/edk2)
-  OCEANS_LIMINE directory containing BOOTX64.EFI (default: build/limine)";
+  OCEANS_LIMINE directory containing BOOTX64.EFI (default: build/limine)
+  OCEANS_QEMU_EXTRA extra QEMU arguments, e.g. \"-cpu max\"";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -308,6 +317,10 @@ fn qemu_command(headless: bool) -> Result<Command> {
     if headless {
         cmd.args(["-display", "none"]);
     }
+    // e.g. OCEANS_QEMU_EXTRA="-cpu max" to exercise SMEP/SMAP/UMIP.
+    if let Some(extra) = env::var_os("OCEANS_QEMU_EXTRA") {
+        cmd.args(extra.to_string_lossy().split_whitespace());
+    }
     Ok(cmd)
 }
 
@@ -376,10 +389,11 @@ fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
 
     let mut child = qemu_command(true)?
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to start QEMU: {e}"))?;
+    let mut serial_input = child.stdin.take().expect("stdin is piped");
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let (lines_tx, lines_rx) = mpsc::channel();
@@ -402,6 +416,13 @@ fn smoke(profile: Profile) -> Result {
             Ok(line) => {
                 println!("  | {line}");
                 online |= line.contains(ONLINE_BANNER);
+                if line.contains(CONSOLE_PROMPT) {
+                    // Typed into the guest's serial port (QEMU -serial stdio).
+                    serial_input
+                        .write_all(CONSOLE_INPUT)
+                        .and_then(|()| serial_input.flush())
+                        .map_err(|e| format!("cannot type into the serial console: {e}"))?;
+                }
             }
             // Reader finished: QEMU closed stdout, i.e. exited.
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

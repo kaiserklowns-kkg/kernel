@@ -20,6 +20,7 @@ value. Exact chipsets are added only after research and a test device.
 | Class | Tier 0 (QEMU) | Tier 1 candidates (research pending) |
 |---|---|---|
 | Firmware | OVMF UEFI | UEFI 2.x with ACPI |
+| Interrupts | local APIC + I/O APIC (ACPI MADT) | x2APIC, MSI (Phase 4) |
 | CPU | x86-64 (TCG/KVM) | x86-64-v2+ Intel/AMD; selected AArch64 |
 | Console | 16550 UART (COM1) | — (framebuffer console in Phase 4) |
 | Storage | — | NVMe, virtio-blk |

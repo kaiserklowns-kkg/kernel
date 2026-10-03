@@ -1,0 +1,15 @@
+[package]
+name = "console-test"
+description = "Reads a line from the console in the smoke test (ADR-0017)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "console-test"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true

@@ -247,6 +247,16 @@ static NEXT_MMIO: AtomicU64 = AtomicU64::new(layout::MMIO.start);
 /// Maps device registers at physical `phys..phys + size` uncached,
 /// read-write, never executable. Returns the virtual address of `phys`.
 pub fn map_mmio(phys: u64, size: u64) -> Result<*mut u8, MapError> {
+    map_physical(phys, size, true)
+}
+
+/// Maps firmware memory outside the direct map (e.g. ACPI tables in
+/// reserved memory) uncached and read-only. Permanent.
+pub fn map_physical_readonly(phys: u64, size: u64) -> Result<*const u8, MapError> {
+    map_physical(phys, size, false).map(<*mut u8>::cast_const)
+}
+
+fn map_physical(phys: u64, size: u64, writable: bool) -> Result<*mut u8, MapError> {
     let start = phys - phys % PAGE_SIZE;
     let end = (phys + size).next_multiple_of(PAGE_SIZE);
     let virt = NEXT_MMIO.fetch_add(end - start, Ordering::Relaxed);
@@ -254,7 +264,7 @@ pub fn map_mmio(phys: u64, size: u64) -> Result<*mut u8, MapError> {
         return Err(MapError::OutOfMemory);
     }
     let flags = MapFlags {
-        writable: true,
+        writable,
         executable: false,
         user: false,
         global: true,

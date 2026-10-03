@@ -51,6 +51,15 @@ pub fn write(level: Level, target: &str, args: fmt::Arguments<'_>) {
 /// For panic and fatal-exception paths, where the interrupted code may hold
 /// the console lock. Output may interleave with that writer; losing the
 /// diagnostic would be worse.
+/// Writes raw bytes (user console output) as one unit, never inside a log
+/// line.
+pub fn write_raw(bytes: &[u8]) {
+    arch::without_interrupts(|| {
+        let _guard = CONSOLE.lock();
+        arch::console_write_bytes(bytes);
+    });
+}
+
 pub fn emergency(level: Level, target: &str, args: fmt::Arguments<'_>) {
     arch::without_interrupts(|| {
         let _guard = CONSOLE.try_lock();

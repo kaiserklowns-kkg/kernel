@@ -149,6 +149,7 @@ pub fn init() {
         scheduler.current = Some(boot);
         scheduler.idle = Some(idle);
     });
+    arch::set_after_device_interrupt(on_device_interrupt);
     arch::start_timer(time::HZ, on_timer_tick);
     arch::enable_interrupts();
     klog::info!(
@@ -397,6 +398,19 @@ fn after_switch() {
     // Dropped outside the lock: freeing stacks takes the paging and frame
     // locks.
     drop(zombies);
+}
+
+/// After a device interrupt (interrupts disabled, already acknowledged): if
+/// the CPU was idle and the interrupt woke someone, run it now rather than
+/// at the next tick.
+fn on_device_interrupt() {
+    let run_now = {
+        let scheduler = SCHEDULER.lock();
+        scheduler.current_is_idle() && scheduler.queue.has_ready()
+    };
+    if run_now {
+        schedule(Reason::Yield);
+    }
 }
 
 /// Timer interrupt (interrupts disabled): wakes sleepers and preempts the

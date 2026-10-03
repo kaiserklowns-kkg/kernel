@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 3).
+//! Minimal Oceans userspace runtime (ABI version 4).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -360,6 +360,32 @@ pub fn process_watch(process: Handle, notification: Handle, bits: u64) -> Result
 /// Blocks for at least `ms` milliseconds.
 pub fn sleep_ms(ms: u64) {
     call(nr::SLEEP, [ms, 0, 0, 0, 0, 0]).ok();
+}
+
+// ---- ABI 4 -----------------------------------------------------------------
+
+/// Blocks until console input is available; returns how many raw bytes
+/// were read into `buffer` (at most `oceans_abi::CONSOLE_IO_MAX`).
+pub fn console_read(console: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    let len = buffer.len().min(oceans_abi::CONSOLE_IO_MAX);
+    let args = [console.0, buffer.as_mut_ptr() as u64, len as u64, 0, 0, 0];
+    call(nr::CONSOLE_READ, args).map(|(count, _)| count as usize)
+}
+
+/// Writes raw bytes to the console.
+pub fn console_write(console: Handle, bytes: &[u8]) -> Result<(), Error> {
+    for chunk in bytes.chunks(oceans_abi::CONSOLE_IO_MAX) {
+        let args = [
+            console.0,
+            chunk.as_ptr() as u64,
+            chunk.len() as u64,
+            0,
+            0,
+            0,
+        ];
+        call(nr::CONSOLE_WRITE, args)?;
+    }
+    Ok(())
 }
 
 /// Fixed-capacity text buffer for formatting without an allocator.

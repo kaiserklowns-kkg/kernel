@@ -73,6 +73,8 @@ pub struct BootInfo {
     cmdline_truncated: bool,
     modules: [BootModule; MAX_MODULES],
     module_count: usize,
+    /// Physical address of the ACPI RSDP.
+    rsdp: Option<u64>,
 }
 
 impl BootInfo {
@@ -92,6 +94,7 @@ impl BootInfo {
             cmdline_truncated: false,
             modules: [BootModule::EMPTY; MAX_MODULES],
             module_count: 0,
+            rsdp: None,
         }
     }
 
@@ -157,6 +160,11 @@ impl BootInfo {
 
     pub fn kernel_image(&self) -> Option<KernelImage> {
         self.kernel_image
+    }
+
+    /// Physical address of the ACPI Root System Description Pointer.
+    pub fn rsdp(&self) -> Option<u64> {
+        self.rsdp
     }
 
     pub fn modules(&self) -> &[BootModule] {

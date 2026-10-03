@@ -1,0 +1,9 @@
+[package]
+name = "oceans-acpi"
+description = "Minimal, validating ACPI table parser (RSDP, RSDT/XSDT, MADT) for the Oceans kernel (ADR-0017)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

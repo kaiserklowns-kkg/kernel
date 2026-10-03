@@ -5,6 +5,7 @@ mod context;
 mod cpu;
 mod gdt;
 mod interrupts;
+mod ioapic;
 mod paging;
 mod pic;
 mod serial;
@@ -16,7 +17,7 @@ use ::x86_64::instructions::{self as insn, port::Port};
 
 pub use context::{prepare_stack, switch_context};
 pub use cpu::{enable_protections, features as cpu_features};
-pub use interrupts::{TrapFrame, set_user_fault_handler};
+pub use interrupts::{TrapFrame, set_after_device_interrupt, set_user_fault_handler};
 pub use paging::{AddressSpace, activate_root, active_root};
 pub use syscall::{SyscallFrame, enter_user, init as init_syscalls, set_kernel_stack};
 
@@ -37,6 +38,11 @@ pub fn init() {
 
 pub fn console_write(s: &str) {
     serial::write_str(s);
+}
+
+/// Writes bytes to the console unchanged (no newline translation).
+pub fn console_write_bytes(bytes: &[u8]) {
+    serial::write_bytes(bytes);
 }
 
 pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
@@ -138,4 +144,48 @@ pub fn fault_address() -> u64 {
 /// Human-readable name of exception `vector`.
 pub fn exception_name(vector: u64) -> &'static str {
     interrupts::exception_name(vector)
+}
+
+/// Where received console bytes go (set once by `enable_console_input`).
+static CONSOLE_SINK: spin::Once<fn(u8)> = spin::Once::new();
+/// The I/O APIC used for device interrupts, kept for future routes.
+static IO_APIC: spin::Once<spin::Mutex<ioapic::IoApic>> = spin::Once::new();
+
+fn on_serial_interrupt() {
+    if let Some(sink) = CONSOLE_SINK.get() {
+        serial::drain_input(sink);
+    }
+}
+
+/// Routes the serial console's interrupt (global system interrupt `gsi` on
+/// the I/O APIC at `io_apic`) to this CPU and delivers every received byte
+/// to `sink`, in interrupt context. Requires the kernel page tables.
+pub fn enable_console_input(
+    io_apic: u64,
+    gsi_base: u32,
+    gsi: u32,
+    active_low: bool,
+    level_triggered: bool,
+    sink: fn(u8),
+) -> Result<(), &'static str> {
+    CONSOLE_SINK.call_once(|| sink);
+    interrupts::set_serial_handler(on_serial_interrupt);
+    let io = match ioapic::IoApic::new(io_apic, gsi_base) {
+        Ok(io) => IO_APIC.call_once(|| spin::Mutex::new(io)),
+        Err(_) => return Err("cannot map the I/O APIC"),
+    };
+    let routed = without_interrupts(|| {
+        io.lock().route(
+            gsi,
+            interrupts::VECTOR_SERIAL,
+            active_low,
+            level_triggered,
+            apic::id(),
+        )
+    });
+    if !routed {
+        return Err("the I/O APIC does not serve the console's interrupt");
+    }
+    serial::enable_receive_interrupt();
+    Ok(())
 }

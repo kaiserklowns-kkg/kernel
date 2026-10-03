@@ -34,6 +34,10 @@ name = "oceans-abi"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-acpi"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-capability"
 version = "0.1.0"
 
@@ -58,6 +62,7 @@ version = "0.1.0"
 dependencies = [
  "limine",
  "oceans-abi",
+ "oceans-acpi",
  "oceans-capability",
  "oceans-elf",
  "oceans-frame-allocator",

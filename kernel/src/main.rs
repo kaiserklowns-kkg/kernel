@@ -16,8 +16,10 @@
 
 extern crate alloc;
 
+mod acpi;
 mod arch;
 mod boot;
+mod console;
 mod ipc;
 mod klog;
 mod memory;
@@ -71,6 +73,8 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     memory::reclaim_bootloader_memory(boot);
     sched::init();
     process::init();
+    let acpi = acpi::discover(boot);
+    console::init(acpi.as_ref());
 
     let smoke_test = boot.cmdline_has(SMOKE_TEST_FLAG);
     if smoke_test {

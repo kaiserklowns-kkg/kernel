@@ -24,5 +24,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0014](0014-processes-and-user-mode.md) | Processes, user mode and the system call ABI | Accepted |
 | [0015](0015-syscall-abi-v2.md) | System call ABI v2: capabilities over IPC, memory, processes | Accepted |
 | [0016](0016-init-and-service-manager.md) | init and the service manager | Accepted |
+| [0017](0017-console-input.md) | Console input: ACPI, I/O APIC and a console capability | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

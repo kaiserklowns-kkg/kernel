@@ -23,8 +23,25 @@ const VECTOR_DOUBLE_FAULT: usize = 8;
 const VECTOR_PAGE_FAULT: u64 = 14;
 /// Local APIC timer (above the remapped, masked legacy PIC range 32–47).
 pub const VECTOR_TIMER: u8 = 48;
+/// Serial console (COM1) receive interrupt, routed by the I/O APIC.
+pub const VECTOR_SERIAL: u8 = 49;
 /// Local APIC spurious interrupt; must not be acknowledged.
 pub const VECTOR_SPURIOUS: u8 = 255;
+
+/// Called on every serial interrupt, before EOI, with interrupts disabled.
+static SERIAL_HANDLER: Once<fn()> = Once::new();
+
+pub fn set_serial_handler(handler: fn()) {
+    SERIAL_HANDLER.call_once(|| handler);
+}
+
+/// Called after a device interrupt has been acknowledged, with interrupts
+/// disabled: lets the scheduler run a thread the interrupt woke.
+static AFTER_DEVICE_INTERRUPT: Once<fn()> = Once::new();
+
+pub fn set_after_device_interrupt(hook: fn()) {
+    AFTER_DEVICE_INTERRUPT.call_once(|| hook);
+}
 
 /// Called on every timer interrupt, after EOI, with interrupts disabled.
 static TIMER_HANDLER: Once<fn()> = Once::new();
@@ -115,6 +132,10 @@ global_asm!(
     "push 0",
     "push 255",
     "jmp {common}",
+    "oceans_irq_stub_serial:",
+    "push 0",
+    "push 49",
+    "jmp {common}",
     ".popsection",
     ".pushsection .rodata.oceans_exceptions, \"a\", @progbits",
     ".balign 8",
@@ -123,6 +144,7 @@ global_asm!(
     "oceans_irq_stubs:",
     ".quad oceans_irq_stub_timer",
     ".quad oceans_irq_stub_spurious",
+    ".quad oceans_irq_stub_serial",
     ".popsection",
     common = sym exception_common,
 );
@@ -134,7 +156,7 @@ unsafe extern "C" {
 
 unsafe extern "C" {
     #[link_name = "oceans_irq_stubs"]
-    static IRQ_STUBS: [u64; 2];
+    static IRQ_STUBS: [u64; 3];
 }
 
 /// Saves registers, calls the dispatcher with a pointer to the frame,
@@ -201,6 +223,17 @@ extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
             super::apic::end_of_interrupt();
             if let Some(handler) = TIMER_HANDLER.get() {
                 handler();
+            }
+        }
+        v if v == u64::from(VECTOR_SERIAL) => {
+            // Drain the UART before acknowledging, so a level-triggered line
+            // cannot re-fire for data already handled.
+            if let Some(handler) = SERIAL_HANDLER.get() {
+                handler();
+            }
+            super::apic::end_of_interrupt();
+            if let Some(hook) = AFTER_DEVICE_INTERRUPT.get() {
+                hook();
             }
         }
         v if v == u64::from(VECTOR_SPURIOUS) => {}
@@ -324,8 +357,9 @@ pub fn init() {
             let ist = (vector == VECTOR_DOUBLE_FAULT).then_some(DOUBLE_FAULT_IST_INDEX);
             *gate = Gate::interrupt(handler, selector, ist);
         }
-        // SAFETY: the IRQ stub table above has exactly two entries.
-        let (timer, spurious) = unsafe { (IRQ_STUBS[0], IRQ_STUBS[1]) };
+        // SAFETY: the IRQ stub table above has exactly three entries.
+        let (timer, spurious, serial) = unsafe { (IRQ_STUBS[0], IRQ_STUBS[1], IRQ_STUBS[2]) };
+        gates[usize::from(VECTOR_SERIAL)] = Gate::interrupt(serial, selector, None);
         gates[usize::from(VECTOR_TIMER)] = Gate::interrupt(timer, selector, None);
         gates[usize::from(VECTOR_SPURIOUS)] = Gate::interrupt(spurious, selector, None);
         // Other vectors stay non-present until interrupt routing exists; a

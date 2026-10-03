@@ -1,10 +1,10 @@
 [workspace]
 exclude = ["user"]
 resolver = "3"
-members = ["kernel", "libs/abi", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/scheduler", "tools/xtask"]
+members = ["kernel", "libs/abi", "libs/acpi", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/scheduler", "tools/xtask"]
 # The kernel only builds for bare-metal targets; host-side `cargo test`
 # and `cargo build` cover the portable crates and tooling.
-default-members = ["libs/abi", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/scheduler", "tools/xtask"]
+default-members = ["libs/abi", "libs/acpi", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/scheduler", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oceans-abi = { path = "libs/abi" }
+oceans-acpi = { path = "libs/acpi" }
 oceans-capability = { path = "libs/capability" }
 oceans-elf = { path = "libs/elf" }
 oceans-frame-allocator = { path = "libs/frame-allocator" }

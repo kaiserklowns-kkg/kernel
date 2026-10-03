@@ -36,6 +36,8 @@ pub enum KernelObject {
     Log,
     /// A process: `WAIT` for its exit.
     Process(Arc<Process>),
+    /// The system console: `READ` input, `WRITE` output.
+    Console,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub enum ObjectKind {
     Notification,
     Log,
     Process,
+    Console,
 }
 
 impl KernelObject {
@@ -59,6 +62,7 @@ impl KernelObject {
             Self::Notification(_) => ObjectKind::Notification,
             Self::Log => ObjectKind::Log,
             Self::Process(_) => ObjectKind::Process,
+            Self::Console => ObjectKind::Console,
         }
     }
 }
@@ -105,6 +109,10 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Log => Rights::WRITE
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+        ObjectKind::Console => Rights::READ
+            .union(Rights::WRITE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Process => Rights::WAIT

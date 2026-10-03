@@ -69,6 +69,11 @@ pub fn init() {
     klog::debug!("local APIC at {phys:#x} enabled");
 }
 
+/// This CPU's local APIC ID (I/O APIC routing destination).
+pub fn id() -> u8 {
+    (read(0x020) >> 24) as u8
+}
+
 /// Signals the end of the current interrupt to the local APIC.
 pub fn end_of_interrupt() {
     if BASE.get().is_some() {

@@ -1,4 +1,4 @@
-//! The Oceans system call ABI, version 3 (ADR-0014, ADR-0015, ADR-0016).
+//! The Oceans system call ABI, version 4 (ADR-0014 to ADR-0017).
 //!
 //! Shared by the kernel and userspace so both sides agree by construction.
 //! The ABI is versioned: numbers and meanings below never change within a
@@ -16,9 +16,9 @@
 #![no_std]
 
 /// Version history: 1 = ADR-0014 (syscalls 0–7); 2 = ADR-0015 (8–17);
-/// 3 = ADR-0016 (18–22). Versions only add; existing numbers keep their
-/// meaning.
-pub const ABI_VERSION: u64 = 3;
+/// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24). Versions only add; existing
+/// numbers keep their meaning.
+pub const ABI_VERSION: u64 = 4;
 
 /// System call numbers.
 pub mod nr {
@@ -91,6 +91,15 @@ pub mod nr {
     pub const PROCESS_WATCH: u64 = 21;
     /// `(milliseconds) -> 0` — blocks for at least that long.
     pub const SLEEP: u64 = 22;
+
+    // ABI 4
+
+    /// `(console, ptr, capacity) -> count` — blocks until console input is
+    /// available, then returns up to `capacity` raw bytes. Needs `READ`.
+    pub const CONSOLE_READ: u64 = 23;
+    /// `(console, ptr, len) -> len` — writes raw bytes (no log prefix, no
+    /// translation) to the console. Needs `WRITE`.
+    pub const CONSOLE_WRITE: u64 = 24;
 }
 
 /// `MEMORY_MAP` protection bits. Writable and executable together are
@@ -209,6 +218,9 @@ pub const IPC_MAX_INLINE: usize = 256;
 
 /// Largest single `DEBUG_WRITE`, in bytes.
 pub const DEBUG_WRITE_MAX: usize = 1024;
+
+/// Largest single `CONSOLE_READ` or `CONSOLE_WRITE`, in bytes.
+pub const CONSOLE_IO_MAX: usize = 4096;
 
 /// Initial register state of a process's first thread: `rdi` holds the
 /// number of initial capabilities, `rsi` a pointer to that many `u64`
