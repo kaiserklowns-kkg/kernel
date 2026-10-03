@@ -9,5 +9,6 @@ rust-version.workspace = true
 # No external dependencies: the build tool must work on a fresh checkout.
 # The volume crate is in-tree; the smoke test mounts the guest's disk with it.
 [dependencies]
+oceans-archive.workspace = true
 oceans-dns.workspace = true
 oceans-volume.workspace = true

@@ -395,7 +395,8 @@ fn fetch_limine() -> Result {
 /// EFI/BOOT/BOOTX64.EFI        Limine
 /// boot/limine/limine.conf
 /// boot/oceans-kernel
-/// boot/<user program>…       boot modules
+/// boot/initrd                 the boot archive: every program and the
+///                             service manifest (ADR-0025)
 /// ```
 fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     let kernel = build_kernel(profile)?;
@@ -421,33 +422,48 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
 
     copy(&limine_efi, &efi_boot.join("BOOTX64.EFI"))?;
     copy(&kernel, &esp.join("boot").join(KERNEL_PACKAGE))?;
-    for program in USER_PROGRAMS {
-        copy(&user.join(program), &esp.join("boot").join(program))?;
-    }
     let manifest = if cmdline.is_some() {
         SMOKE_MANIFEST
     } else {
         MANIFEST
     };
-    copy(
-        &root().join(manifest),
-        &esp.join("boot").join("services.conf"),
-    )?;
+    let mut files = Vec::new();
+    for program in USER_PROGRAMS {
+        let path = user.join(program);
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        files.push((program.to_string(), bytes));
+    }
+    let manifest_path = root().join(manifest);
+    let manifest_bytes = fs::read(&manifest_path)
+        .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
+    files.push(("services.conf".to_string(), manifest_bytes));
+    let entries: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let mut archive = vec![0u8; oceans_archive::archive_len(&entries)];
+    oceans_archive::write(&entries, &mut archive)
+        .map_err(|e| format!("cannot build the boot archive: {e:?}"))?;
+    let archive_path = esp.join("boot").join("initrd");
+    fs::write(&archive_path, &archive)
+        .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
 
     let mut conf = String::from("timeout: 0\n\n/Oceans\n    protocol: limine\n");
     conf.push_str(&format!("    path: boot():/boot/{KERNEL_PACKAGE}\n"));
     if let Some(cmdline) = cmdline {
         conf.push_str(&format!("    cmdline: {cmdline}\n"));
     }
-    for program in USER_PROGRAMS {
-        conf.push_str(&format!("    module_path: boot():/boot/{program}\n"));
-    }
-    conf.push_str("    module_path: boot():/boot/services.conf\n");
+    conf.push_str("    module_path: boot():/boot/initrd\n");
     let conf_path = limine_conf_dir.join("limine.conf");
     fs::write(&conf_path, conf)
         .map_err(|e| format!("cannot write {}: {e}", conf_path.display()))?;
 
-    println!("image ready in {}", esp.display());
+    println!(
+        "image ready in {} (boot archive: {} files, {} KiB)",
+        esp.display(),
+        entries.len(),
+        archive.len() / 1024
+    );
     Ok(esp)
 }
 

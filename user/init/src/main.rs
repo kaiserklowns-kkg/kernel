@@ -1,7 +1,9 @@
 //! init: the first user process and the Oceans service manager (ADR-0016).
 //!
-//! 1. Reads the boot module table the kernel passes (handle 1) to find the
-//!    manifest (`services.conf`) and the service images.
+//! 1. Maps the boot archive the kernel passes (handle 1, ADR-0025) and
+//!    checks it; the manifest (`services.conf`) and every program image
+//!    come from it. An image becomes a memory object only when a service
+//!    needs it, once.
 //! 2. Parses the manifest: services in start order, each with an image, a
 //!    restart policy and the capabilities it is granted.
 //! 3. Starts each service with exactly the declared capabilities, in the
@@ -21,12 +23,14 @@
 //! line of the manifest holds.
 //!
 //! No allocator: everything is fixed-size, and strings borrow the mapped,
-//! read-only manifest, which stays mapped for init's lifetime.
+//! read-only archive, which stays mapped for init's lifetime.
 
 #![no_std]
 #![no_main]
 
 use core::fmt::Write;
+
+use oceans_archive::Archive;
 
 use oceans_rt::{Buffer, Error, Handle, Start, prot, rights};
 
@@ -148,15 +152,20 @@ impl Registry {
     }
 }
 
+/// Programs unpacked from the archive at most.
+const MAX_IMAGES: usize = 64;
+
 struct Init {
     log: Handle,
     console: Handle,
     sysinfo: Handle,
     /// The PCI device bus.
     bus: Handle,
-    /// Lines `<module name> <handle index>`.
-    module_table: &'static str,
-    start: Start,
+    /// The boot archive, mapped for init's lifetime.
+    archive: Archive<'static>,
+    /// Archive files unpacked into memory objects so far.
+    images: [(&'static str, Handle); MAX_IMAGES],
+    image_count: usize,
     events: Handle,
     services: [Service; MAX_SERVICES],
     count: usize,
@@ -165,9 +174,9 @@ struct Init {
 
 fn main(start: Start) -> i64 {
     let test_mode = start.arg == 1;
-    // Boot contract (kernel process::init): log, module table, console,
+    // Boot contract (kernel process::init): log, boot archive, console,
     // system information, device bus.
-    let (Some(&log), Some(&table), Some(&console), Some(&sysinfo), Some(&bus)) = (
+    let (Some(&log), Some(&archive), Some(&console), Some(&sysinfo), Some(&bus)) = (
         start.handles.first(),
         start.handles.get(1),
         start.handles.get(2),
@@ -183,9 +192,12 @@ fn main(start: Start) -> i64 {
         let _ = oceans_rt::debug_write(log, line.as_str());
     };
 
-    let Some(module_table) = map_text(table) else {
-        say(format_args!("cannot read the boot module table"));
-        return EXIT_BAD_START;
+    let archive = match map_archive(archive) {
+        Ok(archive) => archive,
+        Err(problem) => {
+            say(format_args!("cannot read the boot archive: {problem}"));
+            return EXIT_BAD_START;
+        }
     };
     let Ok(events) = oceans_rt::notification_create() else {
         return EXIT_BAD_START;
@@ -195,8 +207,9 @@ fn main(start: Start) -> i64 {
         console,
         sysinfo,
         bus,
-        module_table,
-        start,
+        archive,
+        images: [("", Handle(0)); MAX_IMAGES],
+        image_count: 0,
         events,
         services: [NO_SERVICE; MAX_SERVICES],
         count: 0,
@@ -207,8 +220,11 @@ fn main(start: Start) -> i64 {
         },
     };
 
-    let Some(manifest) = init.module(MANIFEST).and_then(map_text) else {
-        say(format_args!("no {MANIFEST} boot module"));
+    let Some(manifest) = archive
+        .find(MANIFEST)
+        .and_then(|bytes| core::str::from_utf8(bytes).ok())
+    else {
+        say(format_args!("no valid {MANIFEST} in the boot archive"));
         return EXIT_BAD_MANIFEST;
     };
     match parse(manifest, &mut init.services) {
@@ -244,20 +260,17 @@ fn main(start: Start) -> i64 {
     }
 }
 
-/// Maps a read-only text module and returns its contents (up to the first
-/// NUL: objects are zero-padded to whole pages). Text modules must be
-/// smaller than one page.
-fn map_text(memory: Handle) -> Option<&'static str> {
-    let base = oceans_rt::memory_map(memory, 0, prot::READ).ok()?;
-    // Modules are small; read up to one page past the start, stopping at
-    // the zero padding.
-    // SAFETY: the object is mapped readable and is at least one page; it
-    // stays mapped for init's lifetime.
-    let page = unsafe { core::slice::from_raw_parts(base, 4096) };
-    // No terminating zero: the text fills the page and may continue; refuse
-    // rather than silently use a truncated manifest (limit: 4 KiB - 1).
-    let len = page.iter().position(|&b| b == 0)?;
-    core::str::from_utf8(&page[..len]).ok()
+/// Maps the boot archive read-only for init's lifetime and validates it
+/// (the kernel did too; init does not rely on that).
+fn map_archive(memory: Handle) -> Result<Archive<'static>, &'static str> {
+    let size = oceans_rt::memory_size(memory).map_err(|_| "cannot size it")? as usize;
+    let base = oceans_rt::memory_map(memory, 0, prot::READ).map_err(|_| "cannot map it")?;
+    // SAFETY: the whole object is mapped readable at `base` and stays
+    // mapped for init's lifetime; nothing writes it.
+    let bytes = unsafe { core::slice::from_raw_parts(base, size) };
+    // The object is zero-padded to whole pages; the archive's table says
+    // where its files are, so the padding is never read as data.
+    Archive::parse(bytes).map_err(|_| "it is damaged")
 }
 
 /// Parses the manifest into `services`; returns how many, or the 1-based
@@ -377,13 +390,38 @@ impl Init {
         let _ = oceans_rt::debug_write(self.log, line.as_str());
     }
 
-    /// The memory object holding boot module `name`.
-    fn module(&self, name: &str) -> Option<Handle> {
-        self.module_table.lines().find_map(|line| {
-            let (module, index) = line.split_once(' ')?;
-            let index: usize = index.trim().parse().ok()?;
-            (module == name).then(|| self.start.handles.get(index).copied())?
-        })
+    /// A read-only memory object holding archive file `name`, unpacked on
+    /// first use and kept.
+    fn module(&mut self, name: &str) -> Option<Handle> {
+        if let Some(&(_, handle)) = self.images[..self.image_count]
+            .iter()
+            .find(|&&(image, _)| image == name)
+        {
+            return Some(handle);
+        }
+        if self.image_count == MAX_IMAGES {
+            return None;
+        }
+        let file = self.archive.files().find(|f| f.name == name)?;
+        let memory = oceans_rt::memory_create(file.data.len().max(1) as u64).ok()?;
+        let copied = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
+            .map(|base| {
+                // SAFETY: just mapped writable, at least `data.len()` bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(file.data.as_ptr(), base, file.data.len())
+                };
+                let _ = oceans_rt::memory_unmap(base);
+            })
+            .is_ok();
+        // Read-only from here on: what services receive are narrower copies.
+        let image = copied
+            .then(|| oceans_rt::duplicate(memory, MODULE_RIGHTS).ok())
+            .flatten();
+        let _ = oceans_rt::close(memory);
+        let image = image?;
+        self.images[self.image_count] = (file.name, image);
+        self.image_count += 1;
+        Some(image)
     }
 
     /// Starts service `index` with its declared capabilities. A failure is

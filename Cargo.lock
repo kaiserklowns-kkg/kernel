@@ -38,6 +38,10 @@ name = "oceans-acpi"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-archive"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-capability"
 version = "0.1.0"
 
@@ -67,6 +71,7 @@ dependencies = [
  "limine",
  "oceans-abi",
  "oceans-acpi",
+ "oceans-archive",
  "oceans-capability",
  "oceans-elf",
  "oceans-frame-allocator",
@@ -102,6 +107,7 @@ version = "0.1.0"
 name = "oceans-xtask"
 version = "0.1.0"
 dependencies = [
+ "oceans-archive",
  "oceans-dns",
  "oceans-volume",
 ]

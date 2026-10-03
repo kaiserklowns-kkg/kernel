@@ -14,6 +14,7 @@ bench = false
 [dependencies]
 oceans-abi.workspace = true
 oceans-acpi.workspace = true
+oceans-archive.workspace = true
 oceans-capability.workspace = true
 oceans-elf.workspace = true
 oceans-frame-allocator.workspace = true

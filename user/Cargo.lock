@@ -37,6 +37,7 @@ dependencies = [
 name = "init"
 version = "0.1.0"
 dependencies = [
+ "oceans-archive",
  "oceans-rt",
 ]
 
@@ -66,6 +67,10 @@ dependencies = [
 
 [[package]]
 name = "oceans-abi"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-archive"
 version = "0.1.0"
 
 [[package]]

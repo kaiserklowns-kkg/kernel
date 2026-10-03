@@ -1,0 +1,9 @@
+[package]
+name = "oceans-archive"
+description = "The Oceans boot archive (initrd): a checksummed, validated file table, without allocation (ADR-0025)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

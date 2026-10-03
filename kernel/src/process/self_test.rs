@@ -1,6 +1,6 @@
 //! User-process self-test, for smoke-test boots (`oceans.test=smoke`).
 //!
-//! Runs the `ipc-test` boot module in four processes:
+//! Runs the `ipc-test` program of the boot archive in four processes:
 //! - **server** + **client** (ABI 1): the Phase 2 criterion, 1000 verified
 //!   IPC round trips between isolated processes;
 //! - **intruder**: reads kernel memory and must be killed;
@@ -14,7 +14,6 @@ use alloc::vec;
 use super::{Process, killed_by_exception, spawn};
 use crate::boot::BootInfo;
 use crate::ipc::endpoint::Endpoint;
-use crate::memory::phys_to_virt;
 use crate::object::{Capability, KernelObject, MemoryObject, ObjectKind, default_rights};
 use crate::{klog, sched, time};
 
@@ -25,17 +24,9 @@ const INTRUDER: u64 = 3;
 const PARENT: u64 = 4;
 
 pub fn self_test(boot: &BootInfo) {
-    let module = boot
-        .module("ipc-test")
-        .expect("smoke image ships the ipc-test module");
-    // SAFETY: boot modules stay mapped read-only in the direct map for the
-    // kernel's lifetime (ADR-0009) and are never written.
-    let image = unsafe {
-        core::slice::from_raw_parts(
-            phys_to_virt(module.physical_base).cast_const(),
-            module.size as usize,
-        )
-    };
+    let image = super::init::archive(boot)
+        .and_then(|archive| archive.find("ipc-test"))
+        .expect("the smoke image's boot archive has ipc-test");
     let log = || Capability::new(KernelObject::Log, default_rights(ObjectKind::Log));
 
     let (server_end, client_end) = Endpoint::create();
