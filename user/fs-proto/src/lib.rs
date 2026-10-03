@@ -20,6 +20,8 @@
 
 #![no_std]
 
+pub mod tree;
+
 use oceans_rt::{Error, Handle, prot, rights};
 
 /// Operations (request labels).
@@ -391,35 +393,58 @@ impl Node {
     /// Gives this handle a shared buffer of `size` bytes for bulk reads
     /// and writes (ADR-0030).
     pub fn attach(&self, size: usize) -> Result<Shared, FsError> {
+        let shared = Shared::new(size)?;
+        self.share(&shared)?;
+        Ok(shared)
+    }
+
+    /// Makes `shared` this handle's shared buffer too (ADR-0039). Data
+    /// read into it through one handle can then be written through
+    /// another without being copied here, even when the two are served by
+    /// different filesystems.
+    pub fn share(&self, shared: &Shared) -> Result<(), FsError> {
         let ipc = FsError::Ipc;
-        let memory = oceans_rt::memory_create(size as u64).map_err(ipc)?;
-        let base = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE);
-        let shared = oceans_rt::duplicate(
-            memory,
+        let memory = oceans_rt::duplicate(
+            shared.memory,
             rights::READ | rights::WRITE | rights::MAP | rights::TRANSFER,
-        );
-        let _ = oceans_rt::close(memory);
-        let base = base.map_err(ipc)?;
-        let result = shared.map_err(ipc).and_then(|shared| {
-            let got = oceans_rt::ipc_call_msg(self.0, op::ATTACH, &[], &[shared], &mut [], &mut [])
-                .map_err(ipc)?;
-            match Status::from_label(got.label) {
-                Status::Ok => Ok(()),
-                status => Err(FsError::Status(status)),
-            }
-        });
-        match result {
-            Ok(()) => Ok(Shared { base, size }),
-            Err(error) => {
-                let _ = oceans_rt::memory_unmap(base);
-                Err(error)
-            }
+        )
+        .map_err(ipc)?;
+        // The capability moves with the call (ADR-0013); it is not ours to
+        // close afterwards, whatever the outcome (its slot may be reused).
+        let got = oceans_rt::ipc_call_msg(self.0, op::ATTACH, &[], &[memory], &mut [], &mut [])
+            .map_err(ipc)?;
+        match Status::from_label(got.label) {
+            Status::Ok => Ok(()),
+            status => Err(FsError::Status(status)),
         }
     }
 
-    fn bulk(&self, op: u64, offset: u64, len: usize) -> Result<usize, FsError> {
+    /// Reads up to `len` bytes at `offset` into the start of the shared
+    /// buffer (which must be attached to this handle), leaving them there.
+    pub fn read_buffer(&self, shared: &Shared, offset: u64, len: usize) -> Result<usize, FsError> {
+        let len = self.bulk(op::READ_BUF, offset, 0, len.min(shared.size))?;
+        Ok(len.min(shared.size))
+    }
+
+    /// Writes the first `len` bytes of the shared buffer (attached to this
+    /// handle) at `offset`, all of them.
+    pub fn write_buffer(&self, shared: &Shared, offset: u64, len: usize) -> Result<(), FsError> {
+        let len = len.min(shared.size);
+        let mut done = 0;
+        while done < len {
+            let written = self.bulk(op::WRITE_BUF, offset + done as u64, done, len - done)?;
+            if written == 0 {
+                return Err(FsError::Status(Status::NoSpace));
+            }
+            done += written.min(len - done);
+        }
+        Ok(())
+    }
+
+    fn bulk(&self, op: u64, offset: u64, at: usize, len: usize) -> Result<usize, FsError> {
         let mut data = [0u8; 16];
         data[..8].copy_from_slice(&offset.to_le_bytes());
+        data[8..12].copy_from_slice(&(at as u32).to_le_bytes());
         data[12..].copy_from_slice(&(len as u32).to_le_bytes());
         let mut reply = [0u8; 4];
         self.request(op, &data, &mut reply, &mut [])?;
@@ -439,7 +464,7 @@ impl Node {
             // SAFETY: `base` maps `size` bytes read-write while `shared`
             // lives; the service reads them only during the call.
             unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), shared.base, take) };
-            let written = self.bulk(op::WRITE_BUF, offset, take)?;
+            let written = self.bulk(op::WRITE_BUF, offset, 0, take)?;
             if written == 0 {
                 return Err(FsError::Status(Status::NoSpace));
             }
@@ -456,7 +481,7 @@ impl Node {
         offset: u64,
         out: &mut [u8],
     ) -> Result<usize, FsError> {
-        let len = self.bulk(op::READ_BUF, offset, out.len().min(shared.size))?;
+        let len = self.bulk(op::READ_BUF, offset, 0, out.len().min(shared.size))?;
         let len = len.min(out.len());
         // SAFETY: the service wrote `len` bytes at the start of the buffer.
         unsafe { core::ptr::copy_nonoverlapping(shared.base, out.as_mut_ptr(), len) };
@@ -474,14 +499,36 @@ impl Node {
     }
 }
 
-/// A node handle's shared buffer (ADR-0030), mapped here.
+/// A shared buffer (ADR-0030), mapped here; attached to one handle or
+/// more ([`Node::attach`], [`Node::share`]).
 pub struct Shared {
+    memory: Handle,
     base: *mut u8,
     size: usize,
+}
+
+impl Shared {
+    /// A new buffer of `size` bytes ([`MIN_SHARED`] to [`MAX_SHARED`]),
+    /// not yet attached to any handle.
+    pub fn new(size: usize) -> Result<Self, FsError> {
+        let memory = oceans_rt::memory_create(size as u64).map_err(FsError::Ipc)?;
+        match oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE) {
+            Ok(base) => Ok(Self { memory, base, size }),
+            Err(error) => {
+                let _ = oceans_rt::close(memory);
+                Err(FsError::Ipc(error))
+            }
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
         let _ = oceans_rt::memory_unmap(self.base);
+        let _ = oceans_rt::close(self.memory);
     }
 }

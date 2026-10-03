@@ -86,6 +86,7 @@ It has to work on every filesystem the system serves:
   updates are crash-safe there.
 - **Moving across filesystems** is not done by `mv`: it reports
   `CrossDevice`, and copying is up to the caller (a later `cp` utility).
+  ADR-0039 adds that copy: `mv` now falls back to copy, sync and remove.
 - **Size limit:** paths are limited by the request size (248 bytes for
   both together).
 

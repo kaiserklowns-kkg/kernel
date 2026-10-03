@@ -17,7 +17,8 @@
 use core::fmt::{self, Write};
 
 use oceans_elf::{Executable, Limits};
-use oceans_fs_proto::{FsError, Kind, MAX_NAME, Node, Shared, flags};
+use oceans_fs_proto::tree::{self, Copier, CopyError, Side, Totals};
+use oceans_fs_proto::{FsError, Kind, MAX_NAME, Node, Shared, Status, flags};
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 
 oceans_rt::entry!(main);
@@ -209,7 +210,10 @@ impl Shell {
             ["write", path, words @ ..] => self.write_file(path, words),
             ["mkdir", path] => self.make_directory(path),
             ["rm", path] => self.remove(path),
+            ["rm", "-r", path] => self.remove_all(path),
             ["mv", old, new] => self.rename(old, new),
+            ["cp", source, destination] => self.copy(source, destination, false),
+            ["cp", "-r", source, destination] => self.copy(source, destination, true),
             ["sync"] => self.sync(),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
             ["exit"] => return Some(0),
@@ -239,8 +243,12 @@ impl Shell {
              \x20 cat PATH                   print a file\r\n\
              \x20 write PATH TEXT            replace a file's contents with TEXT\r\n\
              \x20 mkdir PATH                 create a directory\r\n\
-             \x20 rm PATH                    remove a file or empty directory\r\n\
+             \x20 rm [-r] PATH               remove a file or empty directory\r\n\
+             \x20                              (-r: a directory and everything in it)\r\n\
              \x20 mv OLD NEW                 rename or move a file or directory\r\n\
+             \x20                              (between filesystems: copy, sync, remove)\r\n\
+             \x20 cp [-r] FROM TO            copy a file (-r: a directory), also between\r\n\
+             \x20                              filesystems; into TO if it is a directory\r\n\
              \x20 sync                       make every file change durable on disk now\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
@@ -429,13 +437,143 @@ impl Shell {
         }
     }
 
-    /// `mv OLD NEW` (ADR-0038): paths from the root.
+    /// `mv OLD NEW` (ADR-0038): paths from the root. Between filesystems
+    /// (ADR-0039) the source is copied, the copy made durable, and only
+    /// then is the source removed: a failure on the way leaves the source
+    /// as it was.
     fn rename(&self, old: &str, new: &str) {
         let Some(root) = self.fs_root() else {
             return self.print(format_args!("mv: this shell has no filesystem\r\n"));
         };
-        if let Err(error) = root.rename(old, new) {
-            self.print(format_args!("mv: {old}: {}\r\n", error.message()));
+        match root.rename(old, new) {
+            Ok(()) => {}
+            Err(FsError::Status(Status::CrossDevice)) => {
+                if let Err(failed) = self.copy_tree(old, new, true, true) {
+                    return self.report("mv", old, new, failed);
+                }
+                let removed = self.in_parent(old, |directory, name| {
+                    tree::remove_tree(directory, name)
+                        .and_then(|()| directory.sync())
+                        .map_err(FsError::message)
+                });
+                if let Err(problem) = removed {
+                    self.print(format_args!(
+                        "mv: {old}: copied, but not removed: {problem}\r\n"
+                    ));
+                }
+            }
+            Err(error) => self.print(format_args!("mv: {old}: {}\r\n", error.message())),
+        }
+    }
+
+    /// `cp [-r] FROM TO` (ADR-0039): copies a file, or with `-r` a
+    /// directory and everything in it, anywhere (across filesystems too).
+    /// When `TO` is a directory the copy goes into it under its own name.
+    /// The data moves through one buffer shared by both filesystems, and
+    /// the copy is durable when the summary is printed.
+    fn copy(&self, source: &str, destination: &str, recursive: bool) {
+        let started = oceans_rt::clock_ms();
+        match self.copy_tree(source, destination, recursive, false) {
+            Ok(totals) => self.print(format_args!(
+                "cp: {} bytes in {} file{}, {} ms\r\n",
+                totals.bytes,
+                totals.files,
+                if totals.files == 1 { "" } else { "s" },
+                oceans_rt::clock_ms().saturating_sub(started)
+            )),
+            Err(failed) => self.report("cp", source, destination, failed),
+        }
+    }
+
+    fn report(&self, command: &str, source: &str, destination: &str, failed: Failed) {
+        let (path, problem) = match failed {
+            Failed::Source(problem) => (source, problem),
+            Failed::Destination(problem) => (destination, problem),
+        };
+        self.print(format_args!("{command}: {path}: {problem}\r\n"));
+    }
+
+    /// Copies `source` to `destination`; `exact` (a move) takes the
+    /// destination as the new path even if it is a directory, which then
+    /// must be empty, as for a rename.
+    fn copy_tree(
+        &self,
+        source: &str,
+        destination: &str,
+        recursive: bool,
+        exact: bool,
+    ) -> Result<Totals, Failed> {
+        let root = self
+            .fs_root()
+            .ok_or(Failed::Source("this shell has no filesystem"))?;
+        let from_path = normal(source).ok_or(Failed::Source("path too long"))?;
+        if from_path.as_str().is_empty() {
+            return Err(Failed::Source("cannot copy the root"));
+        }
+        let (from, kind) = root
+            .walk(source, 0)
+            .map_err(|e| Failed::Source(e.message()))?;
+        let copied = if kind == Kind::Directory && !recursive {
+            Err(Failed::Source("is a directory (cp -r copies directories)"))
+        } else {
+            self.copy_to(&from, kind, from_path.as_str(), destination, exact)
+        };
+        from.close();
+        copied
+    }
+
+    fn copy_to(
+        &self,
+        from: &Node,
+        kind: Kind,
+        from_path: &str,
+        destination: &str,
+        exact: bool,
+    ) -> Result<Totals, Failed> {
+        let too_long = Failed::Destination("path too long");
+        let mut target = normal(destination).ok_or(too_long)?;
+        if !exact && let Ok((directory, owned)) = self.open_directory(destination, 0) {
+            if owned {
+                directory.close();
+            }
+            let name = from_path.rsplit('/').next().unwrap_or(from_path);
+            write!(target, "/{name}").map_err(|_| Failed::Destination("path too long"))?;
+        }
+        let target = target.as_str();
+        if target == from_path {
+            return Err(Failed::Destination("is the same file"));
+        }
+        // A directory copied below itself would never end.
+        if kind == Kind::Directory
+            && target.starts_with(from_path)
+            && target.as_bytes().get(from_path.len()) == Some(&b'/')
+        {
+            return Err(Failed::Destination("is inside the source"));
+        }
+        let Some((parent, name)) = target.rsplit_once('/').filter(|(_, name)| !name.is_empty())
+        else {
+            return Err(Failed::Destination("is the root"));
+        };
+        let (directory, owned) = self
+            .open_directory(parent, flags::WRITE)
+            .map_err(Failed::Destination)?;
+        let copied = copy_into(from, kind, &directory, name, exact);
+        if owned {
+            directory.close();
+        }
+        copied
+    }
+
+    /// `rm -r PATH`: removes a directory and everything in it (or a file).
+    fn remove_all(&self, path: &str) {
+        if path.trim_matches('/').is_empty() {
+            return self.print(format_args!("rm: {path}: cannot remove the root\r\n"));
+        }
+        let result = self.in_parent(path, |directory, name| {
+            tree::remove_tree(directory, name).map_err(FsError::message)
+        });
+        if let Err(problem) = result {
+            self.print(format_args!("rm: {path}: {problem}\r\n"));
         }
     }
 
@@ -756,6 +894,70 @@ impl Input {
 
 /// Shared buffers (ADR-0030) for `cat` and for loading programs.
 const CAT_BUFFER: usize = 4096;
+/// Bytes a copy moves per request (ADR-0039).
+const COPY_BUFFER: usize = 128 * 1024;
+
+/// Which side of a copy or move failed, and why.
+enum Failed {
+    Source(&'static str),
+    Destination(&'static str),
+}
+
+impl From<CopyError> for Failed {
+    fn from(failed: CopyError) -> Self {
+        match failed.side {
+            Side::Source => Self::Source(failed.error.message()),
+            Side::Destination => Self::Destination(failed.error.message()),
+        }
+    }
+}
+
+/// `path` as `/a/b` (no empty components, no trailing `/`; the root is
+/// empty), with room to append a name; `None` if it does not fit.
+fn normal(path: &str) -> Option<Buffer<{ LINE_MAX + 2 + MAX_NAME }>> {
+    let mut normal = Buffer::new();
+    for part in path.split('/').filter(|part| !part.is_empty()) {
+        write!(normal, "/{part}").ok()?;
+    }
+    Some(normal)
+}
+
+/// Copies `from` to entry `name` of `directory` (opened for writing) and
+/// makes the copy durable.
+fn copy_into(
+    from: &Node,
+    kind: Kind,
+    directory: &Node,
+    name: &str,
+    exact: bool,
+) -> Result<Totals, Failed> {
+    let fs = |error: FsError| Failed::Destination(error.message());
+    let mut copier = Copier::new(COPY_BUFFER).map_err(fs)?;
+    let create = match kind {
+        Kind::File => flags::CREATE_FILE,
+        Kind::Directory => flags::CREATE_DIRECTORY,
+    };
+    let (to, found) = directory.open(name, create | flags::WRITE).map_err(fs)?;
+    let copied = match (kind, found) {
+        (Kind::File, Kind::File) => copier.file(from, &to).map(drop).map_err(Failed::from),
+        (Kind::Directory, Kind::Directory) => {
+            let mut probe = [0u8; MAX_NAME];
+            if exact && !matches!(to.entry(0, &mut probe), Ok(None)) {
+                Err(Failed::Destination("directory not empty"))
+            } else {
+                copier.totals.directories += 1;
+                copier.directory(from, &to).map_err(Failed::from)
+            }
+        }
+        (Kind::File, Kind::Directory) => Err(Failed::Destination("is a directory")),
+        (Kind::Directory, Kind::File) => Err(Failed::Destination("not a directory")),
+    };
+    // Durable before success is reported, and before a move removes the
+    // source.
+    let copied = copied.and_then(|()| to.sync().map_err(fs));
+    to.close();
+    copied.map(|()| copier.totals)
+}
 const LOAD_BUFFER: usize = 64 * 1024;
 
 /// Reads at `offset`: in bulk through `shared` if the file has one,

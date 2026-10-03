@@ -166,8 +166,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run disk out use:usbdisk -- info\r\n",
     b"ls /usb\r\n",
     b"write /usb/note.txt kept on a usb stick\r\n",
-    // Renames (ADR-0038): on the system disk, inside the stick (through
-    // the mount), and refused between the two.
+    // Renames (ADR-0038): on the system disk and inside the stick (through
+    // the mount); between the two, mv copies and removes (ADR-0039).
     b"write /keep/move-me.txt moved\r\n",
     b"mkdir /keep/sub\r\n",
     b"mv /keep/move-me.txt /keep/sub/moved.txt\r\n",
@@ -177,6 +177,25 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"mv /usb/tmp.txt /usb/renamed.txt\r\n",
     b"cat /usb/renamed.txt\r\n",
     b"mv /keep/sub/moved.txt /usb/moved.txt\r\n",
+    b"cat /keep/sub/moved.txt\r\n",
+    // Copies (ADR-0039) through a buffer both filesystems share: a big
+    // file and a tree onto the stick, refusals, `rm -r`, and a directory
+    // moved back to the system disk.
+    b"cp /keep/big.bin /usb/copy.bin\r\n",
+    b"mkdir /keep/tree\r\n",
+    b"write /keep/tree/a.txt copied tree\r\n",
+    b"mkdir /keep/tree/inner\r\n",
+    b"cp /keep/tree/a.txt /keep/tree/inner\r\n",
+    b"cp /keep/tree /usb/nothing\r\n",
+    b"cp -r /keep/tree /keep/tree/inner\r\n",
+    b"cp /usb/note.txt /usb\r\n",
+    b"cp -r /keep/tree /usb\r\n",
+    b"cat /usb/tree/inner/a.txt\r\n",
+    b"rm -r /keep/tree\r\n",
+    b"ls /keep/tree\r\n",
+    b"rm -r /usb\r\n",
+    b"mv /usb/tree /keep/tree-back\r\n",
+    b"ls /usb/tree\r\n",
     b"cat /usb/note.txt\r\n",
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /usb/big.bin\r\n",
     b"sync\r\n",
@@ -202,6 +221,12 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"mv /usb/oceans-dir /usb/outer/moved-dir\r\n",
     b"mv /usb/new.txt /usb/outer/moved-dir/renamed-on-fat.txt\r\n",
     b"cat /usb/outer/moved-dir/renamed-on-fat.txt\r\n",
+    // Copies and a move between FAT and the system disk (ADR-0039).
+    b"cp -r /usb/Docs /keep/docs-copy\r\n",
+    b"cat /keep/docs-copy/notes/deep.txt\r\n",
+    b"mv /keep/tree-back /usb/tree-moved\r\n",
+    b"cp /keep/big.bin /usb/outer\r\n",
+    b"cat /usb/tree-moved/inner/a.txt\r\n",
     b"sync\r\n",
     // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
     // and is removed again; then the hub goes, taking its tablet along.
@@ -326,7 +351,17 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("moved"),
     Expect::Contains("cat: /keep/move-me.txt: not found"),
     Expect::Line("temporary"),
-    Expect::Contains("mv: /keep/sub/moved.txt: not on the same filesystem"),
+    Expect::Contains("cat: /keep/sub/moved.txt: not found"),
+    Expect::Contains("cp: 1048576 bytes in 1 file, "),
+    Expect::Contains("cp: /keep/tree: is a directory (cp -r copies directories)"),
+    Expect::Contains("cp: /keep/tree/inner: is inside the source"),
+    Expect::Contains("cp: /usb: is the same file"),
+    Expect::Contains("cp: 24 bytes in 2 files, "),
+    Expect::Line("copied tree"),
+    Expect::Contains("ls: /keep/tree: not found"),
+    Expect::Contains("rm: /usb: permission denied"),
+    Expect::Contains("ls: /usb/tree: not found"),
+    Expect::Contains("cp: 5 bytes in 1 file, "),
     Expect::Contains("usb-storage: port 3: disk removed"),
     Expect::Contains("xhci: port 3: device removed"),
     Expect::Contains("disk: I/O error"),
@@ -870,6 +905,12 @@ fn check_smoke_fat() -> Result {
     if read("big.bin")? != big_body() {
         return Err("the FAT stick's big.bin does not match what the host served".into());
     }
+    if read("outer/big.bin")? != big_body()
+        || read("tree-moved/a.txt")? != b"copied tree\n"
+        || read("tree-moved/inner/a.txt")? != b"copied tree\n"
+    {
+        return Err("the FAT stick does not hold what was copied and moved to it".into());
+    }
     if read("HELLO.TXT").is_ok() {
         return Err("HELLO.TXT is still on the FAT stick".into());
     }
@@ -959,6 +1000,12 @@ fn check_smoke_stick() -> Result {
     }
     if read("big.bin")? != big_body() {
         return Err("/usb/big.bin does not match what the host served".into());
+    }
+    if read("moved.txt")? != b"moved\n" || read("copy.bin")? != big_body() {
+        return Err("the file moved and the file copied to /usb are not on the stick".into());
+    }
+    if read("tree").is_ok() {
+        return Err("/usb/tree is still on the stick after it was moved away".into());
     }
     println!("the files written to /usb are on the stick image");
     Ok(())
@@ -1235,6 +1282,26 @@ fn check_smoke_disk() -> Result {
     }
     if volume.lookup(keep, "gone.txt").is_ok() {
         return Err("a removed file is still on the disk".into());
+    }
+    // Copied from FAT (ADR-0039); moved away, or removed with `rm -r`.
+    let mut node = keep;
+    for name in ["docs-copy", "notes", "deep.txt"] {
+        node = volume
+            .lookup(node, name)
+            .map_err(|e| format!("/keep/docs-copy/notes/deep.txt: {e:?}"))?;
+    }
+    let mut copied = vec![0u8; volume.size(node).map_err(|e| format!("{e:?}"))? as usize];
+    volume
+        .read(node, 0, &mut copied)
+        .map_err(|e| format!("reading the file copied from FAT: {e:?}"))?;
+    if copied != b"deep\n" {
+        return Err("the file copied from the FAT stick does not match".into());
+    }
+    if ["tree", "tree-back"]
+        .iter()
+        .any(|name| volume.lookup(keep, name).is_ok())
+    {
+        return Err("a tree removed or moved away is still on the disk".into());
     }
     println!(
         "disk verified on the host: generation {}, /{} intact",
