@@ -1,0 +1,31 @@
+[package]
+name = "utils"
+description = "Basic Oceans utilities: ps, mem, uptime, uname (ADR-0020)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ps"
+test = false
+bench = false
+
+[[bin]]
+name = "mem"
+test = false
+bench = false
+
+[[bin]]
+name = "uptime"
+test = false
+bench = false
+
+[[bin]]
+name = "uname"
+test = false
+bench = false
+
+[dependencies]
+oceans-abi.workspace = true
+oceans-rt.workspace = true

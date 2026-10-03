@@ -31,7 +31,7 @@ oceans_rt::entry!(main);
 
 const MANIFEST: &str = "services.conf";
 const MAX_SERVICES: usize = 32;
-const MAX_GRANTS: usize = 8;
+const MAX_GRANTS: usize = 12;
 const MAX_ENDPOINTS: usize = 16;
 const DEFAULT_MAX_RESTARTS: u32 = 5;
 const BACKOFF_BASE_MS: u64 = 100;
@@ -41,6 +41,7 @@ const BACKOFF_MAX_MS: u64 = 2000;
 /// pass narrower copies on to programs it starts; it never widens rights.
 const LOG_RIGHTS: u32 = rights::WRITE | rights::DUPLICATE | rights::TRANSFER;
 const CONSOLE_RIGHTS: u32 = rights::READ | rights::WRITE | rights::DUPLICATE | rights::TRANSFER;
+const SYSINFO_RIGHTS: u32 = rights::READ | rights::DUPLICATE | rights::TRANSFER;
 const USE_RIGHTS: u32 = rights::SEND | rights::DUPLICATE | rights::TRANSFER;
 const MODULE_RIGHTS: u32 = rights::READ | rights::MAP | rights::DUPLICATE | rights::TRANSFER;
 
@@ -62,6 +63,7 @@ enum Restart {
 enum Grant {
     Log,
     Console,
+    SystemInfo,
     Provide(&'static str),
     Use(&'static str),
     Module(&'static str),
@@ -140,6 +142,7 @@ impl Registry {
 struct Init {
     log: Handle,
     console: Handle,
+    sysinfo: Handle,
     /// Lines `<module name> <handle index>`.
     module_table: &'static str,
     start: Start,
@@ -151,11 +154,13 @@ struct Init {
 
 fn main(start: Start) -> i64 {
     let test_mode = start.arg == 1;
-    // Boot contract (kernel process::init): log, module table, console.
-    let (Some(&log), Some(&table), Some(&console)) = (
+    // Boot contract (kernel process::init): log, module table, console,
+    // system information.
+    let (Some(&log), Some(&table), Some(&console), Some(&sysinfo)) = (
         start.handles.first(),
         start.handles.get(1),
         start.handles.get(2),
+        start.handles.get(3),
     ) else {
         return EXIT_BAD_START;
     };
@@ -176,6 +181,7 @@ fn main(start: Start) -> i64 {
     let mut init = Init {
         log,
         console,
+        sysinfo,
         module_table,
         start,
         events,
@@ -292,9 +298,14 @@ fn parse(
                 let grant = match (key, value) {
                     ("grant", "log") => Grant::Log,
                     ("grant", "console") => Grant::Console,
+                    ("grant", "sysinfo") => Grant::SystemInfo,
                     ("grant", other) => match other.strip_prefix("module:") {
                         Some(module) if !module.is_empty() => Grant::Module(module),
-                        _ => return error("unknown grant (known: log, console, module:NAME)"),
+                        _ => {
+                            return error(
+                                "unknown grant (known: log, console, sysinfo, module:NAME)",
+                            );
+                        }
                     },
                     ("provide", name) => Grant::Provide(name),
                     (_, name) => Grant::Use(name),
@@ -387,6 +398,11 @@ impl Init {
                         oceans_rt::duplicate(self.console, CONSOLE_RIGHTS)?,
                         "console",
                         "console",
+                    ),
+                    Grant::SystemInfo => (
+                        oceans_rt::duplicate(self.sysinfo, SYSINFO_RIGHTS)?,
+                        "sysinfo",
+                        "sysinfo",
                     ),
                     Grant::Provide(name) => {
                         let (server, client) = oceans_rt::endpoint_create()?;

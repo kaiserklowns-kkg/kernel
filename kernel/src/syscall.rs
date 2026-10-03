@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 5 (`oceans-abi`, ADR-0014 to ADR-0019).
+//! System call dispatch, ABI version 6 (`oceans-abi`, ADR-0014 to ADR-0020).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -75,6 +75,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::CONSOLE_WRITE => console_write(&process, a0, a1, a2),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
+        nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
         _ => Err(Error::UnknownSyscall),
     };
     match result {
@@ -565,7 +566,7 @@ fn process_spawn(
     let handles = read_handles(process, handles_ptr, count, MAX_INITIAL_HANDLES)?;
     let initial = take_for_transfer(process, &handles)?;
     let name = alloc::format!("{}/{child_name}", process.name());
-    let child = process::spawn(&name, &bytes, initial, arg)?;
+    let child = process::spawn_child(process, &name, &bytes, initial, arg)?;
     let raw = insert(
         process,
         Capability::new(
@@ -726,4 +727,76 @@ fn memory_size(process: &Process, raw: u64) -> SyscallResult {
     })
     .map_err(object_error)?;
     Ok((memory.size(), 0))
+}
+
+// ---- ABI 6 -----------------------------------------------------------------
+
+fn system_info(process: &Process, raw: u64, kind: u64, ptr: u64, capacity: u64) -> SyscallResult {
+    use oceans_abi::sysinfo::{self, KernelInfo, MemoryInfo, ProcessRecord, UptimeInfo};
+
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let capability = table.get(handle(raw), Rights::NONE).map_err(cap_error)?;
+        match capability.object() {
+            KernelObject::SystemInfo => capability.check(Rights::READ).map_err(cap_error),
+            _ => Err(Error::WrongType),
+        }
+    })?;
+
+    let mut bytes = Vec::new();
+    match kind {
+        sysinfo::KERNEL => {
+            let mut record = [0u8; KernelInfo::SIZE];
+            KernelInfo::new(
+                oceans_abi::ABI_VERSION,
+                env!("CARGO_PKG_VERSION"),
+                arch::NAME,
+            )
+            .encode(&mut record);
+            bytes.extend_from_slice(&record);
+        }
+        sysinfo::MEMORY => {
+            let frames = crate::memory::frames::stats();
+            let heap = crate::memory::heap::stats();
+            let mut record = [0u8; MemoryInfo::SIZE];
+            MemoryInfo {
+                page_size: 4096,
+                total_frames: frames.managed_frames,
+                free_frames: frames.free_frames,
+                kernel_heap: (heap.small_in_use + heap.large_in_use) as u64,
+            }
+            .encode(&mut record);
+            bytes.extend_from_slice(&record);
+        }
+        sysinfo::UPTIME => {
+            let mut record = [0u8; UptimeInfo::SIZE];
+            UptimeInfo {
+                ticks: crate::time::ticks(),
+                hz: u64::from(crate::time::HZ),
+            }
+            .encode(&mut record);
+            bytes.extend_from_slice(&record);
+        }
+        sysinfo::PROCESSES => {
+            for summary in process::snapshot() {
+                let mut record = ProcessRecord {
+                    id: summary.id,
+                    parent: summary.parent,
+                    exit_code: summary.exit_code.unwrap_or(ProcessRecord::RUNNING),
+                    memory: summary.memory,
+                    name: [0; 32],
+                };
+                record.set_name(&summary.name);
+                let mut encoded = [0u8; ProcessRecord::SIZE];
+                record.encode(&mut encoded);
+                bytes.extend_from_slice(&encoded);
+            }
+        }
+        _ => return Err(Error::InvalidArgument),
+    }
+    if bytes.len() as u64 > capacity {
+        return Err(Error::TooLarge);
+    }
+    process.copy_to_user(ptr, &bytes)?;
+    Ok((bytes.len() as u64, 0))
 }

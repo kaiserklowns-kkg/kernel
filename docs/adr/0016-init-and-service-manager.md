@@ -108,6 +108,10 @@ as `boot/services.conf`.
 > **Extended by [ADR-0018](0018-shell.md):** every service also receives a
 > handle directory as its last handle; `grant = module:NAME` grants a
 > program image; granted capabilities include `DUPLICATE`.
+> **Extended by [ADR-0017](0017-console-input.md) and
+> [ADR-0020](0020-system-information-and-utilities.md):** init also receives
+> the console (handle 2) and system information (handle 3); boot modules
+> start at handle 4; `grant = console`, `grant = sysinfo`.
 
 ## Consequences
 

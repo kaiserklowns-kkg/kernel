@@ -12,5 +12,6 @@ test = false
 bench = false
 
 [dependencies]
+oceans-elf.workspace = true
 oceans-fs-proto.workspace = true
 oceans-rt.workspace = true

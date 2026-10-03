@@ -1,4 +1,4 @@
-//! The Oceans system call ABI, version 5 (ADR-0014 to ADR-0019).
+//! The Oceans system call ABI, version 6 (ADR-0014 to ADR-0020).
 //!
 //! Shared by the kernel and userspace so both sides agree by construction.
 //! The ABI is versioned: numbers and meanings below never change within a
@@ -16,9 +16,10 @@
 #![no_std]
 
 /// Version history: 1 = ADR-0014 (syscalls 0–7); 2 = ADR-0015 (8–17);
-/// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24); 5 = ADR-0019 (25–26: badges, memory size).
-/// Versions only add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 5;
+/// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24); 5 = ADR-0019 (25–26: badges,
+/// memory size); 6 = ADR-0020 (27: system information). Versions only add;
+/// existing numbers keep their meaning.
+pub const ABI_VERSION: u64 = 6;
 
 /// System call numbers.
 pub mod nr {
@@ -115,6 +116,13 @@ pub mod nr {
     /// `(memory) -> size` — the size in bytes of a memory object (a whole
     /// number of pages). Needs any right on it.
     pub const MEMORY_SIZE: u64 = 26;
+
+    // ABI 6
+
+    /// `(sysinfo, kind, ptr, capacity) -> len` — writes the [`sysinfo`](super::sysinfo)
+    /// record(s) of `kind` to `ptr`. Needs `READ` on a system-information
+    /// capability. `TooLarge` if `capacity` is too small.
+    pub const SYSTEM_INFO: u64 = 27;
 }
 
 /// `IPC_RECEIVE_MSG` result kinds.
@@ -245,12 +253,234 @@ pub const CONSOLE_IO_MAX: usize = 4096;
 /// number of initial capabilities, `rsi` a pointer to that many `u64`
 /// handles (on its stack), `rdx` the process's argument word.
 pub mod start {
-    pub const MAX_INITIAL_HANDLES: usize = 16;
+    /// Raised from 16 in ABI 6 (receivers use the count they are given).
+    pub const MAX_INITIAL_HANDLES: usize = 32;
+}
+
+/// `SYSTEM_INFO` kinds and their records (ADR-0020): fixed-size,
+/// little-endian, encoded explicitly so both sides agree byte for byte.
+pub mod sysinfo {
+    pub const KERNEL: u64 = 0;
+    pub const MEMORY: u64 = 1;
+    pub const UPTIME: u64 = 2;
+    /// A sequence of [`ProcessRecord`]s.
+    pub const PROCESSES: u64 = 3;
+
+    fn put(out: &mut [u8], at: usize, value: u64) {
+        out[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn get(bytes: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"))
+    }
+
+    fn put_text(out: &mut [u8], text: &str) {
+        let len = text.len().min(out.len());
+        out[..len].copy_from_slice(&text.as_bytes()[..len]);
+        out[len..].fill(0);
+    }
+
+    /// Text up to the first NUL (lossy: invalid UTF-8 yields "?").
+    pub fn text(bytes: &[u8]) -> &str {
+        let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        core::str::from_utf8(&bytes[..len]).unwrap_or("?")
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct KernelInfo {
+        pub abi_version: u64,
+        pub version: [u8; 16],
+        pub arch: [u8; 16],
+    }
+
+    impl KernelInfo {
+        pub const SIZE: usize = 40;
+
+        pub fn new(abi_version: u64, version: &str, arch: &str) -> Self {
+            let mut info = Self {
+                abi_version,
+                version: [0; 16],
+                arch: [0; 16],
+            };
+            put_text(&mut info.version, version);
+            put_text(&mut info.arch, arch);
+            info
+        }
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            put(out, 0, self.abi_version);
+            out[8..24].copy_from_slice(&self.version);
+            out[24..40].copy_from_slice(&self.arch);
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            Some(Self {
+                abi_version: get(bytes, 0),
+                version: bytes[8..24].try_into().ok()?,
+                arch: bytes[24..40].try_into().ok()?,
+            })
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct MemoryInfo {
+        pub page_size: u64,
+        /// Frames the kernel manages (usable RAM).
+        pub total_frames: u64,
+        pub free_frames: u64,
+        /// Kernel heap bytes in use (slab objects + page blocks).
+        pub kernel_heap: u64,
+    }
+
+    impl MemoryInfo {
+        pub const SIZE: usize = 32;
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            for (i, value) in [
+                self.page_size,
+                self.total_frames,
+                self.free_frames,
+                self.kernel_heap,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                put(out, i * 8, value);
+            }
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            Some(Self {
+                page_size: get(bytes, 0),
+                total_frames: get(bytes, 8),
+                free_frames: get(bytes, 16),
+                kernel_heap: get(bytes, 24),
+            })
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct UptimeInfo {
+        pub ticks: u64,
+        pub hz: u64,
+    }
+
+    impl UptimeInfo {
+        pub const SIZE: usize = 16;
+
+        pub fn milliseconds(&self) -> u64 {
+            (self.ticks * 1000).checked_div(self.hz).unwrap_or(0)
+        }
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            put(out, 0, self.ticks);
+            put(out, 8, self.hz);
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            Some(Self {
+                ticks: get(bytes, 0),
+                hz: get(bytes, 8),
+            })
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ProcessRecord {
+        pub id: u64,
+        /// 0 for processes the kernel started.
+        pub parent: u64,
+        /// `i64::MIN` while running.
+        pub exit_code: i64,
+        /// Bytes of user memory mapped.
+        pub memory: u64,
+        pub name: [u8; 32],
+    }
+
+    impl ProcessRecord {
+        pub const SIZE: usize = 64;
+        pub const RUNNING: i64 = i64::MIN;
+
+        pub fn exit(&self) -> Option<i64> {
+            (self.exit_code != Self::RUNNING).then_some(self.exit_code)
+        }
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            put(out, 0, self.id);
+            put(out, 8, self.parent);
+            put(out, 16, self.exit_code as u64);
+            put(out, 24, self.memory);
+            out[32..64].copy_from_slice(&self.name);
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            Some(Self {
+                id: get(bytes, 0),
+                parent: get(bytes, 8),
+                exit_code: get(bytes, 16) as i64,
+                memory: get(bytes, 24),
+                name: bytes[32..64].try_into().ok()?,
+            })
+        }
+
+        pub fn set_name(&mut self, name: &str) {
+            put_text(&mut self.name, name);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sysinfo_records_round_trip() {
+        use sysinfo::*;
+        let kernel = KernelInfo::new(6, "0.1.0", "x86_64");
+        let mut bytes = [0u8; KernelInfo::SIZE];
+        kernel.encode(&mut bytes);
+        let back = KernelInfo::decode(&bytes).unwrap();
+        assert_eq!(back, kernel);
+        assert_eq!((text(&back.version), text(&back.arch)), ("0.1.0", "x86_64"));
+
+        let memory = MemoryInfo {
+            page_size: 4096,
+            total_frames: 9,
+            free_frames: 4,
+            kernel_heap: 77,
+        };
+        let mut bytes = [0u8; MemoryInfo::SIZE];
+        memory.encode(&mut bytes);
+        assert_eq!(MemoryInfo::decode(&bytes), Some(memory));
+
+        let uptime = UptimeInfo {
+            ticks: 250,
+            hz: 100,
+        };
+        let mut bytes = [0u8; UptimeInfo::SIZE];
+        uptime.encode(&mut bytes);
+        assert_eq!(UptimeInfo::decode(&bytes).unwrap().milliseconds(), 2500);
+
+        let mut process = ProcessRecord {
+            id: 3,
+            parent: 1,
+            exit_code: -142,
+            memory: 8192,
+            name: [0; 32],
+        };
+        process.set_name("a-very-long-process-name-that-is-cut-off");
+        let mut bytes = [0u8; ProcessRecord::SIZE];
+        process.encode(&mut bytes);
+        let back = ProcessRecord::decode(&bytes).unwrap();
+        assert_eq!(back, process);
+        assert_eq!(back.exit(), Some(-142));
+        assert_eq!(text(&back.name).len(), 32, "names are cut at 32 bytes");
+        assert_eq!(ProcessRecord::decode(&bytes[..10]), None, "short input");
+    }
 
     #[test]
     fn error_codes_round_trip_and_are_negative() {

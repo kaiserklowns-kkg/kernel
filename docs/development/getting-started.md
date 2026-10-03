@@ -46,7 +46,8 @@ Add `--release` to `build`, `image`, `run` or `smoke` for an optimised kernel.
 [INFO ] syscall: [init] init: hello exited with 0
 ```
 
-Services are configured in `config/services.conf` (ADR-0016).
+Services are configured in `config/services.conf` (ADR-0016). Try `ps`, `mem`,
+`uptime` and `uname` (ADR-0020).
 The last service is the shell: type `help` at the `oceans>` prompt. Programs
 get only the authority you list, e.g. `run hello-client log use:echo`
 (ADR-0018). Files: `ls /bin`, `mkdir /docs`, `write /docs/a hi`, `cat /docs/a`

@@ -50,6 +50,10 @@ name = "oceans-abi"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-elf"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-fs-proto"
 version = "0.1.0"
 dependencies = [
@@ -72,6 +76,15 @@ dependencies = [
 name = "shell"
 version = "0.1.0"
 dependencies = [
+ "oceans-elf",
  "oceans-fs-proto",
+ "oceans-rt",
+]
+
+[[package]]
+name = "utils"
+version = "0.1.0"
+dependencies = [
+ "oceans-abi",
  "oceans-rt",
 ]

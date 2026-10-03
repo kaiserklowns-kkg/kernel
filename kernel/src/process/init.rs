@@ -7,7 +7,8 @@
 //! | 0 | kernel log (`WRITE`, `DUPLICATE`, `TRANSFER`) |
 //! | 1 | boot module table: memory object (`READ`, `MAP`) holding lines `<name> <handle index>` |
 //! | 2 | system console (`READ`, `WRITE`, `DUPLICATE`, `TRANSFER`), ADR-0017 |
-//! | 3… | each boot module as a memory object (`READ`, `MAP`, `DUPLICATE`, `TRANSFER`) |
+//! | 3 | system information (`READ`, `DUPLICATE`, `TRANSFER`), ADR-0020 |
+//! | 4… | each boot module as a memory object (`READ`, `MAP`, `DUPLICATE`, `TRANSFER`) |
 //!
 //! and its argument word: 1 in smoke-test boots (run the test manifest and
 //! report through the exit code), 0 otherwise. Everything else (service
@@ -31,8 +32,8 @@ use crate::object::{Capability, KernelObject, MemoryObject, ObjectKind, default_
 /// Boot module name of init's program image.
 pub const INIT_MODULE: &str = "init";
 
-/// Handles before the modules: log, module table, console.
-const FIXED_HANDLES: usize = 3;
+/// Handles before the modules: log, module table, console, system info.
+const FIXED_HANDLES: usize = 4;
 
 fn module_bytes(module: &BootModule) -> &'static [u8] {
     // SAFETY: boot modules stay mapped read-only in the direct map for the
@@ -89,6 +90,10 @@ pub fn start(boot: &BootInfo, test_mode: bool) -> Option<Arc<Process>> {
     initial.push(Capability::new(
         KernelObject::Console,
         default_rights(ObjectKind::Console),
+    ));
+    initial.push(Capability::new(
+        KernelObject::SystemInfo,
+        default_rights(ObjectKind::SystemInfo),
     ));
     initial.extend(modules);
 

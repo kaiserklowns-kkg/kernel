@@ -25,5 +25,9 @@ SECTIONS
     .data : { *(.data .data.*) } :data
     .bss : { *(.bss .bss.*) *(COMMON) } :data
 
+    /* Requested capabilities (oceans_rt::manifest!), read by the shell;
+     * not loaded into memory. */
+    .oceans.manifest 0 (INFO) : { KEEP(*(.oceans.manifest)) }
+
     /DISCARD/ : { *(.eh_frame*) *(.note .note.*) *(.comment) }
 }

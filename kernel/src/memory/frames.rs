@@ -98,6 +98,11 @@ pub fn free_frames(frame: Frame) -> Result<(), FreeError> {
     with_allocator(|frames| frames.free(frame))
 }
 
+/// Managed and free frame counts.
+pub fn stats() -> oceans_frame_allocator::Stats {
+    with_allocator(|frames| frames.stats())
+}
+
 fn with_allocator<R>(f: impl FnOnce(&mut FrameAllocator<'static>) -> R) -> R {
     let frames = FRAMES
         .get()

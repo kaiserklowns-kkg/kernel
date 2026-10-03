@@ -23,6 +23,10 @@ const USER_PROGRAMS: &[&str] = &[
     "crasher",
     "fs",
     "shell",
+    "ps",
+    "mem",
+    "uptime",
+    "uname",
     "ipc-test",
 ];
 /// Service manifests for init: normal boots and smoke tests.
@@ -59,6 +63,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run hello-client log use:echo\r\n",
     b"run /bin/crasher log\r\n",
     b"run hello-client use:nothing\r\n",
+    // Utilities (ADR-0020): bare commands get only what their manifest
+    // requests, and only low-risk grants.
+    b"uname\r\n",
+    b"uptime\r\n",
+    b"mem\r\n",
+    b"ps\r\n",
+    b"run ps out\r\n",
+    b"hello-client\r\n",
     b"run nosuch\r\n",
     b"frobnicate\r\n",
     b"exit\r\n",
@@ -82,6 +94,13 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 6)"),
+    Expect::Contains(" seconds"),
+    Expect::Contains("MiB free of"),
+    Expect::Contains("PID  PPID  MEMORY"),
+    Expect::Contains("init/shell/ps"),
+    Expect::Contains("ps: needs the sysinfo capability"),
+    Expect::Contains("hello-client: has no manifest"),
     Expect::Contains("run: nosuch: not found"),
     Expect::Contains("frobnicate: unknown command"),
 ];
@@ -238,18 +257,16 @@ fn user_cargo() -> Command {
 }
 
 /// Builds the user programs; returns the directory holding the binaries.
-fn build_user(profile: Profile) -> Result<PathBuf> {
-    let mut cmd = user_cargo();
-    cmd.arg("build");
-    if let Profile::Release = profile {
-        cmd.arg("--release");
-    }
-    run_command(&mut cmd)?;
+/// Always release builds: they are shipped system programs, loaded through
+/// the filesystem, so size matters (ADR-0020); the kernel profile does not
+/// change them.
+fn build_user() -> Result<PathBuf> {
+    run_command(user_cargo().args(["build", "--release"]))?;
     Ok(root()
         .join("user")
         .join("target")
         .join(KERNEL_TARGET)
-        .join(profile.dir()))
+        .join(Profile::Release.dir()))
 }
 
 fn build_kernel(profile: Profile) -> Result<PathBuf> {
@@ -297,7 +314,7 @@ fn fetch_limine() -> Result {
 /// ```
 fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     let kernel = build_kernel(profile)?;
-    let user = build_user(profile)?;
+    let user = build_user()?;
 
     let limine_efi = limine_dir().join("BOOTX64.EFI");
     if !limine_efi.is_file() {

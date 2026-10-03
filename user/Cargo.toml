@@ -3,7 +3,7 @@
 # user/.cargo/config.toml. Built by `cargo xtask`.
 [workspace]
 resolver = "3"
-members = ["rt", "fs-proto", "init", "fs", "shell", "echo-service", "hello-client", "crasher", "ipc-test"]
+members = ["rt", "fs-proto", "init", "fs", "shell", "utils", "echo-service", "hello-client", "crasher", "ipc-test"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,9 @@ oceans-abi = { path = "../libs/abi" }
 oceans-heap = { path = "../libs/heap" }
 oceans-rt = { path = "rt" }
 oceans-fs-proto = { path = "fs-proto" }
+oceans-elf = { path = "../libs/elf" }
 
 [profile.release]
-debug = 1
+# Programs are loaded through the filesystem (ADR-0019): keep them small.
+# Symbols and section headers stay (the shell reads `.oceans.manifest`).
+strip = "debuginfo"

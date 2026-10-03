@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 5).
+//! Minimal Oceans userspace runtime (ABI version 6).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -518,6 +518,132 @@ mod heap {
             }
         }
     }
+}
+
+// ---- ABI 6 and program conventions -----------------------------------------
+
+/// Copies the `kind` record(s) of `oceans_abi::sysinfo` into `buffer`;
+/// returns the length (needs `READ` on a system-information capability).
+pub fn system_info(sysinfo: Handle, kind: u64, buffer: &mut [u8]) -> Result<usize, Error> {
+    let args = [
+        sysinfo.0,
+        kind,
+        buffer.as_mut_ptr() as u64,
+        buffer.len() as u64,
+        0,
+        0,
+    ];
+    call(nr::SYSTEM_INFO, args).map(|(len, _)| len as usize)
+}
+
+/// Maps a text memory object read-only for the rest of the process's life
+/// and returns its contents up to the first NUL (objects are zero-padded).
+pub fn map_text(memory: Handle) -> Option<&'static str> {
+    let size = usize::try_from(memory_size(memory).ok()?).ok()?;
+    let base = memory_map(memory, 0, prot::READ).ok()?;
+    // SAFETY: the whole object (`size` bytes) is mapped readable at `base`
+    // and stays mapped for the process's lifetime.
+    let bytes = unsafe { core::slice::from_raw_parts(base, size) };
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).ok()
+}
+
+/// A new read-only memory object holding `text` (to hand to another
+/// process: a handle directory, program arguments, …).
+pub fn publish_text(text: &[u8]) -> Result<Handle, Error> {
+    let memory = memory_create(text.len().max(1) as u64)?;
+    let result = (|| {
+        let page = memory_map(memory, 0, prot::READ | prot::WRITE)?;
+        // SAFETY: just mapped writable, at least `text.len()` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), page, text.len()) };
+        memory_unmap(page)?;
+        duplicate(memory, rights::READ | rights::MAP | rights::TRANSFER)
+    })();
+    let _ = close(memory);
+    result
+}
+
+/// The handle directory a process receives as its last handle (from init
+/// or the shell): lines `<index> <kind> <name>` describing every handle.
+pub struct Directory {
+    text: &'static str,
+    handles: &'static [Handle],
+}
+
+impl Directory {
+    pub fn from_start(start: &Start) -> Option<Self> {
+        let text = map_text(*start.handles.last()?)?;
+        Some(Self {
+            text,
+            handles: start.handles,
+        })
+    }
+
+    pub fn lines(&self) -> core::str::Lines<'static> {
+        self.text.lines()
+    }
+
+    fn entries(&self) -> impl Iterator<Item = (Handle, &'static str, &'static str)> + '_ {
+        self.text.lines().filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let index: usize = words.next()?.parse().ok()?;
+            let kind = words.next()?;
+            let name = words.next()?;
+            Some((*self.handles.get(index)?, kind, name))
+        })
+    }
+
+    /// The stored name of entry `kind`/`name` (a `'static` copy of `name`).
+    pub fn name(&self, kind: &str, name: &str) -> Option<&'static str> {
+        self.entries()
+            .find(|&(_, k, n)| k == kind && n == name)
+            .map(|(_, _, n)| n)
+    }
+
+    /// The handle of `kind` called `name`.
+    pub fn find(&self, kind: &str, name: &str) -> Option<Handle> {
+        self.entries()
+            .find(|&(_, k, n)| k == kind && n == name)
+            .map(|(h, ..)| h)
+    }
+
+    /// The first handle of `kind`.
+    pub fn find_kind(&self, kind: &str) -> Option<Handle> {
+        self.entries().find(|&(_, k, _)| k == kind).map(|(h, ..)| h)
+    }
+
+    /// The process's arguments (space-separated words), if any.
+    pub fn args(&self) -> &'static str {
+        self.find_kind("args").and_then(map_text).unwrap_or("")
+    }
+}
+
+/// Console output as `fmt::Write`, translating `\n` to `\r\n`.
+pub struct Out(pub Handle);
+
+impl fmt::Write for Out {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for (i, part) in s.split('\n').enumerate() {
+            if i > 0 {
+                console_write(self.0, b"\r\n").map_err(|_| fmt::Error)?;
+            }
+            console_write(self.0, part.as_bytes()).map_err(|_| fmt::Error)?;
+        }
+        Ok(())
+    }
+}
+
+/// Declares the capabilities a program requests (master spec §41), as an
+/// `.oceans.manifest` ELF section the shell reads before running it, e.g.
+/// `oceans_rt::manifest!(b"grant out\ngrant sysinfo\n");`. Only low-risk
+/// requests are granted implicitly; others need an explicit `run`.
+#[macro_export]
+macro_rules! manifest {
+    ($text:literal) => {
+        #[used]
+        #[unsafe(link_section = ".oceans.manifest")]
+        static OCEANS_MANIFEST: [u8; $text.len()] = *$text;
+    };
 }
 
 /// Fixed-capacity text buffer for formatting without an allocator.

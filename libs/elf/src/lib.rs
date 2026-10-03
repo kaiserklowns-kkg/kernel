@@ -152,6 +152,38 @@ impl<'a> Executable<'a> {
         self.entry
     }
 
+    /// Contents of the section called `name`, if the image has section
+    /// headers and such a section lies within the image. Malformed section
+    /// tables yield `None`: sections are optional metadata, never needed to
+    /// load the program.
+    pub fn section(&self, name: &str) -> Option<&'a [u8]> {
+        const SECTION_HEADER_SIZE: usize = 64;
+        let image = self.image;
+        let table = usize::try_from(u64_at(image, 40)).ok()?;
+        if usize::from(u16_at(image, 58)) != SECTION_HEADER_SIZE {
+            return None;
+        }
+        let count = usize::from(u16_at(image, 60));
+        let names_index = usize::from(u16_at(image, 62));
+        let header = |index: usize| -> Option<&'a [u8]> {
+            let start = table.checked_add(index.checked_mul(SECTION_HEADER_SIZE)?)?;
+            image.get(start..start.checked_add(SECTION_HEADER_SIZE)?)
+        };
+        let contents = |header: &[u8]| -> Option<&'a [u8]> {
+            let offset = usize::try_from(u64_at(header, 24)).ok()?;
+            let size = usize::try_from(u64_at(header, 32)).ok()?;
+            image.get(offset..offset.checked_add(size)?)
+        };
+        let names = contents(header(names_index)?)?;
+        (0..count).find_map(|index| {
+            let header = header(index)?;
+            let name_offset = u32_at(header, 0) as usize;
+            let rest = names.get(name_offset..)?;
+            let end = rest.iter().position(|&b| b == 0)?;
+            (&rest[..end] == name.as_bytes()).then(|| contents(header))?
+        })
+    }
+
     /// The `PT_LOAD` segments, in file order.
     pub fn segments(&self) -> impl Iterator<Item = Segment<'a>> + '_ {
         (0..self.program_header_count).filter_map(move |i| match self.raw_header(i) {
@@ -513,6 +545,54 @@ mod tests {
         assert_eq!(
             Executable::parse(&image, LIMITS).err(),
             Some(ElfError::NoSegments)
+        );
+    }
+
+    /// Appends a section table (null, `.shstrtab`, `.oceans.manifest`).
+    fn with_sections(mut image: Vec<u8>, manifest: &[u8]) -> Vec<u8> {
+        let names = b"\0.shstrtab\0.oceans.manifest\0";
+        let names_at = image.len();
+        image.extend_from_slice(names);
+        let manifest_at = image.len();
+        image.extend_from_slice(manifest);
+        let table = image.len();
+        let header = |name: u32, offset: usize, size: usize| {
+            let mut h = [0u8; 64];
+            h[..4].copy_from_slice(&name.to_le_bytes());
+            h[24..32].copy_from_slice(&(offset as u64).to_le_bytes());
+            h[32..40].copy_from_slice(&(size as u64).to_le_bytes());
+            h
+        };
+        image.extend_from_slice(&[0u8; 64]);
+        image.extend_from_slice(&header(1, names_at, names.len()));
+        image.extend_from_slice(&header(11, manifest_at, manifest.len()));
+        image[40..48].copy_from_slice(&(table as u64).to_le_bytes());
+        image[58..60].copy_from_slice(&64u16.to_le_bytes());
+        image[60..62].copy_from_slice(&3u16.to_le_bytes());
+        image[62..64].copy_from_slice(&1u16.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn finds_named_sections() {
+        let image = with_sections(typical(), b"grant out\n");
+        let exe = Executable::parse(&image, LIMITS).unwrap();
+        assert_eq!(exe.section(".oceans.manifest"), Some(&b"grant out\n"[..]));
+        assert_eq!(exe.section(".missing"), None);
+        assert_eq!(exe.section(".oceans"), None, "no prefix matches");
+
+        let without = typical();
+        let exe = Executable::parse(&without, LIMITS).unwrap();
+        assert_eq!(exe.section(".oceans.manifest"), None, "no section table");
+
+        let mut corrupt = with_sections(typical(), b"x");
+        let len = corrupt.len();
+        corrupt[len - 40..len - 32].copy_from_slice(&u64::MAX.to_le_bytes()); // offset
+        let exe = Executable::parse(&corrupt, LIMITS).unwrap();
+        assert_eq!(
+            exe.section(".oceans.manifest"),
+            None,
+            "out-of-bounds section"
         );
     }
 

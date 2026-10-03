@@ -220,6 +220,8 @@ impl Drop for UserSpace {
 
 pub struct Process {
     id: ProcessId,
+    /// The process that spawned this one (`None` for kernel-started ones).
+    parent: Option<ProcessId>,
     name: String,
     root: u64,
     /// `None` once the last thread has been reaped.
@@ -241,6 +243,44 @@ impl fmt::Debug for Process {
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Every process ever started that still exists (records are dropped when
+/// their last reference goes; dead entries are pruned on snapshot).
+static PROCESSES: Mutex<Vec<alloc::sync::Weak<Process>>> = Mutex::new(Vec::new());
+
+/// A process as reported by `SYSTEM_INFO` (ADR-0020).
+pub struct Summary {
+    pub id: u64,
+    pub parent: u64,
+    pub name: String,
+    pub exit_code: Option<i64>,
+    /// Bytes of user memory mapped.
+    pub memory: u64,
+}
+
+/// All live process records, in start order.
+pub fn snapshot() -> Vec<Summary> {
+    let processes: Vec<Arc<Process>> = arch::without_interrupts(|| {
+        let mut list = PROCESSES.lock();
+        list.retain(|weak| weak.strong_count() > 0);
+        list.iter().filter_map(alloc::sync::Weak::upgrade).collect()
+    });
+    processes
+        .iter()
+        .map(|p| Summary {
+            id: p.id.0,
+            parent: p.parent.map_or(0, |id| id.0),
+            name: p.name.clone(),
+            exit_code: p.exit_status(),
+            memory: arch::without_interrupts(|| {
+                p.space
+                    .lock()
+                    .as_ref()
+                    .map_or(0, |space| space.mappings.iter().map(|m| m.len).sum())
+            }),
+        })
+        .collect()
+}
 
 impl Process {
     pub fn name(&self) -> &str {
@@ -427,6 +467,27 @@ pub fn spawn(
     initial: Vec<Capability>,
     arg: u64,
 ) -> Result<Arc<Process>, SpawnError> {
+    spawn_with_parent(None, name, image, initial, arg)
+}
+
+/// Like [`spawn`], recording `parent` as the spawning process.
+pub fn spawn_child(
+    parent: &Process,
+    name: &str,
+    image: &[u8],
+    initial: Vec<Capability>,
+    arg: u64,
+) -> Result<Arc<Process>, SpawnError> {
+    spawn_with_parent(Some(parent.id), name, image, initial, arg)
+}
+
+fn spawn_with_parent(
+    parent: Option<ProcessId>,
+    name: &str,
+    image: &[u8],
+    initial: Vec<Capability>,
+    arg: u64,
+) -> Result<Arc<Process>, SpawnError> {
     if initial.len() > MAX_INITIAL_HANDLES {
         return Err(SpawnError::TooManyHandles);
     }
@@ -478,6 +539,7 @@ pub fn spawn(
 
     let process = Arc::new(Process {
         id: ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+        parent,
         name: String::from(name),
         root,
         space: Mutex::new(Some(space)),
@@ -496,6 +558,7 @@ pub fn spawn(
         args,
     )
     .map_err(SpawnError::Thread)?;
+    arch::without_interrupts(|| PROCESSES.lock().push(Arc::downgrade(&process)));
     klog::debug!(
         "process {} ({name}) started at {:#x}",
         process.id.0,

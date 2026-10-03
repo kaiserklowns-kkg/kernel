@@ -38,6 +38,8 @@ pub enum KernelObject {
     Process(Arc<Process>),
     /// The system console: `READ` input, `WRITE` output.
     Console,
+    /// Read-only system information (`READ`): `SYSTEM_INFO`, ADR-0020.
+    SystemInfo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +52,7 @@ pub enum ObjectKind {
     Log,
     Process,
     Console,
+    SystemInfo,
 }
 
 impl KernelObject {
@@ -63,6 +66,7 @@ impl KernelObject {
             Self::Log => ObjectKind::Log,
             Self::Process(_) => ObjectKind::Process,
             Self::Console => ObjectKind::Console,
+            Self::SystemInfo => ObjectKind::SystemInfo,
         }
     }
 }
@@ -111,6 +115,9 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Log => Rights::WRITE
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+        ObjectKind::SystemInfo => Rights::READ
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Console => Rights::READ
