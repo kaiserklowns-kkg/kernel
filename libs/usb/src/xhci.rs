@@ -437,6 +437,31 @@ pub mod endpoint_type {
     pub const BULK_OUT: u32 = 2;
 }
 
+/// A slot context's contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Slot {
+    pub speed: Speed,
+    /// The root hub port the device is reached through.
+    pub root_port: u8,
+    /// Hub ports below the root, 4 bits per tier.
+    pub route: u32,
+    /// The highest endpoint context in use.
+    pub last_dci: u8,
+    /// Low and full speed devices behind a high-speed hub: that hub's
+    /// slot and port (its transaction translator).
+    pub tt: Option<(u8, u8)>,
+    /// The translating hub has one translator per port.
+    pub multi_tt: bool,
+    /// Set for hubs.
+    pub hub: Option<HubSlot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HubSlot {
+    pub ports: u8,
+    pub think_time: u8,
+}
+
 /// Builds input contexts (§6.2.5) in a buffer of
 /// `33 * context_size` bytes: the input control context, the slot context,
 /// then endpoint contexts by DCI.
@@ -470,15 +495,27 @@ impl<'a> InputContext<'a> {
         self.set(0, 1, flags);
     }
 
-    /// The slot context of a device on root port `port`; `last_dci` is the
-    /// highest endpoint context in use.
-    pub fn slot(&mut self, speed: Speed, port: u8, last_dci: u8) {
-        self.set(
-            1,
-            0,
-            u32::from(speed.id()) << 20 | u32::from(last_dci) << 27,
-        );
-        self.set(1, 1, u32::from(port) << 16);
+    /// The slot context (§6.2.2).
+    pub fn slot(&mut self, slot: &Slot) {
+        let mut dword0 = slot.route & 0xf_ffff
+            | u32::from(slot.speed.id()) << 20
+            | u32::from(slot.last_dci) << 27;
+        if slot.multi_tt {
+            dword0 |= 1 << 25;
+        }
+        let mut dword1 = u32::from(slot.root_port) << 16;
+        let mut dword2 = 0;
+        if let Some(hub) = slot.hub {
+            dword0 |= 1 << 26;
+            dword1 |= u32::from(hub.ports) << 24;
+            dword2 |= u32::from(hub.think_time & 3) << 16;
+        }
+        if let Some((tt_slot, tt_port)) = slot.tt {
+            dword2 |= u32::from(tt_slot) | u32::from(tt_port) << 8;
+        }
+        self.set(1, 0, dword0);
+        self.set(1, 1, dword1);
+        self.set(1, 2, dword2);
     }
 
     /// An endpoint context: `kind` from [`endpoint_type`], `interval` as
@@ -649,19 +686,44 @@ mod tests {
         let mut bytes = vec![0xffu8; InputContext::len(32)];
         let mut input = InputContext::new(&mut bytes, 32);
         input.add(0b11);
-        input.slot(Speed::Full, 5, 1);
+        input.slot(&Slot {
+            speed: Speed::Full,
+            root_port: 5,
+            route: 0x32,
+            last_dci: 1,
+            tt: Some((3, 2)),
+            multi_tt: true,
+            hub: None,
+        });
         input.endpoint(1, endpoint_type::CONTROL, 8, 0, 0x8000, true);
         let dword = |bytes: &[u8], context: usize, n: usize| {
             let at = context * 32 + n * 4;
             u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
         };
         assert_eq!(dword(&bytes, 0, 1), 0b11);
-        assert_eq!(dword(&bytes, 1, 0), 1 << 20 | 1 << 27);
+        assert_eq!(dword(&bytes, 1, 0), 0x32 | 1 << 20 | 1 << 25 | 1 << 27);
         assert_eq!(dword(&bytes, 1, 1), 5 << 16);
+        assert_eq!(dword(&bytes, 1, 2), 3 | 2 << 8);
         assert_eq!(dword(&bytes, 2, 1), 3 << 1 | 4 << 3 | 8 << 16);
         assert_eq!(dword(&bytes, 2, 2), 0x8001);
         assert_eq!(dword(&bytes, 2, 4), 8);
         assert_eq!(dword(&bytes, 3, 0), 0, "the rest is cleared");
+        let mut input = InputContext::new(&mut bytes, 32);
+        input.slot(&Slot {
+            speed: Speed::High,
+            root_port: 1,
+            route: 0,
+            last_dci: 3,
+            tt: None,
+            multi_tt: false,
+            hub: Some(HubSlot {
+                ports: 4,
+                think_time: 1,
+            }),
+        });
+        assert_eq!(dword(&bytes, 1, 0), 3 << 20 | 1 << 26 | 3 << 27);
+        assert_eq!(dword(&bytes, 1, 1), 1 << 16 | 4 << 24);
+        assert_eq!(dword(&bytes, 1, 2), 1 << 16);
     }
 
     #[test]

@@ -23,32 +23,42 @@ fn main(start: Start) -> i64 {
         Ok(usb) => usb,
         Err(code) => return code,
     };
-    let mut reply = [0u8; service::MAX_RECORDS * service::RECORD_SIZE];
-    let got = match oceans_rt::ipc_call_msg(usb, service::LIST, &[], &[], &mut reply, &mut []) {
-        Ok(got) if got.label == service::OK => got,
-        _ => {
-            let _ = writeln!(out, "lsusb: the USB service did not answer");
-            return EXIT_FAILED;
-        }
-    };
-    let records = reply[..got.data_len]
-        .as_chunks::<{ service::RECORD_SIZE }>()
-        .0
-        .iter()
-        .filter_map(|bytes| Record::decode(bytes));
     let mut any = false;
-    for record in records {
-        any = true;
-        let speed = Speed::from_id(record.speed).map_or("?", Speed::name);
-        let _ = writeln!(
-            out,
-            "port {}: {:04x}:{:04x} {} ({speed}) {}",
-            record.port,
-            record.vendor,
-            record.product,
-            record.name(),
-            record.kind.describe()
-        );
+    let mut skip = 0u8;
+    loop {
+        let mut reply = [0u8; service::MAX_RECORDS * service::RECORD_SIZE];
+        let got =
+            match oceans_rt::ipc_call_msg(usb, service::LIST, &[skip], &[], &mut reply, &mut []) {
+                Ok(got) if got.label == service::OK => got,
+                _ => {
+                    let _ = writeln!(out, "lsusb: the USB service did not answer");
+                    return EXIT_FAILED;
+                }
+            };
+        let mut count = 0;
+        for record in reply[..got.data_len]
+            .as_chunks::<{ service::RECORD_SIZE }>()
+            .0
+            .iter()
+            .filter_map(|bytes| Record::decode(bytes))
+        {
+            any = true;
+            count += 1;
+            let speed = Speed::from_id(record.speed).map_or("?", Speed::name);
+            let _ = writeln!(
+                out,
+                "port {}: {:04x}:{:04x} {} ({speed}) {}",
+                record.path(),
+                record.vendor,
+                record.product,
+                record.name(),
+                record.kind.describe()
+            );
+        }
+        if count < service::MAX_RECORDS {
+            break;
+        }
+        skip = skip.saturating_add(count as u8);
     }
     if !any {
         let _ = writeln!(out, "no USB devices");

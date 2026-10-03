@@ -8,16 +8,19 @@
 //! - Brings the controller up: takes it from the firmware (legacy
 //!   handoff), resets it, and sets up the device context array,
 //!   scratchpad buffers, the command ring and one event ring.
-//! - Enumerates devices on the root ports, at start and when plugged in:
-//!   port reset, slot, address, descriptors, product string.
+//! - Enumerates devices on the root ports and behind hubs (ADR-0033), at
+//!   start and when plugged in: port reset, slot, address, descriptors,
+//!   product string. Hubs are configured, their ports powered and watched
+//!   through their status-change endpoint; low and full speed devices
+//!   behind high-speed hubs go through the hub's transaction translator.
 //! - Drives boot keyboards: configures the interrupt IN endpoint, keeps
 //!   reports queued, and types their keys into the console (the same
 //!   bytes as the PS/2 keyboard).
 //! - Answers `LIST` on `usb` (for `lsusb`).
 //!
 //! Its interrupt (MSI-X) is a notification bound to its endpoint, so one
-//! thread serves clients and the controller. Hubs and other classes are
-//! enumerated and listed but not driven yet.
+//! thread serves clients and the controller. Other classes are enumerated
+//! and listed but not driven here.
 
 #![no_std]
 #![no_main]
@@ -30,11 +33,12 @@ use oceans_rt::{Buffer, Directory, Handle, Start, prot};
 use oceans_usb::Speed;
 use oceans_usb::descriptor::{self, Configuration, Device};
 use oceans_usb::hid::Keyboard;
+use oceans_usb::hub;
 use oceans_usb::request::Setup;
-use oceans_usb::service::{self, Kind, Record};
+use oceans_usb::service::{self, Kind, Path, Record};
 use oceans_usb::xhci::{
-    self, Consumer, Event, InputContext, Params, Producer, TRB_SIZE, Trb, cap, completion,
-    endpoint_type, interrupter, op, port,
+    self, Consumer, Event, HubSlot, InputContext, Params, Producer, Slot, TRB_SIZE, Trb, cap,
+    completion, endpoint_type, interrupter, op, port,
 };
 use oceans_virtio::Dma;
 
@@ -44,11 +48,12 @@ const PAGE: usize = 4096;
 /// TRBs per ring: one page.
 const RING_TRBS: u16 = (PAGE / TRB_SIZE) as u16;
 /// Pages for the controller's own structures and every device's.
-const POOL_PAGES: usize = 64;
+const POOL_PAGES: usize = 112;
 const MAX_PORTS: usize = 32;
-const MAX_DEVICES: usize = 8;
-/// Interrupt reports kept queued per keyboard.
+const MAX_DEVICES: usize = 16;
+/// Interrupt reports kept queued per keyboard, and per hub.
 const QUEUED_REPORTS: usize = 4;
+const HUB_REPORTS: usize = 2;
 /// Spacing of report buffers in a keyboard's buffer page.
 const REPORT_STRIDE: usize = 64;
 
@@ -212,7 +217,8 @@ impl Ring {
     }
 }
 
-/// The DMA pages a port's device uses; kept across unplug and replug.
+/// The DMA pages a device uses; kept for the next device in the same table
+/// entry after an unplug.
 #[derive(Clone, Copy)]
 struct Pages {
     output: Page,
@@ -223,23 +229,76 @@ struct Pages {
     interrupt: Page,
 }
 
-struct KeyboardDriver {
+/// An interrupt IN endpoint with reports kept queued.
+struct Interrupt {
     dci: u8,
     ring: Ring,
-    hid: Keyboard,
+}
+
+enum Driver {
+    None,
+    /// A boot keyboard typing into the console.
+    Keyboard {
+        interrupt: Interrupt,
+        hid: Keyboard,
+    },
+    /// A hub: its status-change endpoint and port count.
+    Hub {
+        interrupt: Interrupt,
+        ports: u8,
+        usb3: bool,
+    },
 }
 
 struct UsbDevice {
-    port: u8,
+    root_port: u8,
+    route: u32,
+    /// Hubs between the root port and the device.
+    depth: u8,
+    /// The hub (device index) and port the device is on.
+    parent: Option<(usize, u8)>,
     slot: u8,
     speed: Speed,
+    tt: Option<(u8, u8)>,
+    hub_slot: Option<HubSlot>,
     descriptor: Device,
     name: [u8; service::MAX_NAME],
     name_len: usize,
     kind: Kind,
     control: Ring,
     max_packet0: u16,
-    keyboard: Option<KeyboardDriver>,
+    driver: Driver,
+}
+
+impl UsbDevice {
+    fn path(&self) -> Path {
+        Path {
+            port: self.root_port,
+            route: self.route,
+        }
+    }
+
+    fn slot_context(&self, last_dci: u8) -> Slot {
+        Slot {
+            speed: self.speed,
+            root_port: self.root_port,
+            route: self.route,
+            last_dci,
+            tt: self.tt,
+            multi_tt: false,
+            hub: self.hub_slot,
+        }
+    }
+}
+
+/// Where a new device is, before it has a slot.
+struct Location {
+    root_port: u8,
+    route: u32,
+    depth: u8,
+    parent: Option<(usize, u8)>,
+    speed: Speed,
+    tt: Option<(u8, u8)>,
 }
 
 struct Controller {
@@ -254,10 +313,12 @@ struct Controller {
     commands: Ring,
     event_page: Page,
     events: Consumer,
-    pages: [Option<Pages>; MAX_PORTS],
+    pages: [Option<Pages>; MAX_DEVICES],
     devices: [Option<UsbDevice>; MAX_DEVICES],
-    /// Ports whose status changed while the driver was busy.
+    /// Root ports whose status changed while the driver was busy.
     pending_ports: u32,
+    /// Per hub (device index): ports whose status changed.
+    pending_hubs: [u32; MAX_DEVICES],
     notification: Handle,
     interrupts: bool,
 }
@@ -303,6 +364,7 @@ fn main(start: Start) -> i64 {
     for number in 1..=controller.params.max_ports {
         controller.port_changed(number);
     }
+    controller.service_events();
     controller.serve(server)
 }
 
@@ -434,9 +496,10 @@ impl Controller {
             commands,
             event_page,
             events: Consumer::new(RING_TRBS),
-            pages: [None; MAX_PORTS],
+            pages: [None; MAX_DEVICES],
             devices: [const { None }; MAX_DEVICES],
             pending_ports: 0,
+            pending_hubs: [0; MAX_DEVICES],
             notification,
             interrupts,
         })
@@ -490,7 +553,7 @@ impl Controller {
                 trb,
                 code,
                 residue,
-            } => self.keyboard_report(slot, endpoint, trb, code, residue),
+            } => self.interrupt_report(slot, endpoint, trb, code, residue),
             Event::PortStatus { port } if (1..=32).contains(&port) => {
                 self.pending_ports |= 1 << (port - 1);
             }
@@ -501,7 +564,8 @@ impl Controller {
         }
     }
 
-    /// Everything the controller has reported since the last call.
+    /// Everything the controller has reported since the last call, and the
+    /// port changes it implies (on root ports and on hubs).
     fn service_events(&mut self) {
         let primary = self.primary();
         primary.write32(
@@ -518,10 +582,18 @@ impl Controller {
                 format_args!("host system error: the controller stopped"),
             );
         }
-        while self.pending_ports != 0 {
-            let index = self.pending_ports.trailing_zeros();
-            self.pending_ports &= !(1 << index);
-            self.port_changed(index as u8 + 1);
+        loop {
+            if self.pending_ports != 0 {
+                let index = self.pending_ports.trailing_zeros();
+                self.pending_ports &= !(1 << index);
+                self.port_changed(index as u8 + 1);
+            } else if let Some(hub) = self.pending_hubs.iter().position(|&ports| ports != 0) {
+                let port = self.pending_hubs[hub].trailing_zeros();
+                self.pending_hubs[hub] &= !(1 << port);
+                self.hub_port_changed(hub, port as u8);
+            } else {
+                break;
+            }
         }
     }
 
@@ -552,8 +624,8 @@ impl Controller {
         setup: Setup,
         out: Option<&mut [u8]>,
     ) -> Result<usize, &'static str> {
+        let mut pages = self.pages[index].ok_or("no pages")?;
         let device = self.devices[index].as_mut().ok_or("no such device")?;
-        let mut pages = self.pages[usize::from(device.port) - 1].ok_or("no pages")?;
         let length = usize::from(setup.length).min(PAGE);
         let input = setup.is_in();
         let has_data = length > 0;
@@ -607,7 +679,7 @@ impl Controller {
         Ok(received)
     }
 
-    // ---- Ports and enumeration -------------------------------------------
+    // ---- Root ports ------------------------------------------------------
 
     fn portsc(&self, number: u8) -> u32 {
         self.operational
@@ -619,13 +691,15 @@ impl Controller {
             .write32(op::PORTS + 0x10 * usize::from(number - 1), value);
     }
 
-    fn device_on(&self, number: u8) -> Option<usize> {
-        self.devices
-            .iter()
-            .position(|d| d.as_ref().is_some_and(|d| d.port == number))
+    fn child_of(&self, parent: Option<(usize, u8)>, root_port: u8) -> Option<usize> {
+        self.devices.iter().position(|d| {
+            d.as_ref().is_some_and(|d| {
+                d.parent == parent && (parent.is_some() || d.root_port == root_port)
+            })
+        })
     }
 
-    /// Reconciles a port with what the driver knows: attaches a newly
+    /// Reconciles a root port with what the driver knows: attaches a newly
     /// connected device, forgets a removed one.
     fn port_changed(&mut self, number: u8) {
         if number == 0 || usize::from(number) > MAX_PORTS || number > self.params.max_ports {
@@ -635,29 +709,18 @@ impl Controller {
         // Acknowledge every change reported so far.
         self.set_portsc(number, port::write_value(status, status & port::CHANGES));
         let connected = status & port::CONNECTED != 0;
-        match (connected, self.device_on(number)) {
+        match (connected, self.child_of(None, number)) {
             (true, None) => {
-                if let Err(problem) = self.attach(number) {
+                if let Err(problem) = self.attach_root(number) {
                     say(self.log, format_args!("port {number}: {problem}"));
                 }
             }
-            (false, Some(index)) => self.detach(index),
+            (false, Some(index)) => self.detach(index, true),
             _ => {}
         }
     }
 
-    fn detach(&mut self, index: usize) {
-        if let Some(device) = self.devices[index].take() {
-            let _ = self.command(Trb::disable_slot(device.slot));
-            self.dcbaa.write64(usize::from(device.slot) * 8, 0);
-            say(
-                self.log,
-                format_args!("port {}: device removed", device.port),
-            );
-        }
-    }
-
-    fn attach(&mut self, number: u8) -> Result<(), &'static str> {
+    fn attach_root(&mut self, number: u8) -> Result<(), &'static str> {
         // USB 2 ports enable only after a reset; USB 3 ports train by
         // themselves.
         let mut status = self.portsc(number);
@@ -673,12 +736,135 @@ impl Controller {
             }
         }
         let speed = Speed::from_id(port::speed(status)).ok_or("unknown port speed")?;
+        self.attach(Location {
+            root_port: number,
+            route: 0,
+            depth: 0,
+            parent: None,
+            speed,
+            tt: None,
+        })
+    }
+
+    // ---- Hub ports -------------------------------------------------------
+
+    /// Reconciles port `port` of the hub at `hub` with what the driver
+    /// knows (ADR-0033).
+    fn hub_port_changed(&mut self, hub: usize, port: u8) {
+        let Some(Driver::Hub { ports, usb3, .. }) = self.devices[hub].as_ref().map(|d| &d.driver)
+        else {
+            return;
+        };
+        let (ports, usb3) = (*ports, *usb3);
+        if port == 0 || port > ports {
+            return;
+        }
+        let result = (|| {
+            let status = self.hub_port_status(hub, port)?;
+            for feature in status.changes(usb3) {
+                self.control(hub, hub::clear_port_feature(port, feature), None)?;
+            }
+            match (status.connected(), self.child_of(Some((hub, port)), 0)) {
+                (true, None) => self.attach_on_hub(hub, port, usb3),
+                (false, Some(child)) => {
+                    self.detach(child, true);
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        })();
+        if let Err(problem) = result {
+            let path = self.devices[hub].as_ref().map(UsbDevice::path);
+            if let Some(path) = path {
+                say(self.log, format_args!("hub {path}, port {port}: {problem}"));
+            }
+        }
+    }
+
+    fn hub_port_status(&mut self, hub: usize, port: u8) -> Result<hub::PortStatus, &'static str> {
+        let mut bytes = [0u8; 4];
+        let len = self.control(hub, hub::get_port_status(port), Some(&mut bytes))?;
+        hub::PortStatus::parse(&bytes[..len]).ok_or("short port status")
+    }
+
+    fn attach_on_hub(&mut self, hub: usize, port: u8, usb3: bool) -> Result<(), &'static str> {
+        self.control(
+            hub,
+            hub::set_port_feature(port, hub::feature::PORT_RESET),
+            None,
+        )?;
+        let mut status = self.hub_port_status(hub, port)?;
+        for _ in 0..50 {
+            if status.reset_done() {
+                break;
+            }
+            oceans_rt::sleep_ms(10);
+            status = self.hub_port_status(hub, port)?;
+        }
+        if !status.reset_done() {
+            return Err("port reset timed out");
+        }
+        for feature in status.changes(usb3) {
+            self.control(hub, hub::clear_port_feature(port, feature), None)?;
+        }
+        if !status.enabled() {
+            return Err("the port did not enable");
+        }
+        // Reset recovery (USB 2.0 §7.1.7.5).
+        oceans_rt::sleep_ms(10);
+        let speed = status.speed(usb3);
+        let parent = self.devices[hub].as_ref().ok_or("hub gone")?;
+        let route =
+            hub::child_route(parent.route, parent.depth, port).ok_or("hubs nested too deep")?;
+        // Low and full speed devices below a high-speed hub use its
+        // transaction translator; deeper ones inherit it.
+        let tt = match speed {
+            Speed::Low | Speed::Full if parent.speed == Speed::High => Some((parent.slot, port)),
+            Speed::Low | Speed::Full => parent.tt,
+            _ => None,
+        };
+        let location = Location {
+            root_port: parent.root_port,
+            route,
+            depth: parent.depth + 1,
+            parent: Some((hub, port)),
+            speed,
+            tt,
+        };
+        self.attach(location)
+    }
+
+    // ---- Devices ---------------------------------------------------------
+
+    /// Forgets a device and, first, everything behind it; `announce`
+    /// logs it (not for a device that failed to enumerate).
+    fn detach(&mut self, index: usize, announce: bool) {
+        while let Some(child) = self.devices.iter().position(|d| {
+            d.as_ref()
+                .is_some_and(|d| d.parent.is_some_and(|(hub, _)| hub == index))
+        }) {
+            self.detach(child, announce);
+        }
+        if let Some(device) = self.devices[index].take() {
+            let _ = self.command(Trb::disable_slot(device.slot));
+            self.dcbaa.write64(usize::from(device.slot) * 8, 0);
+            self.pending_hubs[index] = 0;
+            if announce {
+                say(
+                    self.log,
+                    format_args!("port {}: device removed", device.path()),
+                );
+            }
+        }
+    }
+
+    fn attach(&mut self, location: Location) -> Result<(), &'static str> {
         let free = self
             .devices
             .iter()
             .position(Option::is_none)
             .ok_or("too many devices")?;
-        let pages = match self.pages[usize::from(number) - 1] {
+        let pages = match self.pages[free] {
             Some(pages) => pages,
             None => {
                 let pages = Pages {
@@ -689,7 +875,7 @@ impl Controller {
                     reports: self.pool.page()?,
                     interrupt: self.pool.page()?,
                 };
-                self.pages[usize::from(number) - 1] = Some(pages);
+                self.pages[free] = Some(pages);
                 pages
             }
         };
@@ -708,40 +894,42 @@ impl Controller {
             return Err("the controller gave an invalid slot");
         }
         self.dcbaa.write64(usize::from(slot) * 8, pages.output.phys);
-        let control = Ring::new(pages.control);
-        let max_packet0 = speed.default_max_packet0();
+        self.pending_hubs[free] = 0;
         self.devices[free] = Some(UsbDevice {
-            port: number,
+            root_port: location.root_port,
+            route: location.route,
+            depth: location.depth,
+            parent: location.parent,
             slot,
-            speed,
+            speed: location.speed,
+            tt: location.tt,
+            hub_slot: None,
             descriptor: Device::default(),
             name: [0; service::MAX_NAME],
             name_len: 0,
             kind: Kind::Other,
-            control,
-            max_packet0,
-            keyboard: None,
+            control: Ring::new(pages.control),
+            max_packet0: location.speed.default_max_packet0(),
+            driver: Driver::None,
         });
         let result = self.enumerate(free, pages);
-        if result.is_err()
-            && let Some(device) = self.devices[free].take()
-        {
-            let _ = self.command(Trb::disable_slot(device.slot));
-            self.dcbaa.write64(usize::from(device.slot) * 8, 0);
+        if result.is_err() {
+            // Also forgets anything a half-configured hub found.
+            self.detach(free, false);
         }
         result
     }
 
     fn enumerate(&mut self, index: usize, mut pages: Pages) -> Result<(), &'static str> {
         let size = self.params.context_size;
-        let (slot, speed, port, ring, max_packet0) = {
+        let (slot, ring, max_packet0, context) = {
             let d = self.devices[index].as_ref().ok_or("gone")?;
-            (d.slot, d.speed, d.port, d.control, d.max_packet0)
+            (d.slot, d.control, d.max_packet0, d.slot_context(1))
         };
         {
             let mut input = InputContext::new(pages.input.bytes(), size);
             input.add(0b11);
-            input.slot(speed, port, 1);
+            input.slot(&context);
             input.endpoint(
                 1,
                 endpoint_type::CONTROL,
@@ -823,11 +1011,12 @@ impl Controller {
         let full = &full[..len];
 
         let keyboard = descriptor::find_boot_interface(full, descriptor::HID_PROTOCOL_KEYBOARD);
+        let hub_endpoint = find_hub_endpoint(full);
         let kind = if keyboard.is_some() {
             Kind::Keyboard
         } else if descriptor::find_boot_interface(full, descriptor::HID_PROTOCOL_MOUSE).is_some() {
             Kind::Mouse
-        } else if device.class == descriptor::CLASS_HUB {
+        } else if device.class == descriptor::CLASS_HUB && hub_endpoint.is_some() {
             Kind::Hub
         } else if descriptor::Items::new(full).any(|item| {
             matches!(item, descriptor::Item::Interface(i) if i.class == descriptor::CLASS_MASS_STORAGE)
@@ -836,12 +1025,17 @@ impl Controller {
         } else {
             Kind::Other
         };
-        if let Some(d) = self.devices[index].as_mut() {
+        let path = {
+            let d = self.devices[index].as_mut().ok_or("gone")?;
             d.descriptor = device;
             d.name = name;
             d.name_len = name_len;
             d.kind = kind;
-        }
+            d.path()
+        };
+        let speed = self.devices[index]
+            .as_ref()
+            .map_or(Speed::Full, |d| d.speed);
         let text = core::str::from_utf8(&name[..name_len]).unwrap_or("");
         let role = match kind {
             Kind::Keyboard if self.console.is_none() => "keyboard (no console-input grant)",
@@ -850,7 +1044,7 @@ impl Controller {
         say(
             self.log,
             format_args!(
-                "port {port}: {:04x}:{:04x} {text} ({}), {role}",
+                "port {path}: {:04x}:{:04x} {text} ({}), {role}",
                 device.vendor,
                 device.product,
                 speed.name(),
@@ -864,41 +1058,112 @@ impl Controller {
             self.control(index, Setup::hid_set_boot_protocol(interface.number), None)?;
             // Optional for keyboards: some stall it.
             let _ = self.control(index, Setup::hid_set_idle(interface.number), None);
-            let dci = endpoint.dci();
-            let mut interrupt = Ring::new(pages.interrupt);
-            {
-                let mut input = InputContext::new(pages.input.bytes(), size);
-                input.add(1 | 1 << dci);
-                input.slot(speed, port, dci);
-                input.endpoint(
-                    dci,
-                    endpoint_type::INTERRUPT_IN,
-                    endpoint.packet_size(),
-                    xhci::interrupt_interval(speed, endpoint.interval),
-                    interrupt.page.phys,
-                    true,
-                );
-            }
-            self.command(Trb::configure_endpoint(pages.input.phys, slot))?;
-            for _ in 0..QUEUED_REPORTS {
-                queue_report(&mut interrupt, pages.reports);
-            }
-            self.doorbells
-                .write32(4 * usize::from(slot), u32::from(dci));
+            let interrupt = self.configure_interrupt(index, endpoint, pages, QUEUED_REPORTS)?;
             if let Some(d) = self.devices[index].as_mut() {
-                d.keyboard = Some(KeyboardDriver {
-                    dci,
-                    ring: interrupt,
+                d.driver = Driver::Keyboard {
+                    interrupt,
                     hid: Keyboard::new(),
-                });
+                };
             }
+        } else if kind == Kind::Hub
+            && let Some(endpoint) = hub_endpoint
+        {
+            self.configure_hub(index, configuration.value, endpoint, pages)?;
         }
         Ok(())
     }
 
-    /// A report from a keyboard: its new keys go to the console, and the
-    /// TRB is queued again.
-    fn keyboard_report(&mut self, slot: u8, endpoint: u8, trb: u64, code: u8, residue: u32) {
+    /// Configures an interrupt IN endpoint and queues `queued` reports on
+    /// it.
+    fn configure_interrupt(
+        &mut self,
+        index: usize,
+        endpoint: descriptor::Endpoint,
+        mut pages: Pages,
+        queued: usize,
+    ) -> Result<Interrupt, &'static str> {
+        let (slot, speed, context) = {
+            let d = self.devices[index].as_ref().ok_or("gone")?;
+            (d.slot, d.speed, d.slot_context(endpoint.dci()))
+        };
+        let dci = endpoint.dci();
+        let mut ring = Ring::new(pages.interrupt);
+        {
+            let mut input = InputContext::new(pages.input.bytes(), self.params.context_size);
+            input.add(1 | 1 << dci);
+            input.slot(&context);
+            input.endpoint(
+                dci,
+                endpoint_type::INTERRUPT_IN,
+                endpoint.packet_size(),
+                xhci::interrupt_interval(speed, endpoint.interval),
+                ring.page.phys,
+                true,
+            );
+        }
+        self.command(Trb::configure_endpoint(pages.input.phys, slot))?;
+        for _ in 0..queued {
+            queue_report(&mut ring, pages.reports);
+        }
+        self.doorbells
+            .write32(4 * usize::from(slot), u32::from(dci));
+        Ok(Interrupt { dci, ring })
+    }
+
+    /// Makes a device a hub (ADR-0033): reads its hub descriptor, tells
+    /// the controller, powers its ports and looks at each.
+    fn configure_hub(
+        &mut self,
+        index: usize,
+        configuration: u8,
+        endpoint: descriptor::Endpoint,
+        pages: Pages,
+    ) -> Result<(), &'static str> {
+        let (speed, depth) = {
+            let d = self.devices[index].as_ref().ok_or("gone")?;
+            (d.speed, d.depth)
+        };
+        let usb3 = matches!(speed, Speed::Super | Speed::SuperPlus);
+        let mut bytes = [0u8; 71];
+        let len = self.control(index, hub::get_descriptor(usb3), Some(&mut bytes))?;
+        let descriptor = hub::Descriptor::parse(&bytes[..len], usb3).ok_or("bad hub descriptor")?;
+        // Route strings name ports 1–15; the 32-bit change mask holds 31.
+        let ports = descriptor.ports.min(15);
+        self.control(index, Setup::set_configuration(configuration), None)?;
+        if usb3 {
+            self.control(index, hub::set_hub_depth(depth), None)?;
+        }
+        if let Some(d) = self.devices[index].as_mut() {
+            d.hub_slot = Some(HubSlot {
+                ports,
+                think_time: descriptor.think_time,
+            });
+        }
+        let interrupt = self.configure_interrupt(index, endpoint, pages, HUB_REPORTS)?;
+        if let Some(d) = self.devices[index].as_mut() {
+            d.driver = Driver::Hub {
+                interrupt,
+                ports,
+                usb3,
+            };
+        }
+        for port in 1..=ports {
+            self.control(
+                index,
+                hub::set_port_feature(port, hub::feature::PORT_POWER),
+                None,
+            )?;
+        }
+        oceans_rt::sleep_ms(u64::from(descriptor.power_good_ms).max(100));
+        for port in 1..=ports {
+            self.hub_port_changed(index, port);
+        }
+        Ok(())
+    }
+
+    /// A completed interrupt transfer: keyboard keys go to the console, a
+    /// hub's changed ports are noted; the TRB is queued again.
+    fn interrupt_report(&mut self, slot: u8, endpoint: u8, trb: u64, code: u8, residue: u32) {
         let Some(index) = self
             .devices
             .iter()
@@ -906,51 +1171,57 @@ impl Controller {
         else {
             return;
         };
-        let port = self.devices[index].as_ref().map_or(0, |d| d.port);
-        let Some(mut pages) = self
-            .pages
-            .get(usize::from(port).wrapping_sub(1))
-            .copied()
-            .flatten()
-        else {
+        let Some(mut pages) = self.pages[index] else {
             return;
         };
         let console = self.console;
         let Some(device) = self.devices[index].as_mut() else {
             return;
         };
-        let Some(keyboard) = device.keyboard.as_mut() else {
-            return;
+        let (interrupt, report_len) = match &mut device.driver {
+            Driver::Keyboard { interrupt, .. } | Driver::Hub { interrupt, .. }
+                if interrupt.dci == endpoint =>
+            {
+                (interrupt, 8usize)
+            }
+            _ => return,
         };
-        if keyboard.dci != endpoint {
-            return;
-        }
-        let Some(at) = keyboard.ring.index_of(trb) else {
+        let Some(at) = interrupt.ring.index_of(trb) else {
             return;
         };
         let offset = at * REPORT_STRIDE % PAGE;
-        if code == completion::SUCCESS || code == completion::SHORT_PACKET {
-            let len = 8usize.saturating_sub(residue as usize);
-            let mut report = [0u8; 8];
-            report[..len].copy_from_slice(&pages.reports.bytes()[offset..offset + len]);
-            let mut typed = [0u8; 6];
-            let mut count = 0;
-            keyboard.hid.report(&report[..len], |byte| {
-                if count < typed.len() {
-                    typed[count] = byte;
-                    count += 1;
-                }
-            });
-            if count > 0
-                && let Some(console) = console
-            {
-                let _ = oceans_rt::console_input(console, &typed[..count]);
-            }
-        }
-        queue_report(&mut keyboard.ring, pages.reports);
-        let dci = keyboard.dci;
+        let ok = code == completion::SUCCESS || code == completion::SHORT_PACKET;
+        let len = report_len.saturating_sub(residue as usize);
+        let mut report = [0u8; 8];
+        report[..len].copy_from_slice(&pages.reports.bytes()[offset..offset + len]);
+        queue_report(&mut interrupt.ring, pages.reports);
+        let dci = interrupt.dci;
         self.doorbells
             .write32(4 * usize::from(slot), u32::from(dci));
+        if !ok {
+            return;
+        }
+        match &mut device.driver {
+            Driver::Keyboard { hid, .. } => {
+                let mut typed = [0u8; 6];
+                let mut count = 0;
+                hid.report(&report[..len], |byte| {
+                    if count < typed.len() {
+                        typed[count] = byte;
+                        count += 1;
+                    }
+                });
+                if count > 0
+                    && let Some(console) = console
+                {
+                    let _ = oceans_rt::console_input(console, &typed[..count]);
+                }
+            }
+            Driver::Hub { ports, .. } => {
+                self.pending_hubs[index] |= hub::changed_ports(&report[..len], *ports);
+            }
+            Driver::None => {}
+        }
     }
 
     // ---- Clients ---------------------------------------------------------
@@ -991,10 +1262,19 @@ impl Controller {
             let mut reply = [0u8; service::MAX_RECORDS * service::RECORD_SIZE];
             let (label, len) = match got.label {
                 service::LIST => {
+                    // data: the number of records to skip (paging).
+                    let skip = data[..got.data_len].first().copied().map_or(0, usize::from);
                     let mut count = 0;
-                    for device in self.devices.iter().flatten().take(service::MAX_RECORDS) {
+                    for device in self
+                        .devices
+                        .iter()
+                        .flatten()
+                        .skip(skip)
+                        .take(service::MAX_RECORDS)
+                    {
                         let record = Record {
-                            port: device.port,
+                            port: device.root_port,
+                            route: device.route,
                             speed: device.speed.id(),
                             kind: device.kind,
                             vendor: device.descriptor.vendor,
@@ -1017,6 +1297,28 @@ impl Controller {
             let _ = oceans_rt::ipc_reply_msg(label, &reply[..len], &[]);
         }
     }
+}
+
+/// A hub's status-change endpoint: the interrupt IN endpoint of its hub
+/// interface.
+fn find_hub_endpoint(configuration: &[u8]) -> Option<descriptor::Endpoint> {
+    let mut in_hub = false;
+    for item in descriptor::Items::new(configuration) {
+        match item {
+            descriptor::Item::Interface(interface) => {
+                in_hub = interface.class == descriptor::CLASS_HUB && interface.alternate == 0;
+            }
+            descriptor::Item::Endpoint(endpoint)
+                if in_hub
+                    && endpoint.is_in()
+                    && endpoint.transfer_type() == descriptor::INTERRUPT =>
+            {
+                return Some(endpoint);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Queues one 8-byte report transfer; its buffer is chosen by the TRB's

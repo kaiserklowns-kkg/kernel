@@ -4,6 +4,7 @@
 //!   descriptors, parsed defensively (devices are untrusted input).
 //! - [`request`]: standard and HID control requests (setup packets).
 //! - [`hid`]: the HID boot keyboard protocol, as console bytes.
+//! - [`hub`]: hub descriptors, port status and requests; route strings.
 //! - [`service`]: the protocol of the driver's `usb` endpoint (`lsusb`).
 //! - [`xhci`]: the xHCI controller's data structures: TRBs, rings and
 //!   device contexts (xHCI 1.2).
@@ -12,6 +13,7 @@
 
 pub mod descriptor;
 pub mod hid;
+pub mod hub;
 pub mod request;
 pub mod service;
 pub mod xhci;

@@ -64,6 +64,10 @@ const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
 /// kernel log shows `SHELL_READY` (user/shell, ADR-0018), then requires
 /// every `SHELL_EXPECT` line in the console output.
 const SHELL_READY: &str = "shell: ready";
+/// The last device the USB driver finds at boot (behind the hub). Its log
+/// line would otherwise land in the middle of the first commands' output,
+/// so typing waits for it.
+const USB_SETTLED: &str = "xhci: port 6.1: ";
 /// Delay between typed bytes.
 const TYPING_DELAY: Duration = Duration::from_millis(2);
 /// Lines end in CR LF: Enter is CR on a serial terminal, and QEMU's Windows
@@ -138,10 +142,13 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"lsusb\r\n",
     b"run lsusb out use:usb\r\n",
     b"@usb echo typed on usb\r",
-    // Hot plug: a mouse appears, is listed, and is removed again.
-    b"@monitor device_add usb-mouse,bus=usb.0,id=hotplug",
+    // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
+    // and is removed again; then the hub goes, taking its tablet along.
+    b"@monitor device_add usb-mouse,bus=usb.0,port=2.2,id=hotplug",
     b"run lsusb out use:usb\r\n",
     b"@monitor device_del hotplug",
+    b"run lsusb out use:usb\r\n",
+    b"@monitor device_del hub",
     b"run lsusb out use:usb\r\n",
     b"exit\r\n",
 ];
@@ -229,8 +236,12 @@ const SHELL_EXPECT: &[Expect] = &[
     ),
     Expect::Line("port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s) keyboard (console input)"),
     Expect::Line("typed on usb"),
-    Expect::Contains("QEMU USB Mouse (480 Mb/s) mouse (no driver)"),
-    Expect::Contains("device removed"),
+    Expect::Contains("xhci: port 6: 0409:55aa QEMU USB Hub (12 Mb/s), hub"),
+    Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) no driver"),
+    Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (no driver)"),
+    Expect::Contains("xhci: port 6.2: device removed"),
+    Expect::Contains("xhci: port 6.1: device removed"),
+    Expect::Contains("xhci: port 6: device removed"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -590,8 +601,11 @@ fn qemu_command(
         "-device",
         "qemu-xhci,id=usb",
         "-device",
-        "usb-kbd,bus=usb.0",
+        "usb-kbd,bus=usb.0,port=1",
     ])
+    // A hub with a tablet behind it (ADR-0033).
+    .args(["-device", "usb-hub,bus=usb.0,port=2,id=hub"])
+    .args(["-device", "usb-tablet,bus=usb.0,port=2.1"])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     if let Some(port) = monitor {
         cmd.arg("-monitor")
@@ -727,6 +741,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let (events_tx, events_rx) = mpsc::channel();
+    // Used (and dropped) once typing may start, so the channel still
+    // closes when QEMU exits.
+    let mut prompt_again = Some(events_tx.clone());
     thread::spawn(move || {
         // Bytes, not lines: the prompt has no line ending.
         let mut line = Vec::new();
@@ -751,6 +768,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
 
     let deadline = Instant::now() + SMOKE_TIMEOUT;
     let mut online = false;
+    let (mut shell_ready, mut usb_settled, mut prompt_waiting) = (false, false, false);
     let mut ready = false;
     let mut commands = script.iter();
     let mut unmet: Vec<Expect> = expected.to_vec();
@@ -761,8 +779,19 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
             Ok(Console::Line(line)) => {
                 println!("  | {line}");
                 online |= line.contains(ONLINE_BANNER);
-                ready |= line.contains(SHELL_READY);
+                shell_ready |= line.contains(SHELL_READY);
+                usb_settled |= line.contains(USB_SETTLED);
                 unmet.retain(|expect| !expect.matches(&line));
+                if !ready && shell_ready && usb_settled {
+                    ready = true;
+                    // The prompt came before the USB devices settled: act
+                    // on it now.
+                    if let Some(again) = prompt_again.take()
+                        && prompt_waiting
+                    {
+                        let _ = again.send(Console::Prompt);
+                    }
+                }
             }
             // One command per prompt: typing while the guest (or QEMU, during
             // a disk flush) is busy overflows the 16-byte UART FIFO, because
@@ -805,7 +834,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                     }
                 }
             }
-            Ok(Console::Prompt) => {}
+            Ok(Console::Prompt) => prompt_waiting = true,
             // Reader finished: QEMU closed stdout, i.e. exited.
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
