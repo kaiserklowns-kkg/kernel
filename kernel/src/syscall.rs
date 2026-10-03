@@ -86,7 +86,10 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::ENDPOINT_BIND => endpoint_bind(&process, a0, a1),
         nr::TIMER_SET => timer_set(&process, a0, a1, a2),
         nr::RANDOM => random(&process, a0, a1),
-        nr::CLOCK => Ok((crate::time::ticks() * 1000 / u64::from(crate::time::HZ), 0)),
+        nr::CLOCK => Ok((crate::time::uptime_ms(), 0)),
+        nr::TIME => crate::time::unix_ms()
+            .map(|ms| (ms, 0))
+            .ok_or(Error::NotFound),
         _ => Err(Error::UnknownSyscall),
     };
     match result {

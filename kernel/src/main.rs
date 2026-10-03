@@ -77,6 +77,7 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     sched::init();
     process::init();
     random::init();
+    time::init_wall_clock();
     display::init(boot);
     let acpi = acpi::discover(boot);
     console::init(acpi.as_ref());
@@ -111,6 +112,7 @@ fn self_test() {
     sched::self_test();
     ipc::self_test();
     random::self_test();
+    time::self_test();
     pci::self_test();
     process::self_test(boot::info());
     process::init_self_test(boot::info());

@@ -9,6 +9,7 @@ mod ioapic;
 mod keyboard;
 mod paging;
 mod pic;
+mod rtc;
 mod serial;
 mod syscall;
 
@@ -23,6 +24,7 @@ pub use interrupts::{
     set_user_fault_handler,
 };
 pub use paging::{AddressSpace, activate_root, active_root};
+pub use rtc::{Reading as RtcReading, now as rtc_now};
 pub use syscall::{SyscallFrame, enter_user, init as init_syscalls, set_kernel_stack};
 
 pub const NAME: &str = "x86_64";

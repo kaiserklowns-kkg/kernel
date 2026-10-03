@@ -1,0 +1,35 @@
+[package]
+name = "oceans-tls"
+description = "TLS for Oceans: rustls with a pure-Rust (RustCrypto) provider and a blocking client over any byte transport (ADR-0031)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[features]
+# Server-side signing with ECDSA P-256 keys (host tests and tools only).
+server = ["p256/pkcs8"]
+
+# Pure-Rust primitives. Software backends only: Oceans does not save SIMD
+# state across context switches, so user code must not use SSE/AVX (the
+# `*_force_soft` cfgs in user/.cargo/config.toml enforce it).
+[dependencies]
+rustls = { version = "0.23.45", default-features = false, features = ["tls12"] }
+webpki-roots = "1.0.9"
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes"] }
+chacha20poly1305 = { version = "0.10.1", default-features = false }
+sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"] }
+hmac = { version = "0.12.1", default-features = false }
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "ecdh"] }
+p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "ecdh"] }
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "2.2.0", default-features = false }
+rsa = { version = "0.9.10", default-features = false, features = ["sha2", "u64_digit"] }
+rand_core = { version = "0.6.4", default-features = false }
+zeroize = { version = "1", default-features = false }
+
+[dev-dependencies]
+rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12"] }
+oceans-random.workspace = true
+# Test servers sign with a PKCS#8 key (the `server` feature, for tests).
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "ecdh", "pkcs8"] }

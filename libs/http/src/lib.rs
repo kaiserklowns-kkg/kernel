@@ -19,7 +19,7 @@ const MAX_CHUNK_LINE: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpError {
-    /// Not an `http://` URL we can use (`https` is not supported yet).
+    /// Not an `http://` or `https://` URL we can use.
     BadUrl,
     Unsupported,
     /// The output buffer is too small.
@@ -28,11 +28,16 @@ pub enum HttpError {
     Malformed,
     /// The connection ended before the body was complete.
     Truncated,
+    /// A redirect from `https://` to `http://` (it would drop the
+    /// protection the user asked for).
+    Downgrade,
 }
 
-/// A parsed `http://` URL.
+/// A parsed `http://` or `https://` URL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Url<'a> {
+    /// `https://`: the connection must use TLS (ADR-0031).
+    pub secure: bool,
     pub host: &'a str,
     pub port: u16,
     /// Path and query, starting with `/`.
@@ -41,10 +46,11 @@ pub struct Url<'a> {
 
 impl<'a> Url<'a> {
     pub fn parse(text: &'a str) -> Result<Self, HttpError> {
-        if text.starts_with("https://") {
-            return Err(HttpError::Unsupported);
-        }
-        let rest = text.strip_prefix("http://").ok_or(HttpError::BadUrl)?;
+        let (secure, rest) = match (text.strip_prefix("https://"), text.strip_prefix("http://")) {
+            (Some(rest), _) => (true, rest),
+            (None, Some(rest)) => (false, rest),
+            (None, None) => return Err(HttpError::BadUrl),
+        };
         let (authority, target) = match rest.find(['/', '?']) {
             Some(at) if rest.as_bytes()[at] == b'/' => (&rest[..at], &rest[at..]),
             Some(_) => return Err(HttpError::BadUrl),
@@ -56,7 +62,7 @@ impl<'a> Url<'a> {
         }
         let (host, port) = match authority.rsplit_once(':') {
             Some((host, port)) => (host, port.parse().map_err(|_| HttpError::BadUrl)?),
-            None => (authority, 80),
+            None => (authority, default_port(secure)),
         };
         let host_ok = !host.is_empty()
             && host
@@ -65,8 +71,38 @@ impl<'a> Url<'a> {
         if !host_ok || port == 0 || !printable(target) {
             return Err(HttpError::BadUrl);
         }
-        Ok(Self { host, port, target })
+        Ok(Self {
+            secure,
+            host,
+            port,
+            target,
+        })
     }
+
+    fn scheme(&self) -> &'static [u8] {
+        if self.secure { b"https://" } else { b"http://" }
+    }
+}
+
+fn default_port(secure: bool) -> u16 {
+    if secure { 443 } else { 80 }
+}
+
+/// Writes `:port` unless it is the scheme's default.
+fn put_port(writer: &mut Writer<'_>, url: &Url<'_>) -> Result<(), HttpError> {
+    if url.port == default_port(url.secure) {
+        return Ok(());
+    }
+    let mut digits = [0u8; 5];
+    let mut port = url.port;
+    let mut at = digits.len();
+    while port > 0 {
+        at -= 1;
+        digits[at] = b'0' + (port % 10) as u8;
+        port /= 10;
+    }
+    writer.put(b":")?;
+    writer.put(&digits[at..])
 }
 
 fn printable(text: &str) -> bool {
@@ -80,18 +116,7 @@ pub fn get_request(url: &Url<'_>, out: &mut [u8]) -> Result<usize, HttpError> {
     writer.put(url.target.as_bytes())?;
     writer.put(b" HTTP/1.1\r\nHost: ")?;
     writer.put(url.host.as_bytes())?;
-    if url.port != 80 {
-        let mut digits = [0u8; 5];
-        let mut port = url.port;
-        let mut at = digits.len();
-        while port > 0 {
-            at -= 1;
-            digits[at] = b'0' + (port % 10) as u8;
-            port /= 10;
-        }
-        writer.put(b":")?;
-        writer.put(&digits[at..])?;
-    }
+    put_port(&mut writer, url)?;
     writer.put(b"\r\nUser-Agent: Oceans/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n")?;
     Ok(writer.len)
 }
@@ -416,27 +441,20 @@ fn parse_head(bytes: &[u8]) -> Result<Head, HttpError> {
 }
 
 /// Resolves a redirect target against the URL that produced it: absolute
-/// `http://` URLs as they are, absolute paths on the same host. Writes the
-/// resulting URL into `out` and returns its length.
+/// URLs as they are (but never from `https://` down to `http://`),
+/// absolute paths on the same origin. Writes the resulting URL into `out`
+/// and returns its length.
 pub fn redirect(base: &Url<'_>, location: &str, out: &mut [u8]) -> Result<usize, HttpError> {
     let mut writer = Writer { out, len: 0 };
     if location.starts_with("http://") || location.starts_with("https://") {
+        if base.secure && location.starts_with("http://") {
+            return Err(HttpError::Downgrade);
+        }
         writer.put(location.as_bytes())?;
     } else if location.starts_with('/') && !location.starts_with("//") {
-        writer.put(b"http://")?;
+        writer.put(base.scheme())?;
         writer.put(base.host.as_bytes())?;
-        if base.port != 80 {
-            let mut digits = [0u8; 5];
-            let mut port = base.port;
-            let mut at = digits.len();
-            while port > 0 {
-                at -= 1;
-                digits[at] = b'0' + (port % 10) as u8;
-                port /= 10;
-            }
-            writer.put(b":")?;
-            writer.put(&digits[at..])?;
-        }
+        put_port(&mut writer, base)?;
         writer.put(location.as_bytes())?;
     } else {
         return Err(HttpError::Unsupported);
@@ -481,6 +499,7 @@ mod tests {
         assert_eq!(
             Url::parse("http://example.com/a/b?c=d#frag"),
             Ok(Url {
+                secure: false,
                 host: "example.com",
                 port: 80,
                 target: "/a/b?c=d"
@@ -489,14 +508,20 @@ mod tests {
         assert_eq!(
             Url::parse("http://10.0.2.2:8080"),
             Ok(Url {
+                secure: false,
                 host: "10.0.2.2",
                 port: 8080,
                 target: "/"
             })
         );
         assert_eq!(
-            Url::parse("https://example.com/"),
-            Err(HttpError::Unsupported)
+            Url::parse("https://example.com/x"),
+            Ok(Url {
+                secure: true,
+                host: "example.com",
+                port: 443,
+                target: "/x"
+            })
         );
         assert_eq!(
             Url::parse("http://user:pw@host/"),
@@ -532,6 +557,16 @@ mod tests {
                 .contains("Host: example.com\r\n")
         );
         assert_eq!(get_request(&url, &mut [0u8; 10]), Err(HttpError::TooLarge));
+        // The port is omitted only when it is the scheme's default.
+        for (text, host) in [
+            ("https://example.com/", "Host: example.com\r\n"),
+            ("https://example.com:80/", "Host: example.com:80\r\n"),
+            ("http://example.com:443/", "Host: example.com:443\r\n"),
+        ] {
+            let len = get_request(&Url::parse(text).unwrap(), &mut out).unwrap();
+            let request = std::str::from_utf8(&out[..len]).unwrap();
+            assert!(request.contains(host), "{text}: {request}");
+        }
     }
 
     #[test]
@@ -604,6 +639,19 @@ mod tests {
             redirect(&base, "//evil/x", &mut out),
             Err(HttpError::Unsupported)
         );
+        // Secure origins keep their scheme and refuse to downgrade.
+        let base = Url::parse("https://example.com/start").unwrap();
+        let len = redirect(&base, "/next", &mut out).unwrap();
+        assert_eq!(&out[..len], b"https://example.com/next");
+        let len = redirect(&base, "https://other:8443/x", &mut out).unwrap();
+        assert_eq!(&out[..len], b"https://other:8443/x");
+        assert_eq!(
+            redirect(&base, "http://example.com/x", &mut out),
+            Err(HttpError::Downgrade)
+        );
+        let base = Url::parse("https://example.com:8443/").unwrap();
+        let len = redirect(&base, "/y", &mut out).unwrap();
+        assert_eq!(&out[..len], b"https://example.com:8443/y");
     }
 
     #[test]

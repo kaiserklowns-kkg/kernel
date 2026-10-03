@@ -39,6 +39,7 @@ const USER_PROGRAMS: &[&str] = &[
     "host",
     "nc",
     "fetch",
+    "date",
     "ipc-test",
 ];
 /// The virtio disk QEMU attaches (ADR-0021), holding the filesystem
@@ -123,6 +124,13 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run fetch out use:net -- http://10.0.2.2:$HTTP/chunked\r\n",
     b"run fetch out use:net -- http://10.0.2.2:$HTTP/missing\r\n",
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /keep/big.bin\r\n",
+    // TLS (ADR-0031) against OpenSSL's `s_server` on the host: its test CA
+    // is not one of the built-in roots until `--ca` adds it.
+    b"date\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/ca.pem /keep/ca.pem\r\n",
+    b"run fetch out use:net -- https://10.0.2.2:$HTTPS/tls.txt\r\n",
+    b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.txt\r\n",
+    b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.bin /keep/tls.bin\r\n",
     b"exit\r\n",
 ];
 /// The second smoke boot, on the disk the first one left.
@@ -142,7 +150,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 9)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 10)"),
     Expect::Contains("net: configured 10.0.2.15/24"),
 ];
 /// Output the script must produce: `Line` must be a whole console line,
@@ -164,7 +172,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 9)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 10)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -198,6 +206,11 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("chunked transfer works"),
     Expect::Contains("fetch: HTTP 404 Not Found"),
     Expect::Contains("fetch: saved 1048576 bytes"),
+    Expect::Contains(" UTC"),
+    Expect::Contains("fetch: TLS: invalid peer certificate: UnknownIssuer"),
+    Expect::Line("hello over https"),
+    Expect::Contains("fetch: TLSv1_3 TLS13_"),
+    Expect::Contains("fetch: saved 262144 bytes"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -652,10 +665,12 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let dns_port = dns_server()?;
     let tcp_port = tcp_greeter()?;
     let http_port = http_server()?;
+    let https = HttpsServer::start()?;
     let expand = |command: &[u8]| -> Vec<u8> {
         String::from_utf8_lossy(command)
             .replace("$DNS", &dns_port.to_string())
             .replace("$TCP", &tcp_port.to_string())
+            .replace("$HTTPS", &https.port.to_string())
             .replace("$HTTP", &http_port.to_string())
             .into_bytes()
     };
@@ -820,6 +835,14 @@ fn check_smoke_disk() -> Result {
     if downloaded != big_body() {
         return Err("the file fetched over HTTP does not match what the host served".into());
     }
+    let secure = lookup(&volume, keep, "tls.bin")?;
+    let mut downloaded = vec![0u8; volume.size(secure).map_err(|e| format!("{e:?}"))? as usize];
+    volume
+        .read(secure, 0, &mut downloaded)
+        .map_err(|e| format!("reading the file fetched over HTTPS: {e:?}"))?;
+    if downloaded != tls_body() {
+        return Err("the file fetched over HTTPS does not match what the host served".into());
+    }
     if text != format!("{KEPT_TEXT}\n").as_bytes() {
         return Err(format!(
             "kept file holds {:?}",
@@ -971,6 +994,70 @@ fn big_body() -> Vec<u8> {
     (0..1_048_576u32).map(|i| (i % 251) as u8).collect()
 }
 
+/// The TLS test material (ADR-0031): a CA, and a certificate it issued for
+/// 10.0.2.2 with its key. Test-only; the keys are public.
+const TLS_TEST_CA: &[u8] = include_bytes!("../../../libs/tls/testdata/ecdsa-ca.pem");
+const TLS_TEST_CHAIN: &str = "libs/tls/testdata/server-ecdsa.pem";
+const TLS_TEST_KEY: &str = "libs/tls/testdata/server.key.pem";
+/// Served at `/tls.txt` and `/tls.bin` over HTTPS.
+const TLS_TEXT: &[u8] = b"hello over https\n";
+
+/// The body of `/tls.bin`: 256 KiB of numbered lines. Printable text only:
+/// OpenSSL on Windows reads served files in text mode, where 0x1A ends a
+/// file.
+fn tls_body() -> Vec<u8> {
+    (0..4096u32)
+        .flat_map(|i| format!("line {i:05} {:>52}\n", i % 977).into_bytes())
+        .collect()
+}
+
+/// OpenSSL's `s_server` serving files over HTTPS for the guest's `fetch`:
+/// an independent TLS implementation. Stopped when dropped.
+struct HttpsServer {
+    port: u16,
+    child: std::process::Child,
+}
+
+impl HttpsServer {
+    fn start() -> Result<Self> {
+        let www = root().join("build/https");
+        fs::create_dir_all(&www).map_err(|e| format!("cannot create {}: {e}", www.display()))?;
+        fs::write(www.join("tls.txt"), TLS_TEXT)
+            .and_then(|()| fs::write(www.join("tls.bin"), tls_body()))
+            .map_err(|e| format!("cannot write the HTTPS files: {e}"))?;
+        let port = free_tcp_port()?;
+        let child = Command::new("openssl")
+            .args(["s_server", "-quiet", "-WWW", "-accept"])
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("-cert")
+            .arg(root().join(TLS_TEST_CHAIN))
+            .arg("-key")
+            .arg(root().join(TLS_TEST_KEY))
+            .current_dir(&www)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("cannot start `openssl s_server` (is OpenSSL installed?): {e}"))?;
+        let server = Self { port, child };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect(("127.0.0.1", port)).is_err() {
+            if Instant::now() > deadline {
+                return Err("`openssl s_server` did not start listening".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(server)
+    }
+}
+
+impl Drop for HttpsServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// An HTTP server on the host for the guest's `fetch`. Returns its port.
 fn http_server() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -1007,6 +1094,7 @@ fn http_server() -> Result<u16> {
                 "/redirect" => b"HTTP/1.1 302 Found\r\nLocation: /moved.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
                 "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
                 "/big" => fixed("200 OK", &big_body()),
+                "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
                 _ => fixed("404 Not Found", b"not here\n"),
             };
             let _ = stream.write_all(&response);

@@ -23,6 +23,7 @@ oceans-net = { path = "../libs/net" }
 oceans-dns = { path = "../libs/dns" }
 oceans-archive = { path = "../libs/archive" }
 oceans-http = { path = "../libs/http" }
+oceans-tls = { path = "../libs/tls" }
 oceans-elf = { path = "../libs/elf" }
 oceans-volume = { path = "../libs/volume" }
 
@@ -30,3 +31,13 @@ oceans-volume = { path = "../libs/volume" }
 # Programs are loaded through the filesystem (ADR-0019): keep them small.
 # Symbols and section headers stay (the shell reads `.oceans.manifest`).
 strip = "debuginfo"
+
+# Debug builds too: debug info would make the boot archive many times
+# larger (the TLS stack alone carries ~30 MiB of it), and nothing reads it.
+[profile.dev]
+strip = "debuginfo"
+
+# Dependencies (crypto above all) are optimised even in debug builds: an
+# unoptimised RSA or ECDSA verification takes seconds.
+[profile.dev.package."*"]
+opt-level = 2

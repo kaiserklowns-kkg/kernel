@@ -642,6 +642,11 @@ pub fn clock_ms() -> u64 {
     call(nr::CLOCK, [0; 6]).map_or(0, |(ms, _)| ms)
 }
 
+/// Unix time in milliseconds (UTC), if the machine's clock is known.
+pub fn unix_time_ms() -> Option<u64> {
+    call(nr::TIME, [0; 6]).ok().map(|(ms, _)| ms)
+}
+
 /// Maps a text memory object read-only for the rest of the process's life
 /// and returns its contents up to the first NUL (objects are zero-padded).
 pub fn map_text(memory: Handle) -> Option<&'static str> {

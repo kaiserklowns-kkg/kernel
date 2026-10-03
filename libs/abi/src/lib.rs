@@ -19,9 +19,10 @@
 /// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24); 5 = ADR-0019 (25–26: badges,
 /// memory size); 6 = ADR-0020 (27: system information); 7 = ADR-0021
 /// (28–34: devices; errors -15 and -16); 8 = ADR-0023 (35–37: bound
-/// notifications, timers, clock); 9 = ADR-0026 (38: random). Versions only
+/// notifications, timers, clock); 9 = ADR-0026 (38: random); 10 = ADR-0031
+/// (39: wall time). Versions only
 /// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 9;
+pub const ABI_VERSION: u64 = 10;
 
 /// System call numbers.
 pub mod nr {
@@ -179,6 +180,13 @@ pub mod nr {
     /// secure random bytes. Needs no capability: randomness grants no
     /// authority.
     pub const RANDOM: u64 = 38;
+
+    // ABI 10
+
+    /// `() -> milliseconds` — Unix time (UTC), from the real-time clock
+    /// read at boot plus the monotonic clock. `NotFound` if the machine has
+    /// no usable real-time clock. Needs no capability.
+    pub const TIME: u64 = 39;
 }
 
 /// Largest single `RANDOM` request, in bytes.
