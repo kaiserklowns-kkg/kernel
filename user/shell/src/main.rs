@@ -16,6 +16,7 @@
 
 use core::fmt::{self, Write};
 
+use oceans_fs_proto::{FsError, Kind, MAX_NAME, Node, flags};
 use oceans_rt::{Buffer, Error, Handle, Start, prot, rights};
 
 oceans_rt::entry!(main);
@@ -94,6 +95,8 @@ impl Shell {
         let _ = oceans_rt::console_write(self.console, bytes);
     }
 
+    /// Formats into a 512-byte buffer; longer output is cut off at the
+    /// buffer boundary rather than lost (write static text with `write`).
     fn print(&self, args: fmt::Arguments<'_>) {
         let mut text = Buffer::<512>::new();
         let _ = text.write_fmt(args);
@@ -197,6 +200,12 @@ impl Shell {
             }
             ["call", endpoint, words @ ..] => self.call(endpoint, words),
             ["run", program, grants @ ..] => self.run_program(program, grants),
+            ["ls"] => self.list(""),
+            ["ls", path] => self.list(path),
+            ["cat", path] => self.cat(path),
+            ["write", path, words @ ..] => self.write_file(path, words),
+            ["mkdir", path] => self.make_directory(path),
+            ["rm", path] => self.remove(path),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
             ["exit"] => return Some(0),
             [command, ..] => {
@@ -207,17 +216,24 @@ impl Shell {
     }
 
     fn help(&self) {
-        self.print(format_args!(
-            "commands:\r\n\
+        // Written directly: it is longer than the formatting buffer.
+        self.write(
+            b"commands:\r\n\
              \x20 help                       this list\r\n\
              \x20 echo TEXT                  print TEXT\r\n\
              \x20 grants                     capabilities this shell holds\r\n\
              \x20 call ENDPOINT TEXT         send TEXT to a service endpoint I use\r\n\
              \x20 run PROGRAM [GRANT...]     run a program with only the listed authority:\r\n\
              \x20                              log, console, use:ENDPOINT\r\n\
+             \x20                              (PROGRAM: a granted module, /bin/NAME, or a path)\r\n\
+             \x20 ls [PATH]                  list a directory\r\n\
+             \x20 cat PATH                   print a file\r\n\
+             \x20 write PATH TEXT            replace a file's contents with TEXT\r\n\
+             \x20 mkdir PATH                 create a directory\r\n\
+             \x20 rm PATH                    remove a file or empty directory\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
-        ));
+        );
     }
 
     fn call(&self, endpoint: &str, words: &[&str]) {
@@ -241,13 +257,233 @@ impl Shell {
         }
     }
 
-    fn run_program(&self, program: &str, grants: &[&str]) {
-        let Some(image) = self.directory.find("module", program) else {
-            self.print(format_args!(
-                "run: no program named {program} (see `grants`)\r\n"
-            ));
-            return;
+    /// The filesystem root this shell was granted (`use = fs`). Never closed.
+    fn fs_root(&self) -> Option<Node> {
+        self.directory.find("use", "fs").map(Node)
+    }
+
+    /// A directory: the root for an empty path or `/`, else `path` opened
+    /// from the root. The flag says whether the handle is ours to close.
+    fn open_directory(&self, path: &str, open_flags: u8) -> Result<(Node, bool), &'static str> {
+        let root = self.fs_root().ok_or("this shell has no filesystem")?;
+        if path.trim_matches('/').is_empty() {
+            return Ok((root, false));
+        }
+        match root.walk(path, open_flags).map_err(FsError::message)? {
+            (node, Kind::Directory) => Ok((node, true)),
+            (node, Kind::File) => {
+                node.close();
+                Err("not a directory")
+            }
+        }
+    }
+
+    /// Runs `f` on the parent directory of `path` (opened with write access,
+    /// which the fs grants only if our handle to it allows) and the last
+    /// component.
+    fn in_parent(
+        &self,
+        path: &str,
+        f: impl FnOnce(&Node, &str) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let path = path.trim_end_matches('/');
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let (directory, owned) = self.open_directory(parent, flags::WRITE)?;
+        let result = f(&directory, name);
+        if owned {
+            directory.close();
+        }
+        result
+    }
+
+    fn list(&self, path: &str) {
+        let (directory, owned) = match self.open_directory(path, 0) {
+            Ok(found) => found,
+            Err(problem) => return self.print(format_args!("ls: {path}: {problem}\r\n")),
         };
+        let mut name = [0u8; MAX_NAME];
+        for index in 0.. {
+            match directory.entry(index, &mut name) {
+                Ok(Some((kind, len))) => self.print(format_args!(
+                    "  {}{}\r\n",
+                    core::str::from_utf8(&name[..len]).unwrap_or("?"),
+                    if kind == Kind::Directory { "/" } else { "" }
+                )),
+                Ok(None) => break,
+                Err(error) => {
+                    self.print(format_args!("ls: {path}: {}\r\n", error.message()));
+                    break;
+                }
+            }
+        }
+        if owned {
+            directory.close();
+        }
+    }
+
+    fn cat(&self, path: &str) {
+        let Some(root) = self.fs_root() else {
+            return self.print(format_args!("cat: this shell has no filesystem\r\n"));
+        };
+        let file = match root.walk(path, 0) {
+            Ok((file, Kind::File)) => file,
+            Ok((node, Kind::Directory)) => {
+                node.close();
+                return self.print(format_args!("cat: {path}: is a directory\r\n"));
+            }
+            Err(error) => return self.print(format_args!("cat: {path}: {}\r\n", error.message())),
+        };
+        let mut offset = 0;
+        let mut chunk = [0u8; oceans_fs_proto::MAX_DATA];
+        loop {
+            match file.read(offset, &mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    // Files use LF; the terminal needs CR LF.
+                    for (i, part) in chunk[..n].split(|&b| b == b'\n').enumerate() {
+                        if i > 0 {
+                            self.write(b"\r\n");
+                        }
+                        self.write(part);
+                    }
+                    offset += n as u64;
+                }
+                Err(error) => {
+                    self.print(format_args!("cat: {path}: {}\r\n", error.message()));
+                    break;
+                }
+            }
+        }
+        file.close();
+    }
+
+    fn write_file(&self, path: &str, words: &[&str]) {
+        let mut text = Buffer::<{ LINE_MAX + 1 }>::new();
+        for (i, word) in words.iter().enumerate() {
+            let _ = write!(text, "{}{word}", if i > 0 { " " } else { "" });
+        }
+        let _ = text.write_str("\n");
+        let result = self.in_parent(path, |directory, name| {
+            let (file, kind) = directory
+                .open(name, flags::CREATE_FILE | flags::WRITE)
+                .map_err(FsError::message)?;
+            let written = if kind == Kind::File {
+                file.truncate(0)
+                    .and_then(|()| file.write_all(0, text.as_bytes()))
+                    .map_err(FsError::message)
+            } else {
+                Err("is a directory")
+            };
+            file.close();
+            written
+        });
+        if let Err(problem) = result {
+            self.print(format_args!("write: {path}: {problem}\r\n"));
+        }
+    }
+
+    fn make_directory(&self, path: &str) {
+        let result = self.in_parent(path, |directory, name| {
+            if let Ok((existing, _)) = directory.open(name, 0) {
+                existing.close();
+                return Err("already exists");
+            }
+            let (created, _) = directory
+                .open(name, flags::CREATE_DIRECTORY)
+                .map_err(FsError::message)?;
+            created.close();
+            Ok(())
+        });
+        if let Err(problem) = result {
+            self.print(format_args!("mkdir: {path}: {problem}\r\n"));
+        }
+    }
+
+    fn remove(&self, path: &str) {
+        let result = self.in_parent(path, |directory, name| {
+            directory.remove(name).map_err(FsError::message)
+        });
+        if let Err(problem) = result {
+            self.print(format_args!("rm: {path}: {problem}\r\n"));
+        }
+    }
+
+    /// The image of `program`: a boot module this shell was granted, else a
+    /// file: `program` itself if it contains `/`, else `/bin/<program>`.
+    /// Returns the memory object and whether it is ours to close.
+    fn find_image(&self, program: &str) -> Result<(Handle, bool), &'static str> {
+        if !program.contains('/')
+            && let Some(module) = self.directory.find("module", program)
+        {
+            return Ok((module, false));
+        }
+        let mut path = Buffer::<{ 8 + LINE_MAX }>::new();
+        if program.contains('/') {
+            let _ = path.write_str(program);
+        } else {
+            let _ = write!(path, "/bin/{program}");
+        }
+        self.load_file(path.as_str()).map(|memory| (memory, true))
+    }
+
+    /// Copies a file into a new memory object (for `PROCESS_SPAWN`).
+    fn load_file(&self, path: &str) -> Result<Handle, &'static str> {
+        let root = self
+            .fs_root()
+            .ok_or("no program by that name (and no filesystem)")?;
+        let (file, kind) = root.walk(path, 0).map_err(FsError::message)?;
+        let result = (|| {
+            if kind != Kind::File {
+                return Err("not a file");
+            }
+            let size = file.stat().map_err(FsError::message)?.size;
+            let memory = oceans_rt::memory_create(size.max(1)).map_err(|_| "out of memory")?;
+            let copied = (|| {
+                let base = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
+                    .map_err(|_| "out of memory")?;
+                // SAFETY: just mapped `size` writable bytes (rounded up).
+                let target = unsafe { core::slice::from_raw_parts_mut(base, size as usize) };
+                let mut done = 0;
+                while done < target.len() {
+                    let n = file
+                        .read(done as u64, &mut target[done..])
+                        .map_err(FsError::message)?;
+                    if n == 0 {
+                        break;
+                    }
+                    done += n;
+                }
+                let _ = oceans_rt::memory_unmap(base);
+                Ok(())
+            })();
+            match copied {
+                Ok(()) => Ok(memory),
+                Err(problem) => {
+                    let _ = oceans_rt::close(memory);
+                    Err(problem)
+                }
+            }
+        })();
+        file.close();
+        result
+    }
+
+    fn run_program(&self, program: &str, grants: &[&str]) {
+        let (image, owned) = match self.find_image(program) {
+            Ok(found) => found,
+            Err(problem) => {
+                self.print(format_args!("run: {program}: {problem}\r\n"));
+                return;
+            }
+        };
+        let name = program.rsplit('/').next().unwrap_or(program);
+        self.spawn_and_wait(image, name, grants);
+        if owned {
+            let _ = oceans_rt::close(image);
+        }
+    }
+
+    fn spawn_and_wait(&self, image: Handle, program: &str, grants: &[&str]) {
         let mut handles = [Handle(0); MAX_CHILD_HANDLES];
         let mut count = 0;
         for grant in grants {

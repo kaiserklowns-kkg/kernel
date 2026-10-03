@@ -21,9 +21,13 @@ const MCR_OUT2: u8 = 1 << 3;
 /// Bytes drained per interrupt at most (the FIFO holds 16).
 const DRAIN_LIMIT: usize = 64;
 
-/// How long to wait for the transmitter before dropping a byte. Keeps the
-/// kernel from hanging on machines without a working UART.
-const TX_SPIN_LIMIT: u32 = 100_000;
+const SCRATCH: u16 = 7;
+
+/// Whether a UART answered at boot. Without one, output is discarded
+/// instead of waiting forever for a transmitter that does not exist; with
+/// one, output waits for the transmitter and is never dropped (a real UART
+/// always drains at the line rate).
+static PRESENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn outb(offset: u16, value: u8) {
     // SAFETY: COM1 ports are owned exclusively by this driver; writes to an
@@ -38,6 +42,13 @@ fn inb(offset: u16) -> u8 {
 }
 
 pub fn init() {
+    // Presence: the scratch register reads back what was written.
+    outb(SCRATCH, 0xa5);
+    let present = inb(SCRATCH) == 0xa5;
+    PRESENT.store(present, core::sync::atomic::Ordering::Relaxed);
+    if !present {
+        return;
+    }
     outb(INTERRUPT_ENABLE, 0x00); // polled mode
     outb(LINE_CONTROL, 0x80); // DLAB on: next two writes set the divisor
     outb(DATA, 0x01); // divisor 1 → 115200 baud
@@ -48,13 +59,13 @@ pub fn init() {
 }
 
 fn write_byte(byte: u8) {
-    for _ in 0..TX_SPIN_LIMIT {
-        if inb(LINE_STATUS) & LINE_STATUS_THR_EMPTY != 0 {
-            outb(DATA, byte);
-            return;
-        }
+    if !PRESENT.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    while inb(LINE_STATUS) & LINE_STATUS_THR_EMPTY == 0 {
         core::hint::spin_loop();
     }
+    outb(DATA, byte);
 }
 
 pub fn write_bytes(bytes: &[u8]) {

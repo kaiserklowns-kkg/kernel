@@ -1,4 +1,4 @@
-//! The Oceans system call ABI, version 4 (ADR-0014 to ADR-0017).
+//! The Oceans system call ABI, version 5 (ADR-0014 to ADR-0019).
 //!
 //! Shared by the kernel and userspace so both sides agree by construction.
 //! The ABI is versioned: numbers and meanings below never change within a
@@ -16,9 +16,9 @@
 #![no_std]
 
 /// Version history: 1 = ADR-0014 (syscalls 0–7); 2 = ADR-0015 (8–17);
-/// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24). Versions only add; existing
-/// numbers keep their meaning.
-pub const ABI_VERSION: u64 = 4;
+/// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24); 5 = ADR-0019 (25–26: badges, memory size).
+/// Versions only add; existing numbers keep their meaning.
+pub const ABI_VERSION: u64 = 5;
 
 /// System call numbers.
 pub mod nr {
@@ -53,7 +53,11 @@ pub mod nr {
     /// receiving the reply's handles. Needs `SEND`; sent handles need
     /// `TRANSFER`.
     pub const IPC_CALL_MSG: u64 = 10;
-    /// `(server, message: *mut MessageDesc) -> 0` — needs `RECEIVE`.
+    /// `(server, message: *mut MessageDesc) -> (kind, badge)` — needs
+    /// `RECEIVE`. `kind` [`EVENT_CALL`](super::EVENT_CALL): a call through the client end with
+    /// `badge` (0 = unbadged), to be answered with `IPC_REPLY_MSG`.
+    /// [`EVENT_CLOSED`](super::EVENT_CLOSED) (ABI 5): the badged client end `badge` was closed;
+    /// the descriptor is not written and nothing is to be answered.
     pub const IPC_RECEIVE_MSG: u64 = 11;
     /// `(reply: *const MessageDesc) -> 0` — answers the pending call.
     pub const IPC_REPLY_MSG: u64 = 12;
@@ -61,7 +65,7 @@ pub mod nr {
     pub const MEMORY_CREATE: u64 = 13;
     /// `(handle, addr, prot) -> addr` — maps the whole object at `addr`
     /// (page-aligned; 0 = kernel chooses). Needs `MAP`, plus `READ`,
-    /// `WRITE`, `EXECUTE` for the requested [`prot`] bits.
+    /// `WRITE`, `EXECUTE` for the requested [`prot`](super::prot) bits.
     pub const MEMORY_MAP: u64 = 14;
     /// `(addr) -> 0` — removes the mapping that starts at `addr`.
     pub const MEMORY_UNMAP: u64 = 15;
@@ -69,7 +73,7 @@ pub mod nr {
     /// process_handle` — starts a process from the ELF image held in the
     /// memory object `image` (needs `READ`), moving `handles` (each needs
     /// `TRANSFER`) to it as its initial capabilities. `name` (ABI 3): 0, or
-    /// a pointer to a [`PROCESS_NAME_MAX`]-byte buffer holding a UTF-8 name,
+    /// a pointer to a [`PROCESS_NAME_MAX`](super::PROCESS_NAME_MAX)-byte buffer holding a UTF-8 name,
     /// zero-padded; the process is named `<parent>/<name>` in logs.
     pub const PROCESS_SPAWN: u64 = 16;
     /// `(process) -> (0, exit_code)` — blocks until the process exits.
@@ -100,7 +104,22 @@ pub mod nr {
     /// `(console, ptr, len) -> len` — writes raw bytes (no log prefix, no
     /// translation) to the console. Needs `WRITE`.
     pub const CONSOLE_WRITE: u64 = 24;
+
+    // ABI 5
+
+    /// `(server, badge) -> client_handle` — a new client end of the
+    /// endpoint carrying `badge` (non-zero). Needs `MANAGE` on the server
+    /// end. Its calls report the badge; closing it sends the server an
+    /// [`EVENT_CLOSED`](super::EVENT_CLOSED) event.
+    pub const ENDPOINT_MINT: u64 = 25;
+    /// `(memory) -> size` — the size in bytes of a memory object (a whole
+    /// number of pages). Needs any right on it.
+    pub const MEMORY_SIZE: u64 = 26;
 }
+
+/// `IPC_RECEIVE_MSG` result kinds.
+pub const EVENT_CALL: u64 = 0;
+pub const EVENT_CLOSED: u64 = 1;
 
 /// `MEMORY_MAP` protection bits. Writable and executable together are
 /// refused (`InvalidArgument`), and so is any mapping that would make one

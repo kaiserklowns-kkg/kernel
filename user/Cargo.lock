@@ -17,6 +17,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs"
+version = "0.1.0"
+dependencies = [
+ "oceans-fs-proto",
+ "oceans-rt",
+]
+
+[[package]]
 name = "hello-client"
 version = "0.1.0"
 dependencies = [
@@ -42,15 +50,28 @@ name = "oceans-abi"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-fs-proto"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
+]
+
+[[package]]
+name = "oceans-heap"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-rt"
 version = "0.1.0"
 dependencies = [
  "oceans-abi",
+ "oceans-heap",
 ]
 
 [[package]]
 name = "shell"
 version = "0.1.0"
 dependencies = [
+ "oceans-fs-proto",
  "oceans-rt",
 ]

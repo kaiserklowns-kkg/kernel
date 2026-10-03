@@ -17,7 +17,7 @@ controlled set of modern hardware instead of maximum compatibility.
 | 0 — Architecture | ADRs, system architecture, repo layout | **In progress** — see [docs/adr](docs/adr) |
 | 1 — Boot | Boot in QEMU, `OCEANS KERNEL ONLINE` | **Done** — `cargo xtask smoke` passes |
 | 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **Done** — ADRs 0008–0014; exit criterion (isolated processes exchanging IPC) passes in `cargo xtask smoke` |
-| 3 — Userspace | init, service manager, filesystem, shell | **In progress** — ABI v2 (0015); init + service manager (0016); console input (0017); **interactive shell (0018)**; next: filesystem service |
+| 3 — Userspace | init, service manager, filesystem, shell | **In progress** — ABI v2 (0015); init + service manager (0016); console input (0017); interactive shell (0018); filesystem service (0019); next: utilities, then Phase 4 hardware |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 
@@ -52,10 +52,10 @@ libs/frame-allocator/ host-testable buddy allocator for physical frames
 libs/heap/          host-testable slab + page-block kernel heap
 libs/capability/    host-testable capability tables, rights, revocation
 libs/scheduler/     host-testable scheduling policy (run queue, sleep, slices)
-libs/abi/           system call ABI (v4) shared by kernel and userspace
+libs/abi/           system call ABI (v5) shared by kernel and userspace
 libs/acpi/          validating ACPI parser (RSDP, RSDT/XSDT, MADT)
 libs/elf/           strict ELF64 executable parser
-user/               userspace: oceans-rt runtime, init (service manager), services, tests
+user/               userspace: oceans-rt runtime (+ heap), init, fs (+ fs-proto), shell, services, tests
 config/             services.conf (normal boots), services-smoke.conf (smoke tests)
 tools/xtask/       build, image and QEMU tooling (`cargo xtask`)
 docs/              architecture, ADRs, hardware, development guides

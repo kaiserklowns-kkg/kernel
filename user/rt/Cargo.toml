@@ -8,3 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 oceans-abi.workspace = true
+oceans-heap = { workspace = true, optional = true }
+
+[features]
+# A global allocator (Vec, String, BTreeMap…) backed by memory objects.
+alloc = ["dep:oceans-heap"]

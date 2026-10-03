@@ -98,7 +98,9 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Revoker => Rights::MANAGE.union(Rights::TRANSFER),
+        // MANAGE: mint badged client ends (ADR-0019).
         ObjectKind::EndpointServer => Rights::RECEIVE
+            .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::EndpointClient => Rights::SEND

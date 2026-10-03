@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 4 (`oceans-abi`, ADR-0014 to ADR-0017).
+//! System call dispatch, ABI version 5 (`oceans-abi`, ADR-0014 to ADR-0019).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -11,13 +11,14 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use oceans_abi::{
-    CONSOLE_IO_MAX, DEBUG_WRITE_MAX, Error, IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc,
-    PROCESS_NAME_MAX, SPAWN_MAX_IMAGE, nr, prot, start::MAX_INITIAL_HANDLES,
+    CONSOLE_IO_MAX, DEBUG_WRITE_MAX, EVENT_CALL, EVENT_CLOSED, Error, IPC_MAX_HANDLES,
+    IPC_MAX_INLINE, MessageDesc, PROCESS_NAME_MAX, SPAWN_MAX_IMAGE, nr, prot,
+    start::MAX_INITIAL_HANDLES,
 };
 use oceans_capability::{CapError, Handle, Rights};
 
 use crate::arch::{self, SyscallFrame};
-use crate::ipc::endpoint::Endpoint;
+use crate::ipc::endpoint::{Endpoint, Event};
 use crate::ipc::{IpcError, Message, Notification};
 use crate::object::{
     self, Capability, KernelObject, MemoryObject, ObjectError, ObjectKind, default_rights,
@@ -72,6 +73,8 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::SLEEP => sleep(a0),
         nr::CONSOLE_READ => console_read(&process, a0, a1, a2),
         nr::CONSOLE_WRITE => console_write(&process, a0, a1, a2),
+        nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
+        nr::MEMORY_SIZE => memory_size(&process, a0),
         _ => Err(Error::UnknownSyscall),
     };
     match result {
@@ -442,12 +445,20 @@ fn ipc_receive_msg(process: &Process, server: u64, desc_ptr: u64) -> SyscallResu
         )
     })
     .map_err(object_error)?;
-    let (request, token) = end.receive().map_err(ipc_error)?;
+    let event = end.receive_event().map_err(ipc_error)?;
     drop(end);
+    let (request, badge, token) = match event {
+        Event::Call {
+            request,
+            badge,
+            token,
+        } => (request, badge, token),
+        Event::Closed { badge } => return Ok((EVENT_CLOSED, badge)),
+    };
     let thread = sched::current();
     let previous = arch::without_interrupts(|| thread.pending_call().lock().replace(token));
     drop(previous);
-    deliver_message(process, request, desc_ptr).map(|()| (0, 0))
+    deliver_message(process, request, desc_ptr).map(|()| (EVENT_CALL, badge))
 }
 
 fn ipc_reply_msg(process: &Process, desc_ptr: u64) -> SyscallResult {
@@ -677,4 +688,42 @@ fn console_write(process: &Process, raw: u64, ptr: u64, len: u64) -> SyscallResu
         console::write(chunk);
     }
     Ok((len as u64, 0))
+}
+
+// ---- ABI 5 -----------------------------------------------------------------
+
+fn endpoint_mint(process: &Process, server: u64, badge: u64) -> SyscallResult {
+    if badge == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    let end = arch::without_interrupts(|| {
+        object::server_end(
+            &mut process.capabilities().lock(),
+            handle(server),
+            Rights::MANAGE,
+        )
+    })
+    .map_err(object_error)?;
+    let client = end.mint(badge);
+    drop(end);
+    let raw = insert(
+        process,
+        Capability::new(
+            KernelObject::EndpointClient(client),
+            default_rights(ObjectKind::EndpointClient),
+        ),
+    )?;
+    Ok((raw, 0))
+}
+
+fn memory_size(process: &Process, raw: u64) -> SyscallResult {
+    let memory = arch::without_interrupts(|| {
+        object::memory(
+            &mut process.capabilities().lock(),
+            handle(raw),
+            Rights::NONE,
+        )
+    })
+    .map_err(object_error)?;
+    Ok((memory.size(), 0))
 }

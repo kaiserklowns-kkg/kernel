@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 4).
+//! Minimal Oceans userspace runtime (ABI version 5).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -185,12 +185,18 @@ pub fn endpoint_create() -> Result<(Handle, Handle), Error> {
     call(nr::ENDPOINT_CREATE, [0; 6]).map(|(server, client)| (Handle(server), Handle(client)))
 }
 
-/// What a `*_msg` receive delivered.
+/// What a `*_msg` call or receive delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Received {
     pub label: u64,
     pub data_len: usize,
     pub handles_len: usize,
+    /// Receive only: the badge of the client end the call came through
+    /// (0 = unbadged), or of the end that was closed.
+    pub badge: u64,
+    /// Receive only (ABI 5): not a call but the close of badged end
+    /// `badge`; nothing was received and nothing is to be answered.
+    pub closed: bool,
 }
 
 fn send_desc(label: u64, data: &[u8], handles: &[Handle]) -> MessageDesc {
@@ -218,6 +224,8 @@ fn received(desc: &MessageDesc) -> Received {
         label: desc.label,
         data_len: desc.data_len as usize,
         handles_len: desc.handles_len as usize,
+        badge: 0,
+        closed: false,
     }
 }
 
@@ -245,18 +253,31 @@ pub fn ipc_call_msg(
     Ok(received(&reply))
 }
 
-/// Waits for a call on `server`, receiving its data and handles.
+/// Waits for a call on `server`, receiving its data and handles, or for
+/// the close of a badged client end (`Received::closed`).
 pub fn ipc_receive_msg(
     server: Handle,
     data: &mut [u8],
     handles: &mut [Handle],
 ) -> Result<Received, Error> {
     let mut desc = receive_desc(data, handles);
-    call(
+    let (kind, badge) = call(
         nr::IPC_RECEIVE_MSG,
         [server.0, &raw mut desc as u64, 0, 0, 0, 0],
     )?;
-    Ok(received(&desc))
+    if kind == oceans_abi::EVENT_CLOSED {
+        return Ok(Received {
+            label: 0,
+            data_len: 0,
+            handles_len: 0,
+            badge,
+            closed: true,
+        });
+    }
+    Ok(Received {
+        badge,
+        ..received(&desc)
+    })
 }
 
 /// Answers the pending call, moving `handles` to the caller.
@@ -388,6 +409,117 @@ pub fn console_write(console: Handle, bytes: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
+// ---- ABI 5 -----------------------------------------------------------------
+
+/// A new client end of the endpoint behind `server` carrying `badge`
+/// (non-zero; needs `MANAGE` on the server end).
+pub fn endpoint_mint(server: Handle, badge: u64) -> Result<Handle, Error> {
+    call(nr::ENDPOINT_MINT, [server.0, badge, 0, 0, 0, 0]).map(|(h, _)| Handle(h))
+}
+
+/// Size in bytes of a memory object.
+pub fn memory_size(memory: Handle) -> Result<u64, Error> {
+    call(nr::MEMORY_SIZE, [memory.0, 0, 0, 0, 0, 0]).map(|(size, _)| size)
+}
+
+/// The process heap (`alloc` feature): `oceans-heap` slab caches and page
+/// blocks (the same allocator as the kernel's, ADR-0010), backed by memory
+/// objects mapped at block-aligned addresses in a dedicated region.
+#[cfg(feature = "alloc")]
+mod heap {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::cell::UnsafeCell;
+    use core::ptr::{self, NonNull};
+
+    use oceans_heap::{Heap, PAGE_SIZE, PageSource};
+
+    use super::{Handle, close, memory_create, memory_map, memory_unmap, prot};
+
+    /// Heap blocks live here (inside the kernel's user mapping range,
+    /// away from where it places kernel-chosen mappings).
+    const REGION_START: u64 = 0x0000_4000_0000_0000;
+    const REGION_END: u64 = 0x0000_5000_0000_0000;
+    /// Live page blocks tracked at once (slabs are cached, so few).
+    const MAX_BLOCKS: usize = 1024;
+
+    struct Block {
+        address: u64,
+        memory: Handle,
+    }
+
+    struct MemoryObjects {
+        next: u64,
+        blocks: [Option<Block>; MAX_BLOCKS],
+    }
+
+    // SAFETY: blocks are fresh memory objects mapped read-write at an
+    // address aligned to their size, used by nothing else until freed.
+    unsafe impl PageSource for MemoryObjects {
+        fn allocate(&mut self, order: u8) -> Option<NonNull<u8>> {
+            let size = (PAGE_SIZE as u64) << order;
+            let address = self.next.next_multiple_of(size);
+            let end = address.checked_add(size)?;
+            if end > REGION_END {
+                return None;
+            }
+            let slot = self.blocks.iter().position(Option::is_none)?;
+            let memory = memory_create(size).ok()?;
+            if memory_map(memory, address, prot::READ | prot::WRITE).is_err() {
+                let _ = close(memory);
+                return None;
+            }
+            self.next = end;
+            self.blocks[slot] = Some(Block { address, memory });
+            NonNull::new(address as *mut u8)
+        }
+
+        unsafe fn free(&mut self, block: NonNull<u8>, _order: u8) {
+            let address = block.as_ptr() as u64;
+            let slot = self
+                .blocks
+                .iter()
+                .position(|b| b.as_ref().is_some_and(|b| b.address == address));
+            if let Some(Block { address, memory }) = slot.and_then(|i| self.blocks[i].take()) {
+                let _ = memory_unmap(address as *mut u8);
+                let _ = close(memory);
+            }
+        }
+    }
+
+    /// Processes are single-threaded (ADR-0014), so no locking is needed.
+    struct ProcessHeap(UnsafeCell<Heap<MemoryObjects>>);
+
+    // SAFETY: only one thread per process exists; there is no concurrent
+    // access to the heap.
+    unsafe impl Sync for ProcessHeap {}
+
+    #[global_allocator]
+    static HEAP: ProcessHeap = ProcessHeap(UnsafeCell::new(Heap::new(MemoryObjects {
+        next: REGION_START,
+        blocks: [const { None }; MAX_BLOCKS],
+    })));
+
+    // SAFETY: `oceans-heap` returns blocks that fit and are aligned for the
+    // layout, never handed out twice; access is single-threaded.
+    unsafe impl GlobalAlloc for ProcessHeap {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: single-threaded (see `Sync` impl).
+            let heap = unsafe { &mut *self.0.get() };
+            heap.allocate(layout)
+                .map_or(ptr::null_mut(), NonNull::as_ptr)
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: single-threaded; `ptr` came from `alloc` with `layout`.
+            unsafe {
+                if let Some(ptr) = NonNull::new(ptr) {
+                    (*self.0.get()).deallocate(ptr, layout);
+                }
+            }
+        }
+    }
+}
+
 /// Fixed-capacity text buffer for formatting without an allocator.
 pub struct Buffer<const N: usize> {
     bytes: [u8; N],
@@ -419,15 +551,20 @@ impl<const N: usize> Default for Buffer<N> {
 }
 
 impl<const N: usize> fmt::Write for Buffer<N> {
+    /// Appends as much of `s` as fits (cut at a character boundary); an
+    /// error reports that the text was truncated.
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let end = self
-            .len
-            .checked_add(s.len())
-            .filter(|&end| end <= N)
-            .ok_or(fmt::Error)?;
-        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
+        let mut take = s.len().min(N - self.len);
+        while !s.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+        self.len += take;
+        if take == s.len() {
+            Ok(())
+        } else {
+            Err(fmt::Error)
+        }
     }
 }
 

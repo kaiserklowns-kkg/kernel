@@ -3,7 +3,7 @@
 # user/.cargo/config.toml. Built by `cargo xtask`.
 [workspace]
 resolver = "3"
-members = ["rt", "init", "shell", "echo-service", "hello-client", "crasher", "ipc-test"]
+members = ["rt", "fs-proto", "init", "fs", "shell", "echo-service", "hello-client", "crasher", "ipc-test"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,7 +13,9 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oceans-abi = { path = "../libs/abi" }
+oceans-heap = { path = "../libs/heap" }
 oceans-rt = { path = "rt" }
+oceans-fs-proto = { path = "fs-proto" }
 
 [profile.release]
 debug = 1

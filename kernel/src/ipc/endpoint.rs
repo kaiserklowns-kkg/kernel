@@ -1,15 +1,21 @@
-//! Endpoints: synchronous call/reply between a client and a server.
+//! Endpoints: synchronous call/reply between clients and a server.
 //!
-//! An endpoint has one [`ServerEnd`] (receive, needs `RECEIVE`) and one
-//! [`ClientEnd`] (call, needs `SEND`), each shared by capability. Closing all
-//! capabilities to one end fails the other side with `PeerClosed` instead of
-//! leaving it blocked forever.
+//! An endpoint has one [`ServerEnd`] (receive, needs `RECEIVE`) and any
+//! number of [`ClientEnd`]s (call, needs `SEND`), each shared by capability.
+//! When the server end goes, calls fail with `PeerClosed`; when the last
+//! client end goes, `receive` does, so nobody blocks forever.
 //!
 //! A call blocks the client until the reply. If a server is already waiting
 //! in `receive`, the caller switches straight to it (direct switch); the
 //! reply makes the client runnable again. Each received call yields a
 //! single-use [`ReplyToken`]; dropping it unanswered fails the call with
 //! `NoReply`.
+//!
+//! **Badges** (ADR-0019): the server can mint extra client ends that carry a
+//! non-zero badge. Calls report the badge of the end they came through, so
+//! one endpoint can stand for many objects (e.g. open files). When a badged
+//! end is closed, the server receives a close event for its badge, so it can
+//! release per-handle state.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -22,6 +28,7 @@ use crate::sched::{self, Thread};
 
 struct Call {
     caller: Arc<Thread>,
+    badge: u64,
     request: Option<Message>,
     reply: Option<Result<Message, IpcError>>,
 }
@@ -33,8 +40,11 @@ struct State {
     receivers: VecDeque<Arc<Thread>>,
     /// Calls not yet received; their callers are blocked.
     pending: VecDeque<CallSlot>,
+    /// Badges of closed client ends, not yet reported to the server.
+    closed: VecDeque<u64>,
     server_open: bool,
-    client_open: bool,
+    /// Live client ends.
+    clients: usize,
 }
 
 pub struct Endpoint {
@@ -42,21 +52,22 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// A new endpoint, returned as its two ends.
+    /// A new endpoint, returned as its server end and an unbadged client end.
     pub fn create() -> (Arc<ServerEnd>, Arc<ClientEnd>) {
         let endpoint = Arc::new(Self {
             state: Mutex::new(State {
                 receivers: VecDeque::new(),
                 pending: VecDeque::new(),
+                closed: VecDeque::new(),
                 server_open: true,
-                client_open: true,
+                clients: 1,
             }),
         });
         (
             Arc::new(ServerEnd {
                 endpoint: endpoint.clone(),
             }),
-            Arc::new(ClientEnd { endpoint }),
+            Arc::new(ClientEnd { endpoint, badge: 0 }),
         )
     }
 }
@@ -67,6 +78,7 @@ pub struct ServerEnd {
 
 pub struct ClientEnd {
     endpoint: Arc<Endpoint>,
+    badge: u64,
 }
 
 impl core::fmt::Debug for ServerEnd {
@@ -77,8 +89,24 @@ impl core::fmt::Debug for ServerEnd {
 
 impl core::fmt::Debug for ClientEnd {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("ClientEnd")
+        write!(f, "ClientEnd(badge {})", self.badge)
     }
+}
+
+/// What `ServerEnd::receive_event` delivers.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "short-lived stack value; boxing would add an allocation to every receive"
+)]
+pub enum Event {
+    /// A call through a client end with `badge` (0 = unbadged).
+    Call {
+        request: Message,
+        badge: u64,
+        token: ReplyToken,
+    },
+    /// The last capability to the client end with `badge` was closed.
+    Closed { badge: u64 },
 }
 
 impl ClientEnd {
@@ -91,6 +119,7 @@ impl ClientEnd {
         arch::without_interrupts(|| {
             let slot = Arc::new(Mutex::new(Call {
                 caller: sched::current(),
+                badge: self.badge,
                 request: Some(request),
                 reply: None,
             }));
@@ -113,19 +142,38 @@ impl ClientEnd {
 }
 
 impl ServerEnd {
-    /// Blocks until a call arrives. Returns the request and the token that
-    /// answers it.
-    pub fn receive(&self) -> Result<(Message, ReplyToken), IpcError> {
+    /// A new client end carrying `badge` (non-zero).
+    pub fn mint(&self, badge: u64) -> Arc<ClientEnd> {
+        debug_assert_ne!(badge, 0);
+        arch::without_interrupts(|| self.endpoint.state.lock().clients += 1);
+        Arc::new(ClientEnd {
+            endpoint: self.endpoint.clone(),
+            badge,
+        })
+    }
+
+    /// Blocks until a call or a close event arrives.
+    pub fn receive_event(&self) -> Result<Event, IpcError> {
         arch::without_interrupts(|| {
             loop {
                 {
                     let mut state = self.endpoint.state.lock();
                     if let Some(slot) = state.pending.pop_front() {
-                        let request = slot.lock().request.take();
+                        let (request, badge) = {
+                            let mut call = slot.lock();
+                            (call.request.take(), call.badge)
+                        };
                         let request = request.expect("pending call has a request");
-                        return Ok((request, ReplyToken { slot: Some(slot) }));
+                        return Ok(Event::Call {
+                            request,
+                            badge,
+                            token: ReplyToken { slot: Some(slot) },
+                        });
                     }
-                    if !state.client_open {
+                    if let Some(badge) = state.closed.pop_front() {
+                        return Ok(Event::Closed { badge });
+                    }
+                    if state.clients == 0 {
                         return Err(IpcError::PeerClosed);
                     }
                     state.receivers.push_back(sched::current());
@@ -133,6 +181,16 @@ impl ServerEnd {
                 sched::block();
             }
         })
+    }
+
+    /// Blocks until a call arrives (close events are skipped). Returns the
+    /// request and the token that answers it.
+    pub fn receive(&self) -> Result<(Message, ReplyToken), IpcError> {
+        loop {
+            if let Event::Call { request, token, .. } = self.receive_event()? {
+                return Ok((request, token));
+            }
+        }
     }
 }
 
@@ -142,6 +200,7 @@ impl Drop for ServerEnd {
             let pending = {
                 let mut state = self.endpoint.state.lock();
                 state.server_open = false;
+                state.closed.clear();
                 core::mem::take(&mut state.pending)
             };
             for slot in pending {
@@ -156,10 +215,17 @@ impl Drop for ClientEnd {
         arch::without_interrupts(|| {
             let receivers = {
                 let mut state = self.endpoint.state.lock();
-                state.client_open = false;
-                core::mem::take(&mut state.receivers)
+                state.clients -= 1;
+                if state.clients == 0 {
+                    // They re-check, see no clients left and fail.
+                    core::mem::take(&mut state.receivers)
+                } else if self.badge != 0 && state.server_open {
+                    state.closed.push_back(self.badge);
+                    state.receivers.pop_front().into_iter().collect()
+                } else {
+                    VecDeque::new()
+                }
             };
-            // They re-check, see the closed client end and fail.
             for server in receivers {
                 sched::wake(server);
             }
@@ -371,6 +437,45 @@ pub fn self_test() {
     wait_for(&SILENT_DONE, "silent server exit");
     let outcome = client_end.call(Message::new(PING, &[]).expect("fits"));
     assert_eq!(outcome.err(), Some(IpcError::PeerClosed));
+
+    // 6. Badges: calls report the minted end's badge; closing it sends a
+    //    close event; the unbadged end's close sends none.
+    static BADGES_SEEN: AtomicU64 = AtomicU64::new(0);
+    static BADGE_DONE: AtomicBool = AtomicBool::new(false);
+    fn badge_server(arg: usize) {
+        // SAFETY: as for `server`.
+        let end = unsafe { Box::from_raw(arg as *mut Arc<ServerEnd>) };
+        // Expected sequence: call with badge 7, close of 7, then PeerClosed.
+        let mut log = 0u64;
+        loop {
+            match end.receive_event() {
+                Ok(Event::Call { badge, token, .. }) => {
+                    log = log * 10 + badge;
+                    token.reply(Message::new(PING, &[]).expect("fits"));
+                }
+                Ok(Event::Closed { badge }) => log = log * 10 + 100 + badge,
+                Err(_) => break,
+            }
+        }
+        BADGES_SEEN.store(log, Ordering::Relaxed);
+        BADGE_DONE.store(true, Ordering::Release);
+    }
+    let (server_end, unbadged) = Endpoint::create();
+    let badged = server_end.mint(7);
+    sched::spawn(
+        "ipc-badges",
+        badge_server,
+        Box::into_raw(Box::new(server_end)) as usize,
+    )
+    .expect("spawn badge server");
+    badged
+        .call(Message::new(PING, &[]).expect("fits"))
+        .expect("badged call");
+    drop(badged);
+    drop(unbadged);
+    wait_for(&BADGE_DONE, "badge server exit");
+    // 7 (call), then 107 (close of 7): 7 * 10 + 107 = 177.
+    assert_eq!(BADGES_SEEN.load(Ordering::Relaxed), 177);
 
     klog::info!("endpoint self-test passed");
 }

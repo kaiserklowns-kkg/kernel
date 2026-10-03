@@ -49,7 +49,8 @@ Add `--release` to `build`, `image`, `run` or `smoke` for an optimised kernel.
 Services are configured in `config/services.conf` (ADR-0016).
 The last service is the shell: type `help` at the `oceans>` prompt. Programs
 get only the authority you list, e.g. `run hello-client log use:echo`
-(ADR-0018). Quit QEMU with Ctrl+A, X.
+(ADR-0018). Files: `ls /bin`, `mkdir /docs`, `write /docs/a hi`, `cat /docs/a`
+(ADR-0019). Quit QEMU with Ctrl+A, X.
 `cargo xtask smoke` adds `oceans.test=smoke` to the command line: the kernel
 then also runs its self-tests and exits QEMU with the result. Normal boots run
 no tests. Pass `-cpu max` to QEMU to exercise SMEP/SMAP/UMIP and 1 GiB pages.
