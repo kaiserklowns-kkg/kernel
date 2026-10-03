@@ -6,7 +6,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
@@ -32,16 +32,16 @@ const USER_PROGRAMS: &[&str] = &[
     "virtio-blk",
     "ipc-test",
 ];
-/// The virtio disk QEMU attaches (ADR-0021). `run` keeps its disk across
-/// boots (it is the system's storage); `smoke` starts from a fresh one with
-/// a known first sector and checks the guest's write on the host after.
+/// The virtio disk QEMU attaches (ADR-0021), holding the filesystem
+/// (ADR-0022). `run` keeps its disk across boots: it is the system's
+/// storage. `smoke` starts from a fresh blank disk, boots twice, and mounts
+/// the result on the host.
 const DISK_IMAGE: &str = "build/disk.img";
 const SMOKE_DISK_IMAGE: &str = "build/smoke-disk.img";
 const DISK_SIZE: u64 = 8 * 1024 * 1024;
-const SECTOR_SIZE: usize = 512;
-const SMOKE_DISK_LABEL: &[u8] = b"OCEANS TEST DISK";
-/// What the smoke script writes to sector 1 through the driver.
-const SMOKE_DISK_WRITE: &[u8] = b"written by oceans";
+/// What the first smoke boot stores and the second reads back.
+const KEPT_PATH: [&str; 2] = ["keep", "note.txt"];
+const KEPT_TEXT: &str = "kept across reboots";
 /// Service manifests for init: normal boots and smoke tests.
 const MANIFEST: &str = "config/services.conf";
 const SMOKE_MANIFEST: &str = "config/services-smoke.conf";
@@ -86,16 +86,37 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"hello-client\r\n",
     b"run nosuch\r\n",
     b"frobnicate\r\n",
-    // Devices and the userspace disk driver (ADR-0021).
+    // Devices (ADR-0021). Raw disk access is the filesystem's alone.
     b"lspci\r\n",
     b"run lspci out devices\r\n",
     b"run disk out\r\n",
     b"run disk out use:block -- info\r\n",
-    b"run disk out use:block -- read 0\r\n",
-    b"run disk out use:block -- write 1 written by oceans\r\n",
-    b"run disk out use:block -- read 1\r\n",
-    b"run disk out use:block -- read 99999999\r\n",
+    // Files on disk (ADR-0022), read back by the second boot.
+    b"mkdir /keep\r\n",
+    b"write /keep/note.txt kept across reboots\r\n",
+    b"write /keep/gone.txt temporary\r\n",
+    b"rm /keep/gone.txt\r\n",
+    b"sync\r\n",
     b"exit\r\n",
+];
+/// The second smoke boot, on the disk the first one left.
+const REBOOT_SCRIPT: &[&[u8]] = &[
+    b"cat /keep/note.txt\r\n",
+    b"ls /keep\r\n",
+    b"ls /\r\n",
+    b"write /bin/evil x\r\n",
+    b"uname\r\n",
+    b"exit\r\n",
+];
+const REBOOT_EXPECT: &[Expect] = &[
+    Expect::Contains("fs: mounted the disk: generation"),
+    Expect::Line("kept across reboots"),
+    Expect::Line("  note.txt"),
+    Expect::Line("  keep/"),
+    Expect::Line("  docs/"),
+    Expect::Line("  bin/"),
+    Expect::Contains("write: /bin/evil: permission denied"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 7)"),
 ];
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
@@ -129,11 +150,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("8086:29c0  host bridge"),
     Expect::Contains("1af4:1042  mass storage  (driver attached)"),
     Expect::Contains("disk: needs the block capability"),
-    Expect::Line("disk: 16384 sectors of 512 bytes (8 MiB)"),
-    Expect::Line("OCEANS TEST DISK"),
-    Expect::Line("disk: wrote sector 1"),
-    Expect::Line("written by oceans"),
-    Expect::Line("disk: out of range"),
+    Expect::Contains("run: use:block: this shell does not hold it"),
+    Expect::Contains("fs: formatted a blank disk"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -403,16 +421,15 @@ fn copy(from: &Path, to: &Path) -> Result {
         .map_err(|e| format!("cannot copy {} to {}: {e}", from.display(), to.display()))
 }
 
-/// Creates a zero-filled disk image whose first sector holds `label`
-/// (replacing an existing one only if `fresh`).
-fn prepare_disk(path: &str, label: &[u8], fresh: bool) -> Result {
+/// Creates a blank (zero-filled) disk image, which the filesystem formats
+/// on first use; an existing one is replaced only if `fresh`.
+fn prepare_disk(path: &str, fresh: bool) -> Result {
     let path = root().join(path);
     if path.is_file() && !fresh {
         return Ok(());
     }
-    let mut bytes = vec![0u8; DISK_SIZE as usize];
-    bytes[..label.len()].copy_from_slice(label);
-    fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    fs::write(&path, vec![0u8; DISK_SIZE as usize])
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 fn qemu_command(headless: bool, disk: &str) -> Result<Command> {
@@ -513,14 +530,35 @@ fn find_firmware(qemu: &Path) -> Result<PathBuf> {
 
 fn run(profile: Profile) -> Result {
     build_image(profile, None)?;
-    prepare_disk(DISK_IMAGE, b"Oceans data disk", false)?;
+    prepare_disk(DISK_IMAGE, false)?;
     run_command(&mut qemu_command(false, DISK_IMAGE)?)
 }
 
 fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
-    prepare_disk(SMOKE_DISK_IMAGE, SMOKE_DISK_LABEL, true)?;
+    prepare_disk(SMOKE_DISK_IMAGE, true)?;
+    println!("smoke boot 1 of 2: blank disk");
+    smoke_boot(SHELL_SCRIPT, SHELL_EXPECT)?;
+    println!("smoke boot 2 of 2: the same disk");
+    smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT)?;
+    check_smoke_disk()?;
+    println!("smoke test passed: kernel came online, files survived a reboot");
+    Ok(())
+}
 
+/// What the guest's console showed.
+enum Console {
+    Line(String),
+    /// The shell's prompt: it waits for the next command.
+    Prompt,
+}
+
+const SHELL_PROMPT: &[u8] = b"oceans> ";
+
+/// One headless boot: types `script` into the shell, one command per
+/// prompt, and requires every `expected` line, the online banner and a
+/// successful exit.
+fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let mut child = qemu_command(true, SMOKE_DISK_IMAGE)?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -529,33 +567,49 @@ fn smoke(profile: Profile) -> Result {
     let mut serial_input = child.stdin.take().expect("stdin is piped");
 
     let stdout = child.stdout.take().expect("stdout is piped");
-    let (lines_tx, lines_rx) = mpsc::channel();
+    let (events_tx, events_rx) = mpsc::channel();
     thread::spawn(move || {
-        for line in BufReader::new(stdout)
-            .lines()
+        // Bytes, not lines: the prompt has no line ending.
+        let mut line = Vec::new();
+        for byte in BufReader::new(stdout)
+            .bytes()
             .map_while(std::io::Result::ok)
         {
-            if lines_tx.send(line).is_err() {
-                break;
+            if byte == b'\n' {
+                let text = String::from_utf8_lossy(&line).into_owned();
+                line.clear();
+                if events_tx.send(Console::Line(text)).is_err() {
+                    break;
+                }
+            } else {
+                line.push(byte);
+                if line.ends_with(SHELL_PROMPT) && events_tx.send(Console::Prompt).is_err() {
+                    break;
+                }
             }
         }
     });
 
     let deadline = Instant::now() + SMOKE_TIMEOUT;
     let mut online = false;
-    let mut unmet: Vec<Expect> = SHELL_EXPECT.to_vec();
+    let mut ready = false;
+    let mut commands = script.iter();
+    let mut unmet: Vec<Expect> = expected.to_vec();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        match lines_rx.recv_timeout(remaining) {
-            Ok(line) => {
+        match events_rx.recv_timeout(remaining) {
+            Ok(Console::Line(line)) => {
                 println!("  | {line}");
                 online |= line.contains(ONLINE_BANNER);
+                ready |= line.contains(SHELL_READY);
                 unmet.retain(|expect| !expect.matches(&line));
-                if line.contains(SHELL_READY) {
-                    // Typed into the guest's serial port (QEMU -serial stdio).
-                    // Paced like typing: the 16-byte UART FIFO overflows if a
-                    // whole script arrives while the guest is busy printing.
-                    for &byte in SHELL_SCRIPT.iter().flat_map(|command| command.iter()) {
+            }
+            // One command per prompt: typing while the guest (or QEMU, during
+            // a disk flush) is busy overflows the 16-byte UART FIFO, because
+            // QEMU's Windows stdio backend ignores backpressure.
+            Ok(Console::Prompt) if ready => {
+                if let Some(command) = commands.next() {
+                    for &byte in *command {
                         serial_input
                             .write_all(&[byte])
                             .and_then(|()| serial_input.flush())
@@ -564,6 +618,7 @@ fn smoke(profile: Profile) -> Result {
                     }
                 }
             }
+            Ok(Console::Prompt) => {}
             // Reader finished: QEMU closed stdout, i.e. exited.
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -581,12 +636,8 @@ fn smoke(profile: Profile) -> Result {
     if !unmet.is_empty() {
         return Err(format!("shell output missing: {unmet:?}"));
     }
-    check_smoke_disk()?;
     match (online, status.code()) {
-        (true, Some(QEMU_EXIT_SUCCESS)) => {
-            println!("smoke test passed: kernel came online");
-            Ok(())
-        }
+        (true, Some(QEMU_EXIT_SUCCESS)) => Ok(()),
         (false, _) => Err(format!(
             "kernel never printed `{ONLINE_BANNER}` (QEMU {status})"
         )),
@@ -594,22 +645,72 @@ fn smoke(profile: Profile) -> Result {
     }
 }
 
-/// The guest's write must have reached the disk image through the driver's
-/// DMA: sector 1 holds exactly the text, zero-padded.
+/// A disk image file as a block device, for mounting on the host.
+struct ImageFile(Vec<u8>);
+
+impl oceans_volume::BlockDevice for ImageFile {
+    fn block_count(&self) -> u64 {
+        (self.0.len() / oceans_volume::BLOCK_SIZE) as u64
+    }
+
+    fn read_block(
+        &mut self,
+        block: u64,
+        out: &mut oceans_volume::BlockBuf,
+    ) -> std::result::Result<(), oceans_volume::IoError> {
+        let at = block as usize * oceans_volume::BLOCK_SIZE;
+        let bytes = self.0.get(at..at + oceans_volume::BLOCK_SIZE);
+        out.copy_from_slice(bytes.ok_or(oceans_volume::IoError)?);
+        Ok(())
+    }
+
+    fn write_block(
+        &mut self,
+        _: u64,
+        _: &oceans_volume::BlockBuf,
+    ) -> std::result::Result<(), oceans_volume::IoError> {
+        Err(oceans_volume::IoError) // read-only inspection
+    }
+
+    fn flush(&mut self) -> std::result::Result<(), oceans_volume::IoError> {
+        Ok(())
+    }
+}
+
+/// Mounts the smoke disk on the host with the same volume code: the file
+/// the guest kept must be there with its text, and the removed one gone.
 fn check_smoke_disk() -> Result {
+    use oceans_volume::{ROOT, Volume};
+
     let path = root().join(SMOKE_DISK_IMAGE);
-    let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let sector = bytes
-        .get(SECTOR_SIZE..2 * SECTOR_SIZE)
-        .ok_or("smoke disk image is truncated")?;
-    let written = sector.starts_with(SMOKE_DISK_WRITE)
-        && sector[SMOKE_DISK_WRITE.len()..].iter().all(|&b| b == 0);
-    if !written {
+    let image = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let (mut volume, _) = Volume::open(ImageFile(image), false)
+        .map_err(|e| format!("{} does not mount on the host: {e:?}", path.display()))?;
+    let lookup = |volume: &Volume<ImageFile>, dir, name| {
+        volume
+            .lookup(dir, name)
+            .map_err(|e| format!("/{}: {e:?}", KEPT_PATH.join("/")))
+    };
+    let keep = lookup(&volume, ROOT, KEPT_PATH[0])?;
+    let note = lookup(&volume, keep, KEPT_PATH[1])?;
+    let mut text = vec![0u8; volume.size(note).map_err(|e| format!("{e:?}"))? as usize];
+    volume
+        .read(note, 0, &mut text)
+        .map_err(|e| format!("reading the kept file: {e:?}"))?;
+    // The shell's `write` ends the text with a newline.
+    if text != format!("{KEPT_TEXT}\n").as_bytes() {
         return Err(format!(
-            "sector 1 of {} does not hold the guest's write",
-            path.display()
+            "kept file holds {:?}",
+            String::from_utf8_lossy(&text)
         ));
     }
-    println!("disk write verified on the host");
+    if volume.lookup(keep, "gone.txt").is_ok() {
+        return Err("a removed file is still on the disk".into());
+    }
+    println!(
+        "disk verified on the host: generation {}, /{} intact",
+        volume.generation(),
+        KEPT_PATH.join("/")
+    );
     Ok(())
 }

@@ -20,8 +20,10 @@ dependencies = [
 name = "fs"
 version = "0.1.0"
 dependencies = [
+ "oceans-block-proto",
  "oceans-fs-proto",
  "oceans-rt",
+ "oceans-volume",
 ]
 
 [[package]]
@@ -78,6 +80,10 @@ dependencies = [
  "oceans-abi",
  "oceans-heap",
 ]
+
+[[package]]
+name = "oceans-volume"
+version = "0.1.0"
 
 [[package]]
 name = "shell"

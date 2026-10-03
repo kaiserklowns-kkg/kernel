@@ -11,6 +11,10 @@
 //! Requests are IPC calls on the node handle. Labels select the operation;
 //! replies carry a [`Status`] label. Data is inline (at most
 //! [`MAX_DATA`] bytes per call).
+//!
+//! Durability (ADR-0022): creating and removing entries is durable when the
+//! call returns; file contents when the handle that changed them closes, or
+//! at [`op::SYNC`].
 
 #![no_std]
 
@@ -32,6 +36,8 @@ pub mod op {
     pub const REMOVE: u64 = 6;
     /// data = `[size u64]`.
     pub const TRUNCATE: u64 = 7;
+    /// Makes every change so far durable (ADR-0022).
+    pub const SYNC: u64 = 8;
 }
 
 /// `OPEN` flags.
@@ -85,6 +91,8 @@ pub enum Status {
     NoSpace = 8,
     /// Malformed request.
     BadRequest = 9,
+    /// The disk failed (ADR-0022).
+    IoError = 10,
 }
 
 impl Status {
@@ -99,6 +107,7 @@ impl Status {
             6 => Self::PermissionDenied,
             7 => Self::InvalidName,
             8 => Self::NoSpace,
+            10 => Self::IoError,
             _ => Self::BadRequest,
         }
     }
@@ -115,6 +124,7 @@ impl Status {
             Self::InvalidName => "invalid name",
             Self::NoSpace => "no space",
             Self::BadRequest => "bad request",
+            Self::IoError => "I/O error",
         }
     }
 }
@@ -309,6 +319,11 @@ impl Node {
     pub fn truncate(&self, size: u64) -> Result<(), FsError> {
         self.request(op::TRUNCATE, &size.to_le_bytes(), &mut [], &mut [])
             .map(drop)
+    }
+
+    /// Makes every change in the filesystem durable now.
+    pub fn sync(&self) -> Result<(), FsError> {
+        self.request(op::SYNC, &[], &mut [], &mut []).map(drop)
     }
 
     /// Closes the handle (the service then forgets it).

@@ -51,10 +51,11 @@ Services are configured in `config/services.conf` (ADR-0016). Try `ps`, `mem`,
 The last service is the shell: type `help` at the `oceans>` prompt. Programs
 get only the authority you list, e.g. `run hello-client log use:echo`
 (ADR-0018). Files: `ls /bin`, `mkdir /docs`, `write /docs/a hi`, `cat /docs/a`
-(ADR-0019). The disk: `run disk out use:block -- info`, `... -- write 1 hello`,
-`... -- read 1`, and `run lspci out devices` (ADR-0021). `cargo xtask run`
-attaches `build/disk.img` (8 MiB, created on first run and kept across boots);
-delete it to start over. Quit QEMU with Ctrl+A, X.
+(ADR-0019). Files live on disk (ADR-0022): `cargo xtask run` attaches
+`build/disk.img` (8 MiB, blank on first run, formatted by the filesystem and
+kept across boots; delete it to start over). File contents are durable once
+the command that wrote them finishes; `sync` forces a commit. Devices:
+`run lspci out devices` (ADR-0021). Quit QEMU with Ctrl+A, X.
 `cargo xtask smoke` adds `oceans.test=smoke` to the command line: the kernel
 then also runs its self-tests and exits QEMU with the result. Normal boots run
 no tests. Pass `-cpu max` to QEMU to exercise SMEP/SMAP/UMIP and 1 GiB pages.

@@ -4,6 +4,8 @@
 - Date: 2026-10-03
 - Depends on: ADR-0011 (capabilities), ADR-0016 (init), ADR-0017 (ACPI)
 - Adds: ABI v7 (`DEVICE_*`, syscalls 28–34; errors `NotFound`, `Busy`); starts Phase 4
+- Amended by: ADR-0022. The filesystem, not the shell, now holds
+  `use = block`.
 
 ## Context
 

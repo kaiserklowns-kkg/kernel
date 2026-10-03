@@ -87,8 +87,15 @@ name = "oceans-scheduler"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-volume"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-xtask"
 version = "0.1.0"
+dependencies = [
+ "oceans-volume",
+]
 
 [[package]]
 name = "rustversion"

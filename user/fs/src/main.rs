@@ -1,5 +1,6 @@
-//! The Oceans filesystem service (ADR-0019): an in-memory filesystem
-//! speaking `oceans-fs-proto`.
+//! The Oceans filesystem service (ADR-0019, ADR-0022): speaks
+//! `oceans-fs-proto` and keeps files on disk in an OceansFS volume
+//! (`oceans-volume`).
 //!
 //! - Every open node is a badged client end minted by this service; the
 //!   badge indexes the open-handle table, which records the node and the
@@ -8,11 +9,20 @@
 //! - When a handle is closed anywhere, the kernel sends a close event, and
 //!   its entry is dropped. A node is freed once it is unlinked and no handle
 //!   refers to it.
-//! - Program images granted with `grant = module:NAME` are published
-//!   read-only under `/bin`.
-//! - Quotas bound memory use: node count, file size, total bytes.
+//! - **Storage.** With `use = block` the volume lives on that disk. A blank
+//!   disk is formatted; a disk holding anything else, or a damaged volume,
+//!   is left untouched and files stay in memory. Durability:
+//!   - creating and removing entries is committed before the reply;
+//!   - file contents are committed when the handle that wrote them closes,
+//!     or on `SYNC`.
 //!
-//! Manifest grants: `log`, `provide = fs`, any `module:NAME`.
+//!   Each commit is atomic, so a crash loses at most uncommitted changes and
+//!   never corrupts the volume.
+//! - Program images granted with `grant = module:NAME` are published
+//!   read-only under `/bin`, in memory only: they come from the boot image.
+//!
+//! Manifest grants: `log`, `provide = fs`, `use = block` (optional), any
+//! `module:NAME`.
 
 #![no_std]
 #![no_main]
@@ -20,55 +30,63 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use oceans_fs_proto::{Kind, MAX_DATA, MAX_NAME, Status, flags, op, valid_name};
-use oceans_rt::{Buffer, Error, Handle, Start, prot};
+use oceans_block_proto::{Disk, SECTOR_SIZE};
+use oceans_fs_proto::{Kind, MAX_DATA, MAX_NAME, Status, flags, op};
+use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot};
+use oceans_volume::{
+    BLOCK_SIZE, BlockBuf, BlockDevice, FsError, IoError, MountError, NodeId, Opened, ROOT, Volume,
+};
 
 oceans_rt::entry!(main);
 
-const ROOT: usize = 0;
-const MAX_NODES: usize = 4096;
-const MAX_FILE_SIZE: usize = 16 * 1024 * 1024;
-const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+const SECTORS_PER_BLOCK: u32 = (BLOCK_SIZE / SECTOR_SIZE) as u32;
 
-enum Content {
-    File(Vec<u8>),
-    Directory(BTreeMap<String, usize>),
+/// The volume's disk: a block-service session with a one-block buffer.
+struct DiskDevice {
+    disk: Disk,
+    blocks: u64,
 }
 
-struct Node {
-    content: Content,
-    read_only: bool,
-    /// Whether a directory entry refers to the node (the root always does).
-    linked: bool,
-    /// Open handles referring to the node.
-    opens: u32,
-}
+impl BlockDevice for DiskDevice {
+    fn block_count(&self) -> u64 {
+        self.blocks
+    }
 
-impl Node {
-    fn kind(&self) -> Kind {
-        match self.content {
-            Content::File(_) => Kind::File,
-            Content::Directory(_) => Kind::Directory,
-        }
+    fn read_block(&mut self, block: u64, out: &mut BlockBuf) -> Result<(), IoError> {
+        let sector = block * u64::from(SECTORS_PER_BLOCK);
+        self.disk
+            .read(sector, SECTORS_PER_BLOCK, 0)
+            .map_err(|_| IoError)?;
+        out.copy_from_slice(&self.disk.buffer()[..BLOCK_SIZE]);
+        Ok(())
+    }
+
+    fn write_block(&mut self, block: u64, data: &BlockBuf) -> Result<(), IoError> {
+        self.disk.buffer()[..BLOCK_SIZE].copy_from_slice(data);
+        let sector = block * u64::from(SECTORS_PER_BLOCK);
+        self.disk
+            .write(sector, SECTORS_PER_BLOCK, 0)
+            .map_err(|_| IoError)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        self.disk.flush().map_err(|_| IoError)
     }
 }
 
 #[derive(Clone, Copy)]
 struct Open {
-    node: usize,
+    node: NodeId,
     writable: bool,
 }
 
 struct Fs {
     server: Handle,
-    nodes: Vec<Option<Node>>,
-    free_slots: Vec<usize>,
-    live_nodes: usize,
-    file_bytes: usize,
+    log: Handle,
+    volume: Volume<DiskDevice>,
     handles: BTreeMap<u64, Open>,
     next_badge: u64,
 }
@@ -99,50 +117,53 @@ impl Reply {
     }
 }
 
+fn status(error: FsError) -> Status {
+    match error {
+        FsError::NotFound => Status::NotFound,
+        FsError::Exists => Status::Exists,
+        FsError::NotADirectory => Status::NotADirectory,
+        FsError::IsADirectory => Status::IsADirectory,
+        FsError::NotEmpty => Status::NotEmpty,
+        FsError::ReadOnly => Status::PermissionDenied,
+        FsError::InvalidName => Status::InvalidName,
+        FsError::NoSpace => Status::NoSpace,
+        FsError::Io => Status::IoError,
+    }
+}
+
+fn kind(kind: oceans_volume::Kind) -> Kind {
+    match kind {
+        oceans_volume::Kind::File => Kind::File,
+        oceans_volume::Kind::Directory => Kind::Directory,
+    }
+}
+
+fn say(log: Handle, args: core::fmt::Arguments<'_>) {
+    let mut line = Buffer::<160>::new();
+    let _ = line.write_str("fs: ");
+    let _ = line.write_fmt(args);
+    let _ = oceans_rt::debug_write(log, line.as_str());
+}
+
 fn main(start: Start) -> i64 {
-    let Some(&directory) = start.handles.last() else {
-        return 1;
-    };
-    let Some(grants) = map_text(directory) else {
+    let Some(directory) = Directory::from_start(&start) else {
         return 2;
     };
-    let find = |kind: &str| {
-        grants.lines().find_map(|line| {
-            let mut words = line.split_whitespace();
-            let index: usize = words.next()?.parse().ok()?;
-            (words.next()? == kind).then(|| start.handles.get(index).copied())?
-        })
-    };
-    let (Some(log), Some(server)) = (find("log"), find("provide")) else {
+    let (Some(log), Some(server)) = (directory.find("log", "log"), directory.find_kind("provide"))
+    else {
         return 3;
     };
 
-    let mut fs = Fs::new(server);
-    let bin = fs.create(ROOT, "bin", Content::Directory(BTreeMap::new()), true);
-    let mut published = 0;
-    for line in grants.lines() {
-        let mut words = line.split_whitespace();
-        let (Some(index), Some("module"), Some(name)) = (words.next(), words.next(), words.next())
-        else {
-            continue;
-        };
-        let Some(&memory) = index
-            .parse::<usize>()
-            .ok()
-            .and_then(|i| start.handles.get(i))
-        else {
-            continue;
-        };
-        if let (Some(bin), Some(bytes)) = (bin, read_memory(memory))
-            && fs.create(bin, name, Content::File(bytes), true).is_some()
-        {
-            published += 1;
-        }
-        let _ = oceans_rt::close(memory);
-    }
-    let mut line = Buffer::<128>::new();
-    let _ = write!(line, "fs: ready, {published} programs in /bin");
-    let _ = oceans_rt::debug_write(log, line.as_str());
+    let volume = mount(log, directory.find("use", "block"));
+    let mut fs = Fs {
+        server,
+        log,
+        volume,
+        handles: BTreeMap::new(),
+        next_badge: 1,
+    };
+    let published = fs.publish_programs(&directory);
+    say(log, format_args!("ready, {published} programs in /bin"));
 
     let mut request = [0u8; 256];
     let mut received_handles = [Handle(0); 4];
@@ -150,7 +171,10 @@ fn main(start: Start) -> i64 {
         let got = match oceans_rt::ipc_receive_msg(server, &mut request, &mut received_handles) {
             Ok(got) => got,
             // Every client end is gone (init keeps one, so: shutdown).
-            Err(Error::PeerClosed) => return 0,
+            Err(Error::PeerClosed) => {
+                let _ = fs.commit("shutdown");
+                return 0;
+            }
             Err(_) => return 4,
         };
         if got.closed {
@@ -173,12 +197,85 @@ fn main(start: Start) -> i64 {
     }
 }
 
-fn map_text(memory: Handle) -> Option<&'static str> {
-    let base = oceans_rt::memory_map(memory, 0, prot::READ).ok()?;
-    // SAFETY: mapped readable, at least one page, for our lifetime.
-    let page = unsafe { core::slice::from_raw_parts(base, 4096) };
-    let len = page.iter().position(|&b| b == 0)?;
-    core::str::from_utf8(&page[..len]).ok()
+/// The volume on the granted disk, or an in-memory one (logged why).
+fn mount(log: Handle, block: Option<Handle>) -> Volume<DiskDevice> {
+    let Some(block) = block else {
+        say(
+            log,
+            format_args!("no disk granted; files are kept in memory only"),
+        );
+        return Volume::memory();
+    };
+    let disk = match Disk::open(block, BLOCK_SIZE) {
+        Ok(disk) => disk,
+        Err(error) => {
+            say(
+                log,
+                format_args!(
+                    "disk unavailable ({}); files are kept in memory only",
+                    error.message()
+                ),
+            );
+            return Volume::memory();
+        }
+    };
+    let info = disk.info;
+    if info.read_only() || info.sector_size as usize != SECTOR_SIZE {
+        say(
+            log,
+            format_args!("disk is read-only or has unusual sectors; files are kept in memory only"),
+        );
+        return Volume::memory();
+    }
+    let device = DiskDevice {
+        disk,
+        blocks: info.sectors / u64::from(SECTORS_PER_BLOCK),
+    };
+    match Volume::open(device, true) {
+        Ok((volume, opened)) => {
+            let (used, total) = volume.usage();
+            let kib = |blocks: u64| blocks * BLOCK_SIZE as u64 / 1024;
+            match opened {
+                Opened::Formatted => say(
+                    log,
+                    format_args!("formatted a blank disk: {} KiB", kib(total)),
+                ),
+                Opened::Mounted => say(
+                    log,
+                    format_args!(
+                        "mounted the disk: generation {}, {} of {} KiB used",
+                        volume.generation(),
+                        kib(used),
+                        kib(total)
+                    ),
+                ),
+            }
+            volume
+        }
+        Err(error) => {
+            let why = match error {
+                MountError::UnknownContents => "it holds something other than an Oceans volume",
+                MountError::Corrupt(why) => why,
+                MountError::TooSmall => "it is too small",
+                MountError::Io | MountError::Blank => "it cannot be read",
+            };
+            say(
+                log,
+                format_args!(
+                    "disk not mounted ({why}), left untouched; files are kept in memory only"
+                ),
+            );
+            Volume::memory()
+        }
+    }
+}
+
+fn u64_at(data: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?))
+}
+
+fn u32_at(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// A copy of a memory object's contents.
@@ -191,113 +288,55 @@ fn read_memory(memory: Handle) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn u64_at(data: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?))
-}
-
-fn u32_at(data: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
-}
-
 impl Fs {
-    fn new(server: Handle) -> Self {
-        let root = Node {
-            content: Content::Directory(BTreeMap::new()),
-            read_only: false,
-            linked: true,
-            opens: 0,
-        };
-        Self {
-            server,
-            nodes: alloc::vec![Some(root)],
-            free_slots: Vec::new(),
-            live_nodes: 1,
-            file_bytes: 0,
-            handles: BTreeMap::new(),
-            next_badge: 1,
-        }
-    }
-
-    fn node(&self, index: usize) -> &Node {
-        self.nodes[index].as_ref().expect("live node")
-    }
-
-    fn node_mut(&mut self, index: usize) -> &mut Node {
-        self.nodes[index].as_mut().expect("live node")
-    }
-
-    /// Creates `name` in directory `parent`; `None` if it exists or quotas
-    /// are reached.
-    fn create(
-        &mut self,
-        parent: usize,
-        name: &str,
-        content: Content,
-        read_only: bool,
-    ) -> Option<usize> {
-        if self.live_nodes >= MAX_NODES || !valid_name(name.as_bytes()) {
-            return None;
-        }
-        if let Content::Directory(entries) = &self.node(parent).content
-            && entries.contains_key(name)
-        {
-            return None;
-        }
-        // Accounted only once nothing can fail any more.
-        if let Content::File(bytes) = &content {
-            if self.file_bytes + bytes.len() > MAX_TOTAL_BYTES {
-                return None;
-            }
-            self.file_bytes += bytes.len();
-        }
-        let node = Node {
-            content,
-            read_only,
-            linked: true,
-            opens: 0,
-        };
-        let index = match self.free_slots.pop() {
-            Some(slot) => {
-                self.nodes[slot] = Some(node);
-                slot
-            }
-            None => {
-                self.nodes.push(Some(node));
-                self.nodes.len() - 1
+    /// `/bin`: the granted program images, read-only and in memory only.
+    fn publish_programs(&mut self, directory: &Directory) -> usize {
+        let bin = match self.volume.create_volatile_directory(ROOT, "bin", true) {
+            Ok(bin) => bin,
+            Err(error) => {
+                say(self.log, format_args!("cannot create /bin: {error:?}"));
+                return 0;
             }
         };
-        self.live_nodes += 1;
-        match &mut self.node_mut(parent).content {
-            Content::Directory(entries) => {
-                entries.insert(String::from(name), index);
+        let mut published = 0;
+        for line in directory.lines() {
+            let mut words = line.split_whitespace();
+            let (Some(_), Some("module"), Some(name)) = (words.next(), words.next(), words.next())
+            else {
+                continue;
+            };
+            let Some(memory) = directory.find("module", name) else {
+                continue;
+            };
+            if let Some(bytes) = read_memory(memory)
+                && self.volume.publish(bin, name, bytes).is_ok()
+            {
+                published += 1;
             }
-            Content::File(_) => unreachable!("parent checked by callers"),
+            let _ = oceans_rt::close(memory);
         }
-        Some(index)
+        published
     }
 
-    /// Frees `index` if nothing refers to it any more.
-    fn release_if_unused(&mut self, index: usize) {
-        let node = self.node(index);
-        if index == ROOT || node.linked || node.opens > 0 {
-            return;
+    /// Commits, logging (not failing) on error: the changes stay pending
+    /// and the next commit retries them.
+    fn commit(&mut self, why: &str) -> Result<(), FsError> {
+        let result = self.volume.commit();
+        if let Err(error) = result {
+            say(
+                self.log,
+                format_args!("commit after {why} failed: {error:?}"),
+            );
         }
-        if let Some(Node {
-            content: Content::File(bytes),
-            ..
-        }) = self.nodes[index].take()
-        {
-            self.file_bytes -= bytes.len();
-        }
-        self.nodes[index] = None;
-        self.free_slots.push(index);
-        self.live_nodes -= 1;
+        result
     }
 
     fn close_handle(&mut self, badge: u64) {
         if let Some(open) = self.handles.remove(&badge) {
-            self.node_mut(open.node).opens -= 1;
-            self.release_if_unused(open.node);
+            self.volume.release(open.node);
+            if open.writable {
+                let _ = self.commit("close");
+            }
         }
     }
 
@@ -321,46 +360,49 @@ impl Fs {
             op::LIST => self.list(open, data),
             op::REMOVE => self.remove(open, data),
             op::TRUNCATE => self.truncate(open, data),
+            op::SYNC => self.commit("sync").map(|()| Reply::ok(&[])).map_err(status),
             _ => Err(Status::BadRequest),
         };
         result.unwrap_or_else(Reply::status)
     }
 
-    fn directory(&self, index: usize) -> Result<&BTreeMap<String, usize>, Status> {
-        match &self.node(index).content {
-            Content::Directory(entries) => Ok(entries),
-            Content::File(_) => Err(Status::NotADirectory),
+    fn name(data: &[u8]) -> Result<&str, Status> {
+        if !oceans_volume::valid_name(data) {
+            return Err(Status::InvalidName);
         }
+        core::str::from_utf8(data).map_err(|_| Status::InvalidName)
     }
 
     fn open(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {
         let (&open_flags, name) = data.split_first().ok_or(Status::BadRequest)?;
-        if !valid_name(name) {
-            return Err(Status::InvalidName);
-        }
-        let name = core::str::from_utf8(name).map_err(|_| Status::InvalidName)?;
-        let existing = self.directory(open.node)?.get(name).copied();
-        let index = match existing {
-            Some(index) => index,
-            None => {
-                let content = if open_flags & flags::CREATE_DIRECTORY != 0 {
-                    Content::Directory(BTreeMap::new())
+        let name = Self::name(name)?;
+        let index = match self.volume.lookup(open.node, name) {
+            Ok(index) => index,
+            Err(FsError::NotFound) => {
+                let new_kind = if open_flags & flags::CREATE_DIRECTORY != 0 {
+                    oceans_volume::Kind::Directory
                 } else if open_flags & flags::CREATE_FILE != 0 {
-                    Content::File(Vec::new())
+                    oceans_volume::Kind::File
                 } else {
                     return Err(Status::NotFound);
                 };
-                if !open.writable || self.node(open.node).read_only {
+                if !open.writable {
                     return Err(Status::PermissionDenied);
                 }
-                self.create(open.node, name, content, false)
-                    .ok_or(Status::NoSpace)?
+                let index = self
+                    .volume
+                    .create(open.node, name, new_kind)
+                    .map_err(status)?;
+                // The new entry is durable before anyone is told it exists.
+                let _ = self.commit("create");
+                index
             }
+            Err(error) => return Err(status(error)),
         };
         // Write access is granted only through a writable parent handle and
         // to a writable node; never silently downgraded.
         let writable = open_flags & flags::WRITE != 0;
-        if writable && (!open.writable || self.node(index).read_only) {
+        if writable && (!open.writable || self.volume.is_read_only(index).map_err(status)?) {
             return Err(Status::PermissionDenied);
         }
         let badge = self.next_badge;
@@ -373,57 +415,41 @@ impl Fs {
                 writable,
             },
         );
-        self.node_mut(index).opens += 1;
-        let mut reply = Reply::ok(&[self.node(index).kind() as u8]);
+        self.volume.retain(index).map_err(status)?;
+        let node_kind = self.volume.kind(index).map_err(status)?;
+        let mut reply = Reply::ok(&[kind(node_kind) as u8]);
         reply.handle = Some(handle);
         Ok(reply)
     }
 
-    fn read(&self, open: Open, data: &[u8]) -> Result<Reply, Status> {
+    fn read(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {
         let offset = u64_at(data, 0).ok_or(Status::BadRequest)?;
         let len = u32_at(data, 8).ok_or(Status::BadRequest)? as usize;
-        let Content::File(bytes) = &self.node(open.node).content else {
-            return Err(Status::IsADirectory);
-        };
-        let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(bytes.len());
-        let end = start + len.min(MAX_DATA).min(bytes.len() - start);
-        Ok(Reply::ok(&bytes[start..end]))
+        let mut reply = Reply::status(Status::Ok);
+        reply.len = self
+            .volume
+            .read(open.node, offset, &mut reply.data[..len.min(MAX_DATA)])
+            .map_err(status)?;
+        Ok(reply)
     }
 
     fn write(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {
         let offset = u64_at(data, 0).ok_or(Status::BadRequest)?;
-        let payload = &data[8..];
         if !open.writable {
             return Err(Status::PermissionDenied);
         }
-        let used = self.file_bytes;
-        let Content::File(bytes) = &mut self.node_mut(open.node).content else {
-            return Err(Status::IsADirectory);
-        };
-        let start = usize::try_from(offset).map_err(|_| Status::NoSpace)?;
-        let end = start.checked_add(payload.len()).ok_or(Status::NoSpace)?;
-        let growth = end.saturating_sub(bytes.len());
-        if end > MAX_FILE_SIZE || used + growth > MAX_TOTAL_BYTES {
-            return Err(Status::NoSpace);
-        }
-        if end > bytes.len() {
-            bytes.resize(end, 0);
-        }
-        bytes[start..end].copy_from_slice(payload);
-        self.file_bytes += growth;
-        Ok(Reply::ok(&(payload.len() as u32).to_le_bytes()))
+        let written = self
+            .volume
+            .write(open.node, offset, &data[8..])
+            .map_err(status)?;
+        Ok(Reply::ok(&(written as u32).to_le_bytes()))
     }
 
     fn stat(&self, open: Open) -> Result<Reply, Status> {
-        let node = self.node(open.node);
-        let size = match &node.content {
-            Content::File(bytes) => bytes.len() as u64,
-            Content::Directory(entries) => entries.len() as u64,
-        };
+        let node_kind = self.volume.kind(open.node).map_err(status)?;
+        let size = self.volume.size(open.node).map_err(status)?;
         let mut data = [0u8; 10];
-        data[0] = node.kind() as u8;
+        data[0] = kind(node_kind) as u8;
         data[1..9].copy_from_slice(&size.to_le_bytes());
         data[9] = u8::from(open.writable);
         Ok(Reply::ok(&data))
@@ -431,63 +457,29 @@ impl Fs {
 
     fn list(&self, open: Open, data: &[u8]) -> Result<Reply, Status> {
         let index = u32_at(data, 0).ok_or(Status::BadRequest)? as usize;
-        let (name, &child) = self
-            .directory(open.node)?
-            .iter()
-            .nth(index)
-            .ok_or(Status::NotFound)?;
+        let (name, node_kind) = self.volume.entry(open.node, index).map_err(status)?;
         let mut entry = [0u8; 1 + MAX_NAME];
-        entry[0] = self.node(child).kind() as u8;
+        entry[0] = kind(node_kind) as u8;
         entry[1..1 + name.len()].copy_from_slice(name.as_bytes());
         Ok(Reply::ok(&entry[..1 + name.len()]))
     }
 
     fn remove(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {
-        if !valid_name(data) {
-            return Err(Status::InvalidName);
-        }
-        let name = core::str::from_utf8(data).map_err(|_| Status::InvalidName)?;
-        if !open.writable || self.node(open.node).read_only {
+        let name = Self::name(data)?;
+        if !open.writable {
             return Err(Status::PermissionDenied);
         }
-        let child = *self
-            .directory(open.node)?
-            .get(name)
-            .ok_or(Status::NotFound)?;
-        let node = self.node(child);
-        if node.read_only {
-            return Err(Status::PermissionDenied);
-        }
-        if let Content::Directory(entries) = &node.content
-            && !entries.is_empty()
-        {
-            return Err(Status::NotEmpty);
-        }
-        if let Content::Directory(entries) = &mut self.node_mut(open.node).content {
-            entries.remove(name);
-        }
-        self.node_mut(child).linked = false;
-        self.release_if_unused(child);
+        self.volume.remove(open.node, name).map_err(status)?;
+        let _ = self.commit("remove");
         Ok(Reply::ok(&[]))
     }
 
     fn truncate(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {
-        let size = usize::try_from(u64_at(data, 0).ok_or(Status::BadRequest)?)
-            .map_err(|_| Status::NoSpace)?;
+        let size = u64_at(data, 0).ok_or(Status::BadRequest)?;
         if !open.writable {
             return Err(Status::PermissionDenied);
         }
-        let used = self.file_bytes;
-        let Content::File(bytes) = &mut self.node_mut(open.node).content else {
-            return Err(Status::IsADirectory);
-        };
-        let growth = size.saturating_sub(bytes.len());
-        if size > MAX_FILE_SIZE || used + growth > MAX_TOTAL_BYTES {
-            return Err(Status::NoSpace);
-        }
-        let shrink = bytes.len().saturating_sub(size);
-        bytes.resize(size, 0);
-        self.file_bytes = used + growth - shrink;
+        self.volume.truncate(open.node, size).map_err(status)?;
         Ok(Reply::ok(&[]))
     }
 }

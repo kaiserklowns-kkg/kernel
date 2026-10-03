@@ -1,0 +1,9 @@
+[package]
+name = "oceans-volume"
+description = "OceansFS: the crash-consistent, copy-on-write on-disk volume behind the filesystem service (ADR-0022)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

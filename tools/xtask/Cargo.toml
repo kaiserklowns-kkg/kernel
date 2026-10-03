@@ -6,5 +6,7 @@ edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-# Deliberately dependency-free: the build tool must work on a fresh checkout.
+# No external dependencies: the build tool must work on a fresh checkout.
+# The volume crate is in-tree; the smoke test mounts the guest's disk with it.
 [dependencies]
+oceans-volume.workspace = true

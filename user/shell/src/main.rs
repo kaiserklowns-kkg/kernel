@@ -206,6 +206,7 @@ impl Shell {
             ["write", path, words @ ..] => self.write_file(path, words),
             ["mkdir", path] => self.make_directory(path),
             ["rm", path] => self.remove(path),
+            ["sync"] => self.sync(),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
             ["exit"] => return Some(0),
             // Anything else is a program in /bin, run with what its manifest
@@ -229,13 +230,13 @@ impl Shell {
              \x20                              arguments after `--`)\r\n\
              \x20 PROGRAM [ARGS...]          run /bin/PROGRAM with what its manifest requests\r\n\
              \x20                              (granted automatically: out, sysinfo only),\r\n\
-             \x20                              e.g. ps, mem, uptime, uname; `run lspci out devices`,\r\n\
-             \x20                              `run disk out use:block -- info`\r\n\
+             \x20                              e.g. ps, mem, uptime, uname; `run lspci out devices`\r\n\
              \x20 ls [PATH]                  list a directory\r\n\
              \x20 cat PATH                   print a file\r\n\
              \x20 write PATH TEXT            replace a file's contents with TEXT\r\n\
              \x20 mkdir PATH                 create a directory\r\n\
              \x20 rm PATH                    remove a file or empty directory\r\n\
+             \x20 sync                       make every file change durable on disk now\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
         );
@@ -401,6 +402,18 @@ impl Shell {
         });
         if let Err(problem) = result {
             self.print(format_args!("mkdir: {path}: {problem}\r\n"));
+        }
+    }
+
+    /// Commits the filesystem now (contents are otherwise durable when the
+    /// handle that wrote them closes, ADR-0022).
+    fn sync(&self) {
+        let result = self
+            .fs_root()
+            .ok_or("this shell has no filesystem")
+            .and_then(|root| root.sync().map_err(FsError::message));
+        if let Err(problem) = result {
+            self.print(format_args!("sync: {problem}\r\n"));
         }
     }
 
