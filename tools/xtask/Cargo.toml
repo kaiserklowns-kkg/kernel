@@ -11,4 +11,5 @@ rust-version.workspace = true
 [dependencies]
 oceans-archive.workspace = true
 oceans-dns.workspace = true
+oceans-fat.workspace = true
 oceans-volume.workspace = true

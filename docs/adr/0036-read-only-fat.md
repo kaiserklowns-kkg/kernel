@@ -1,6 +1,6 @@
 # ADR-0036: Read-only FAT
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0037: FAT volumes are written too)
 - Date: 2026-10-03
 - Depends on: ADR-0035 (removable media)
 

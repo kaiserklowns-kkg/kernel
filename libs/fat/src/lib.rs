@@ -1,10 +1,19 @@
-//! Read-only FAT for Oceans (ADR-0036): FAT12, FAT16 and FAT32 volumes
-//! with long file names (VFAT), found on a whole disk ("superfloppy"),
-//! in an MBR partition or in a GPT partition.
+//! FAT for Oceans: FAT12, FAT16 and FAT32 volumes with long file names
+//! (VFAT), found on a whole disk ("superfloppy"), in an MBR partition or
+//! in a GPT partition. Reading (ADR-0036) and crash-safe writing
+//! (ADR-0037).
 //!
 //! Disks are untrusted: every field is range-checked, cluster chains are
 //! bounded by the cluster count (no loops), and a malformed structure
-//! gives [`Error::Corrupt`], never a panic. Nothing is ever written.
+//! gives [`Error::Corrupt`], never a panic.
+//!
+//! Writing is off until [`Fat::enable_writes`], which checks the volume
+//! (and repairs what an interrupted session of ours can leave: lost
+//! clusters). Every change is a sequence of writes ordered with barriers
+//! ([`Disk::flush`]) so that a crash at any point leaves a consistent
+//! volume: at worst clusters allocated but unreferenced, never a chain
+//! through a free cluster, two files sharing a cluster, or a size beyond
+//! the data written. See `write.rs`.
 //!
 //! Nodes are numbered like `oceans-volume`'s, so the filesystem service
 //! can serve either: [`ROOT`] is the root directory; [`Fat::lookup`]
@@ -14,21 +23,44 @@
 
 extern crate alloc;
 
+mod check;
+mod names;
+mod write;
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_write;
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// A failed disk read.
+pub use check::Report;
+pub use write::Recovery;
+
+/// A failed disk access.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoError;
 
-/// Byte-addressed read access to a disk.
+/// Byte-addressed access to a disk.
 pub trait Disk {
     /// Fills `out` from `offset`; fails past the end or on I/O errors.
     fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), IoError>;
+    /// Writes whole 512-byte sectors (`offset` and `data.len()` are
+    /// multiples of 512). Writes may reach the medium in any order until
+    /// the next [`flush`](Disk::flush).
+    fn write_at(&mut self, _offset: u64, _data: &[u8]) -> Result<(), IoError> {
+        Err(IoError)
+    }
+    /// A barrier: every write before it is on the medium before any write
+    /// after it.
+    fn flush(&mut self) -> Result<(), IoError> {
+        Ok(())
+    }
+    fn writable(&self) -> bool {
+        false
+    }
     fn size(&self) -> u64;
 }
 
@@ -42,6 +74,13 @@ pub enum Error {
     NotFound,
     NotADirectory,
     IsADirectory,
+    Exists,
+    /// Not a name FAT can store.
+    InvalidName,
+    NoSpace,
+    NotEmpty,
+    /// Writing is not enabled (or the disk is read-only).
+    ReadOnly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +110,7 @@ const SECTOR: u64 = 512;
 const ENTRY: usize = 32;
 const ATTR_VOLUME: u8 = 0x08;
 const ATTR_DIRECTORY: u8 = 0x10;
+const ATTR_ARCHIVE: u8 = 0x20;
 const ATTR_LONG_NAME: u8 = 0x0f;
 const DELETED: u8 = 0xe5;
 /// Partition types that hold FAT (MBR).
@@ -102,14 +142,20 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 struct Geometry {
     kind: FatType,
     cluster_bytes: u64,
+    /// The first FAT; copy `i` is `fat_bytes * i` further.
     fat: u64,
     fat_bytes: u64,
+    fats: u8,
+    /// FAT32 with mirroring off: the one FAT in use.
+    active_fat: Option<u8>,
     data: u64,
     /// FAT12/16: the fixed root directory region and its entry count.
     root_region: u64,
     root_entries: u32,
     /// FAT32: the root directory's first cluster.
     root_cluster: u32,
+    /// FAT32: the FSInfo sector.
+    fsinfo: Option<u64>,
     /// Data clusters: numbers 2 ..= clusters + 1 exist.
     clusters: u32,
     label: [u8; 11],
@@ -168,18 +214,27 @@ fn geometry(sector: &[u8; 512], start: u64, disk_size: u64) -> Option<Geometry> 
     if (u64::from(clusters) + 2) * entry_bits / 8 > fat_bytes {
         return None;
     }
-    let (root_cluster, label_at) = match kind {
+    let (root_cluster, label_at, active_fat, fsinfo) = match kind {
         FatType::Fat32 => {
             if root_entries != 0 {
                 return None;
             }
-            (u32_at(sector, 44), 71)
+            let flags = u16_at(sector, 40);
+            let active = (flags & 0x80 != 0).then_some((flags & 0x0f) as u8);
+            if active.is_some_and(|a| u64::from(a) >= fats) {
+                return None;
+            }
+            let fsinfo_sector = u64::from(u16_at(sector, 48));
+            let fsinfo = (1..reserved)
+                .contains(&fsinfo_sector)
+                .then(|| start + fsinfo_sector * bytes_per_sector);
+            (u32_at(sector, 44), 71, active, fsinfo)
         }
         _ => {
             if root_entries == 0 {
                 return None;
             }
-            (0, 43)
+            (0, 43, None, None)
         }
     };
     let mut label = [b' '; 11];
@@ -189,10 +244,13 @@ fn geometry(sector: &[u8; 512], start: u64, disk_size: u64) -> Option<Geometry> 
         cluster_bytes: sectors_per_cluster * bytes_per_sector,
         fat: start + reserved * bytes_per_sector,
         fat_bytes,
+        fats: fats as u8,
+        active_fat,
         data: start + meta * bytes_per_sector,
         root_region: start + (reserved + fats * fat_sectors) * bytes_per_sector,
         root_entries,
         root_cluster,
+        fsinfo,
         clusters,
         label,
     })
@@ -268,12 +326,16 @@ fn find_volume<D: Disk>(disk: &mut D) -> Result<Geometry, Error> {
 
 #[derive(Clone, Copy, Debug)]
 struct Node {
+    /// Where its short directory entry is (`None`: the root).
+    entry: Option<u64>,
     first: u32,
     size: u32,
     directory: bool,
     refs: u32,
     /// The last cluster reached while reading, by index in the chain.
     cursor: (u32, u32),
+    /// Removed while open: its clusters are freed when released.
+    deleted: bool,
 }
 
 /// One directory entry, decoded.
@@ -281,12 +343,16 @@ struct Node {
 struct Entry {
     name: String,
     short: String,
+    raw_short: [u8; 11],
     first: u32,
     size: u32,
     directory: bool,
+    /// Byte offsets of the short entry and of its long-name entries.
+    offset: u64,
+    long: Vec<u64>,
 }
 
-/// A read-only FAT volume.
+/// A FAT volume.
 pub struct Fat<D> {
     disk: D,
     g: Geometry,
@@ -295,18 +361,22 @@ pub struct Fat<D> {
     name: String,
     /// One FAT sector, cached.
     fat_cache: Option<(u64, [u8; 512])>,
+    writes: write::State,
 }
 
 impl<D: Disk> Fat<D> {
-    /// Finds and checks the volume; reads nothing else.
+    /// Finds and checks the volume; reads nothing else. Writing stays off
+    /// until [`enable_writes`](Self::enable_writes).
     pub fn open(mut disk: D) -> Result<Self, Error> {
         let g = find_volume(&mut disk)?;
         let root = Node {
+            entry: None,
             first: g.root_cluster,
             size: 0,
             directory: true,
             refs: 1,
             cursor: (0, g.root_cluster),
+            deleted: false,
         };
         if g.kind == FatType::Fat32 && !(2..g.clusters + 2).contains(&g.root_cluster) {
             return Err(Error::Corrupt);
@@ -317,6 +387,7 @@ impl<D: Disk> Fat<D> {
             nodes: vec![Some(root)],
             name: String::new(),
             fat_cache: None,
+            writes: write::State::default(),
         })
     }
 
@@ -338,17 +409,28 @@ impl<D: Disk> Fat<D> {
         &self.disk
     }
 
+    /// The disk, for tests that crash it.
+    #[cfg(test)]
+    fn into_disk(self) -> D {
+        self.disk
+    }
+
     // ---- Clusters ----------------------------------------------------------
 
     fn read(&mut self, offset: u64, out: &mut [u8]) -> Result<(), Error> {
         self.disk.read_at(offset, out).map_err(|IoError| Error::Io)
     }
 
+    /// The FAT copy reads come from.
+    fn read_fat(&self) -> u64 {
+        self.g.fat + u64::from(self.g.active_fat.unwrap_or(0)) * self.g.fat_bytes
+    }
+
     fn fat_byte(&mut self, offset: u64) -> Result<u8, Error> {
         if offset >= self.g.fat_bytes {
             return Err(Error::Corrupt);
         }
-        let at = self.g.fat + offset;
+        let at = self.read_fat() + offset;
         let sector = at / SECTOR * SECTOR;
         if self.fat_cache.is_none_or(|(cached, _)| cached != sector) {
             let mut bytes = [0u8; 512];
@@ -358,29 +440,21 @@ impl<D: Disk> Fat<D> {
         Ok(self.fat_cache.expect("filled").1[(at - sector) as usize])
     }
 
-    /// The cluster after `cluster`, or `None` at the end of the chain.
-    fn next(&mut self, cluster: u32) -> Result<Option<u32>, Error> {
-        let value = match self.g.kind {
+    /// A FAT entry as stored (FAT32: all 32 bits).
+    fn raw_entry(&mut self, cluster: u32) -> Result<u32, Error> {
+        Ok(match self.g.kind {
             FatType::Fat12 => {
                 let at = u64::from(cluster) * 3 / 2;
                 let pair = u16::from(self.fat_byte(at)?) | u16::from(self.fat_byte(at + 1)?) << 8;
-                let value = if cluster & 1 == 0 {
+                u32::from(if cluster & 1 == 0 {
                     pair & 0xfff
                 } else {
                     pair >> 4
-                };
-                if value >= 0xff8 {
-                    return Ok(None);
-                }
-                u32::from(value)
+                })
             }
             FatType::Fat16 => {
                 let at = u64::from(cluster) * 2;
-                let value = u16::from(self.fat_byte(at)?) | u16::from(self.fat_byte(at + 1)?) << 8;
-                if value >= 0xfff8 {
-                    return Ok(None);
-                }
-                u32::from(value)
+                u32::from(u16::from(self.fat_byte(at)?) | u16::from(self.fat_byte(at + 1)?) << 8)
             }
             FatType::Fat32 => {
                 let at = u64::from(cluster) * 4;
@@ -388,13 +462,37 @@ impl<D: Disk> Fat<D> {
                 for i in 0..4 {
                     value |= u32::from(self.fat_byte(at + i)?) << (8 * i);
                 }
-                let value = value & 0x0fff_ffff;
-                if value >= 0x0fff_fff8 {
-                    return Ok(None);
-                }
                 value
             }
-        };
+        })
+    }
+
+    /// A FAT entry's link value (FAT32: the low 28 bits).
+    fn entry_value(&mut self, cluster: u32) -> Result<u32, Error> {
+        let raw = self.raw_entry(cluster)?;
+        Ok(if self.g.kind == FatType::Fat32 {
+            raw & 0x0fff_ffff
+        } else {
+            raw
+        })
+    }
+
+    /// Link values at and above this end a chain; one below marks a bad
+    /// cluster.
+    fn end_of_chain(&self) -> u32 {
+        match self.g.kind {
+            FatType::Fat12 => 0xff8,
+            FatType::Fat16 => 0xfff8,
+            FatType::Fat32 => 0x0fff_fff8,
+        }
+    }
+
+    /// The cluster after `cluster`, or `None` at the end of the chain.
+    fn next(&mut self, cluster: u32) -> Result<Option<u32>, Error> {
+        let value = self.entry_value(cluster)?;
+        if value >= self.end_of_chain() {
+            return Ok(None);
+        }
         // Free, reserved, bad or out-of-range links are corruption.
         if !(2..self.g.clusters + 2).contains(&value) {
             return Err(Error::Corrupt);
@@ -409,13 +507,37 @@ impl<D: Disk> Fat<D> {
         Ok(self.g.data + u64::from(cluster - 2) * self.g.cluster_bytes)
     }
 
+    /// The clusters of the chain starting at `first` (none for 0),
+    /// bounded by the cluster count.
+    fn chain(&mut self, first: u32) -> Result<Vec<u32>, Error> {
+        let mut out = Vec::new();
+        let mut cluster = first;
+        if cluster == 0 {
+            return Ok(out);
+        }
+        loop {
+            if out.len() > self.g.clusters as usize {
+                return Err(Error::Corrupt);
+            }
+            self.cluster_offset(cluster)?;
+            out.push(cluster);
+            match self.next(cluster)? {
+                Some(next) => cluster = next,
+                None => return Ok(out),
+            }
+        }
+    }
+
     // ---- Directories ---------------------------------------------------------
 
-    /// Calls `visit` with each live entry of directory `first` (0: the
-    /// FAT12/16 root region) until it returns `true`.
-    fn walk(&mut self, first: u32, mut visit: impl FnMut(Entry) -> bool) -> Result<(), Error> {
+    /// Visits every 32-byte slot of directory `first` (0: the FAT12/16
+    /// root region) with its byte offset, until `visit` returns `true`.
+    fn slots(
+        &mut self,
+        first: u32,
+        mut visit: impl FnMut(u64, &[u8; ENTRY]) -> bool,
+    ) -> Result<(), Error> {
         let fixed_root = first == 0 && self.g.kind != FatType::Fat32;
-        let mut long = LongName::new();
         let mut cluster = first;
         let mut steps = 0u32;
         loop {
@@ -427,40 +549,19 @@ impl<D: Disk> Fat<D> {
                     self.g.cluster_bytes as usize / ENTRY,
                 )
             };
-            let mut raw = [0u8; ENTRY];
+            let mut sector = [0u8; 512];
+            let mut loaded = u64::MAX;
             for i in 0..count {
-                self.read(base + (i * ENTRY) as u64, &mut raw)?;
-                match raw[0] {
-                    0 => return Ok(()),
-                    DELETED => {
-                        long.clear();
-                        continue;
-                    }
-                    _ => {}
+                let at = base + (i * ENTRY) as u64;
+                let start = at / SECTOR * SECTOR;
+                if start != loaded {
+                    self.read(start, &mut sector)?;
+                    loaded = start;
                 }
-                let attributes = raw[11];
-                if attributes & 0x3f == ATTR_LONG_NAME {
-                    long.add(&raw);
-                    continue;
-                }
-                let short = short_name(&raw);
-                let name = long.take(checksum(&raw)).unwrap_or_else(|| short.clone());
-                if attributes & ATTR_VOLUME != 0 || short == "." || short == ".." {
-                    continue;
-                }
-                let first = u32::from(u16_at(&raw, 20)) << 16 | u32::from(u16_at(&raw, 26));
-                let entry = Entry {
-                    name,
-                    short,
-                    first: if self.g.kind == FatType::Fat32 {
-                        first
-                    } else {
-                        first & 0xffff
-                    },
-                    size: u32_at(&raw, 28),
-                    directory: attributes & ATTR_DIRECTORY != 0,
-                };
-                if visit(entry) {
+                let within = (at - start) as usize;
+                let raw: &[u8; ENTRY] =
+                    sector[within..within + ENTRY].try_into().expect("32 bytes");
+                if visit(at, raw) {
                     return Ok(());
                 }
             }
@@ -478,6 +579,58 @@ impl<D: Disk> Fat<D> {
         }
     }
 
+    /// Calls `visit` with each live entry of directory `first` until it
+    /// returns `true`.
+    fn walk(&mut self, first: u32, mut visit: impl FnMut(Entry) -> bool) -> Result<(), Error> {
+        let mut long = LongName::new();
+        let mut long_offsets: Vec<u64> = Vec::new();
+        let fat32 = self.g.kind == FatType::Fat32;
+        let mut ended = false;
+        self.slots(first, |offset, raw| {
+            match raw[0] {
+                0 => {
+                    ended = true;
+                    return true;
+                }
+                DELETED => {
+                    long.clear();
+                    long_offsets.clear();
+                    return false;
+                }
+                _ => {}
+            }
+            let attributes = raw[11];
+            if attributes & 0x3f == ATTR_LONG_NAME {
+                if raw[0] & 0x40 != 0 {
+                    long_offsets.clear();
+                }
+                long.add(raw);
+                long_offsets.push(offset);
+                return false;
+            }
+            let short = short_name(raw);
+            let name = long.take(checksum(raw));
+            let offsets = core::mem::take(&mut long_offsets);
+            if attributes & ATTR_VOLUME != 0 || short == "." || short == ".." {
+                return false;
+            }
+            let first = u32::from(u16_at(raw, 20)) << 16 | u32::from(u16_at(raw, 26));
+            let entry = Entry {
+                long: if name.is_some() { offsets } else { Vec::new() },
+                name: name.unwrap_or_else(|| short.clone()),
+                short,
+                raw_short: raw[..11].try_into().expect("11 bytes"),
+                first: if fat32 { first } else { first & 0xffff },
+                size: u32_at(raw, 28),
+                directory: attributes & ATTR_DIRECTORY != 0,
+                offset,
+            };
+            visit(entry)
+        })?;
+        let _ = ended;
+        Ok(())
+    }
+
     fn node(&self, id: NodeId) -> Result<Node, Error> {
         self.nodes.get(id).copied().flatten().ok_or(Error::NotFound)
     }
@@ -490,10 +643,9 @@ impl<D: Disk> Fat<D> {
         Ok(node.first)
     }
 
-    /// The child `name` of directory `dir`, by its long or short name,
+    /// The entry `name` of directory `first`, by its long or short name,
     /// ignoring ASCII case as FAT does.
-    pub fn lookup(&mut self, dir: NodeId, name: &str) -> Result<NodeId, Error> {
-        let first = self.directory(dir)?;
+    fn find(&mut self, first: u32, name: &str) -> Result<Option<Entry>, Error> {
         let mut found = None;
         self.walk(first, |entry| {
             let matched =
@@ -503,29 +655,35 @@ impl<D: Disk> Fat<D> {
             }
             matched
         })?;
-        let entry = found.ok_or(Error::NotFound)?;
+        Ok(found)
+    }
+
+    /// The child `name` of directory `dir`.
+    pub fn lookup(&mut self, dir: NodeId, name: &str) -> Result<NodeId, Error> {
+        let first = self.directory(dir)?;
+        let entry = self.find(first, name)?.ok_or(Error::NotFound)?;
         if entry.directory && entry.first == 0 {
             // ".." of a first-level directory; never a real child.
             return Err(Error::Corrupt);
         }
         Ok(self.insert(Node {
+            entry: Some(entry.offset),
             first: entry.first,
             size: if entry.directory { 0 } else { entry.size },
             directory: entry.directory,
             refs: 0,
             cursor: (0, entry.first),
+            deleted: false,
         }))
     }
 
-    /// A node for `node`: an existing one with the same contents, or a
-    /// slot no handle holds.
+    /// The node of `node`'s directory entry if it has one already (its
+    /// in-memory state is the current one), else a slot no handle holds.
     fn insert(&mut self, node: Node) -> NodeId {
-        if node.first != 0
-            && let Some(id) = self.nodes.iter().position(|n| {
-                n.is_some_and(|n| {
-                    n.first == node.first && n.directory == node.directory && n.size == node.size
-                })
-            })
+        if let Some(id) = self
+            .nodes
+            .iter()
+            .position(|n| n.is_some_and(|n| n.entry == node.entry && !n.deleted))
         {
             return id;
         }
@@ -534,7 +692,7 @@ impl<D: Disk> Fat<D> {
             .iter()
             .enumerate()
             .skip(1)
-            .find(|(_, n)| n.is_none_or(|n| n.refs == 0))
+            .find(|(_, n)| n.is_none_or(|n| n.refs == 0 && !n.deleted))
             .map(|(id, _)| id);
         match free {
             Some(id) => {
@@ -585,11 +743,21 @@ impl<D: Disk> Fat<D> {
         Ok(())
     }
 
+    /// Drops a reference; the last one of a removed file frees its
+    /// clusters.
     pub fn release(&mut self, id: NodeId) {
-        if id != ROOT
-            && let Some(Some(node)) = self.nodes.get_mut(id)
-        {
-            node.refs = node.refs.saturating_sub(1);
+        if id == ROOT {
+            return;
+        }
+        let Some(Some(node)) = self.nodes.get_mut(id) else {
+            return;
+        };
+        node.refs = node.refs.saturating_sub(1);
+        if node.refs == 0 && node.deleted {
+            let first = node.first;
+            self.nodes[id] = None;
+            // A failure leaves lost clusters, which the next check frees.
+            let _ = self.free_chain(first);
         }
     }
 
@@ -621,10 +789,13 @@ impl<D: Disk> Fat<D> {
     }
 
     /// The `index`th cluster of a file, continuing from where the last
-    /// read stopped when it can.
+    /// access stopped when it can.
     fn cluster_at(&mut self, id: NodeId, index: u32) -> Result<u32, Error> {
         let node = self.node(id)?;
-        let (mut at, mut cluster) = if node.cursor.0 <= index {
+        if node.first == 0 {
+            return Err(Error::Corrupt);
+        }
+        let (mut at, mut cluster) = if node.cursor.0 <= index && node.cursor.1 != 0 {
             node.cursor
         } else {
             (0, node.first)
@@ -675,7 +846,7 @@ fn short_name(raw: &[u8; ENTRY]) -> String {
 }
 
 /// The checksum long-name entries carry of their short name.
-fn checksum(raw: &[u8; ENTRY]) -> u8 {
+fn checksum(raw: &[u8]) -> u8 {
     raw[..11]
         .iter()
         .fold(0u8, |sum, &byte| sum.rotate_right(1).wrapping_add(byte))
@@ -730,6 +901,13 @@ impl LongName {
             }
         }
         self.seen |= 1 << sequence;
+    }
+
+    /// Whether a complete set of entries belongs to this short entry.
+    fn matches(&self, short_checksum: u8) -> bool {
+        self.count > 0
+            && self.checksum == short_checksum
+            && (1..=self.count).all(|sequence| self.seen & (1 << sequence) != 0)
     }
 
     /// The name, if every entry arrived and they belong to this short

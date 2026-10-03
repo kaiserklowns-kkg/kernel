@@ -35,3 +35,8 @@ oceans-volume = { path = "libs/volume" }
 
 [profile.release]
 debug = 1
+
+# The FAT crash tests (ADR-0037) check thousands of simulated crash states;
+# unoptimised they take most of an hour.
+[profile.dev.package.oceans-fat]
+opt-level = 2

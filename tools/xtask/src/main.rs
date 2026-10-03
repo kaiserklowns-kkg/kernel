@@ -172,12 +172,20 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor device_del stick",
     b"ls /usb\r\n",
     b"run disk out use:usbdisk -- info\r\n",
-    // A stick formatted elsewhere (ADR-0036): FAT, read-only at /usb.
+    // A stick formatted elsewhere: FAT (ADR-0036), read and written at
+    // /usb (ADR-0037); the host checks the result, with fsck.fat if it can.
     b"@monitor device_add usb-storage,bus=usb.0,port=4,drive=fatstick,id=fatstick",
     b"ls /usb\r\n",
     b"cat /usb/long-file-name.txt\r\n",
     b"cat /usb/docs/notes/deep.txt\r\n",
-    b"write /usb/new.txt nope\r\n",
+    b"write /usb/new.txt written on FAT\r\n",
+    b"mkdir /usb/oceans-dir\r\n",
+    b"write /usb/oceans-dir/inside.txt nested\r\n",
+    b"rm /usb/HELLO.TXT\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /usb/big.bin\r\n",
+    b"sync\r\n",
+    b"cat /usb/new.txt\r\n",
+    b"cat /usb/oceans-dir/inside.txt\r\n",
     // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
     // and is removed again; then the hub goes, taking its tablet along.
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.2,id=hotplug",
@@ -289,14 +297,15 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("kept on a usb stick"),
     Expect::Contains("fs (media): unmounted the disk (disk removed)"),
     Expect::Contains("ls: /usb: no disk"),
-    Expect::Contains("fs (media): mounted a FAT16 volume \"OCEANS16\", read-only"),
+    Expect::Contains("fs (media): mounted a FAT16 volume \"OCEANS16\", read-write"),
     Expect::Line("  HELLO.TXT"),
     Expect::Line("  A long file name.txt"),
     Expect::Line("  ไฟล์ภาษาไทย.txt"),
     Expect::Line("  Docs/"),
     Expect::Line("long names work"),
     Expect::Line("deep"),
-    Expect::Contains("write: /usb/new.txt: permission denied"),
+    Expect::Line("written on FAT"),
+    Expect::Line("nested"),
     Expect::Contains("usb-storage: port 3: disk removed"),
     Expect::Contains("xhci: port 3: device removed"),
     Expect::Contains("disk: I/O error"),
@@ -682,9 +691,8 @@ fn qemu_command(
     .args(["-device", "usb-tablet,bus=usb.0,port=2.1"])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     if let Some(spare) = spare_stick {
-        cmd.arg("-drive").arg(format!(
-            "if=none,id=fatstick,format=raw,readonly=on,file={spare}"
-        ));
+        cmd.arg("-drive")
+            .arg(format!("if=none,id=fatstick,format=raw,file={spare}"));
     }
     if let Some(port) = monitor {
         cmd.arg("-monitor")
@@ -791,6 +799,107 @@ fn prepare_fat_stick() -> Result {
     fs::write(&path, image).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// What the guest wrote to the FAT stick, read back by oceans-fat and, if
+/// installed, by fsck.fat (on the PATH, or in WSL below
+/// `OCEANS_FAT_TOOLS_WSL`, as for the library's tests).
+fn check_smoke_fat() -> Result {
+    struct Image(Vec<u8>);
+    impl oceans_fat::Disk for Image {
+        fn read_at(
+            &mut self,
+            offset: u64,
+            out: &mut [u8],
+        ) -> std::result::Result<(), oceans_fat::IoError> {
+            let start = usize::try_from(offset).map_err(|_| oceans_fat::IoError)?;
+            let bytes = self
+                .0
+                .get(start..start + out.len())
+                .ok_or(oceans_fat::IoError)?;
+            out.copy_from_slice(bytes);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+    let path = root().join(SMOKE_FAT_IMAGE);
+    let image = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut fat =
+        oceans_fat::Fat::open(Image(image.clone())).map_err(|e| format!("FAT stick: {e:?}"))?;
+    let mut read = |path: &str| -> std::result::Result<Vec<u8>, String> {
+        let mut node = oceans_fat::ROOT;
+        for part in path.split('/') {
+            node = fat
+                .lookup(node, part)
+                .map_err(|e| format!("FAT stick: /usb/{path}: {e:?}"))?;
+            fat.retain(node).map_err(|e| format!("{e:?}"))?;
+        }
+        let mut bytes = vec![0u8; fat.size(node).map_err(|e| format!("{e:?}"))? as usize];
+        fat.read_file(node, 0, &mut bytes)
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(bytes)
+    };
+    if read("new.txt")? != b"written on FAT\n" || read("oceans-dir/inside.txt")? != b"nested\n" {
+        return Err("the FAT stick does not hold what the shell wrote".into());
+    }
+    if read("big.bin")? != big_body() {
+        return Err("the FAT stick's big.bin does not match what the host served".into());
+    }
+    if read("HELLO.TXT").is_ok() {
+        return Err("HELLO.TXT is still on the FAT stick".into());
+    }
+    let report = fat
+        .check()
+        .map_err(|e| format!("the FAT stick fails its check: {e:?}"))?;
+    if report.lost + report.orphans + report.overlong != 0 {
+        return Err(format!("the FAT stick needs repair: {report:?}"));
+    }
+    // The volume starts 1 MiB in (MBR); fsck.fat wants the volume alone.
+    let volume = root().join("build/smoke-fat-volume.img");
+    fs::write(&volume, &image[1 << 20..])
+        .map_err(|e| format!("cannot write {}: {e}", volume.display()))?;
+    match fsck_fat(&volume) {
+        Some((true, _)) => println!("the FAT stick passes fsck.fat"),
+        Some((false, output)) => {
+            return Err(format!(
+                "fsck.fat finds problems on the FAT stick:\n{output}"
+            ));
+        }
+        None => println!("fsck.fat not available: the FAT stick was checked by oceans-fat only"),
+    }
+    println!("the files written to the FAT stick are there");
+    Ok(())
+}
+
+/// Runs `fsck.fat -n` on an image, if the tool can be found.
+fn fsck_fat(image: &Path) -> Option<(bool, String)> {
+    let output = match env::var("OCEANS_FAT_TOOLS_WSL") {
+        Ok(tools) => {
+            let text = image.to_string_lossy().replace('\\', "/");
+            let wsl = match text.split_once(":/") {
+                Some((drive, rest)) => format!("/mnt/{}/{rest}", drive.to_ascii_lowercase()),
+                None => text,
+            };
+            Command::new("wsl")
+                .args(["-e", &format!("{tools}/usr/sbin/fsck.fat"), "-n", &wsl])
+                .output()
+                .ok()?
+        }
+        Err(_) => Command::new("fsck.fat")
+            .arg("-n")
+            .arg(image)
+            .output()
+            .ok()?,
+    };
+    if output.status.code() == Some(127) {
+        return None;
+    }
+    Some((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
 /// A blank USB stick image; an existing one is replaced only if `fresh`.
 fn prepare_stick(path: &str, fresh: bool) -> Result {
     let path = root().join(path);
@@ -843,6 +952,7 @@ fn smoke(profile: Profile) -> Result {
     smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT)?;
     check_smoke_disk()?;
     check_smoke_stick()?;
+    check_smoke_fat()?;
     println!("smoke test passed: kernel came online, files survived a reboot");
     Ok(())
 }

@@ -11,6 +11,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain
         run: rustup show
+      # The reference FAT tools check what libs/fat writes (ADR-0037).
+      - name: Install dosfstools and mtools
+        run: sudo apt-get update && sudo apt-get install -y dosfstools mtools
       - name: Check
         run: cargo xtask check
 
@@ -19,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU and OVMF
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf dosfstools
       - name: Install toolchain
         run: rustup show
       - name: Fetch Limine

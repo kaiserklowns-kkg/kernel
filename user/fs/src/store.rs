@@ -1,6 +1,6 @@
 //! What the service serves: an Oceans volume, or (removable media only)
-//! a read-only FAT volume (ADR-0036). Both number nodes the same way, so
-//! the request handlers do not care which.
+//! a FAT volume (ADR-0036, written crash-safely from ADR-0037). Both
+//! number nodes the same way, so the request handlers do not care which.
 
 use oceans_block_proto::{Disk, SECTOR_SIZE};
 use oceans_fat::Fat;
@@ -8,11 +8,12 @@ use oceans_volume::{BLOCK_SIZE, FsError, Kind, NodeId, Volume};
 
 use crate::DiskDevice;
 
-/// A FAT volume's disk: byte reads through a block session with a
+/// A FAT volume's disk: byte access through a block session with a
 /// one-block buffer.
 pub struct FatDisk {
     pub disk: Disk,
     pub sectors: u64,
+    pub read_only: bool,
 }
 
 impl oceans_fat::Disk for FatDisk {
@@ -38,6 +39,35 @@ impl oceans_fat::Disk for FatDisk {
         Ok(())
     }
 
+    /// Whole sectors only (the FAT library writes nothing smaller).
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), oceans_fat::IoError> {
+        let sector_size = SECTOR_SIZE as u64;
+        if !offset.is_multiple_of(sector_size) || !(data.len() as u64).is_multiple_of(sector_size) {
+            return Err(oceans_fat::IoError);
+        }
+        let first = offset / sector_size;
+        if first + data.len() as u64 / sector_size > self.sectors {
+            return Err(oceans_fat::IoError);
+        }
+        for (i, chunk) in data.chunks(BLOCK_SIZE).enumerate() {
+            let sector = first + (i * BLOCK_SIZE / SECTOR_SIZE) as u64;
+            self.disk.buffer()[..chunk.len()].copy_from_slice(chunk);
+            self.disk
+                .write(sector, (chunk.len() / SECTOR_SIZE) as u32, 0)
+                .map_err(|_| oceans_fat::IoError)?;
+        }
+        Ok(())
+    }
+
+    /// The barrier: the stick's cache flushed (SYNCHRONIZE CACHE).
+    fn flush(&mut self) -> Result<(), oceans_fat::IoError> {
+        self.disk.flush().map_err(|_| oceans_fat::IoError)
+    }
+
+    fn writable(&self) -> bool {
+        !self.read_only
+    }
+
     fn size(&self) -> u64 {
         self.sectors * SECTOR_SIZE as u64
     }
@@ -59,6 +89,11 @@ fn fat_error(error: oceans_fat::Error) -> FsError {
         oceans_fat::Error::NotFound => FsError::NotFound,
         oceans_fat::Error::NotADirectory => FsError::NotADirectory,
         oceans_fat::Error::IsADirectory => FsError::IsADirectory,
+        oceans_fat::Error::Exists => FsError::Exists,
+        oceans_fat::Error::InvalidName => FsError::InvalidName,
+        oceans_fat::Error::NoSpace => FsError::NoSpace,
+        oceans_fat::Error::NotEmpty => FsError::NotEmpty,
+        oceans_fat::Error::ReadOnly => FsError::ReadOnly,
     }
 }
 
@@ -125,7 +160,7 @@ impl Store {
     pub fn is_read_only(&self, id: NodeId) -> Result<bool, FsError> {
         match self {
             Self::Oceans(volume) => volume.is_read_only(id),
-            Self::Fat(_) => Ok(true),
+            Self::Fat(fat) => Ok(!fat.writable()),
         }
     }
 
@@ -153,36 +188,39 @@ impl Store {
     pub fn write(&mut self, id: NodeId, offset: u64, data: &[u8]) -> Result<usize, FsError> {
         match self {
             Self::Oceans(volume) => volume.write(id, offset, data),
-            Self::Fat(_) => Err(FsError::ReadOnly),
+            Self::Fat(fat) => fat.write_file(id, offset, data).map_err(fat_error),
         }
     }
 
     pub fn create(&mut self, dir: NodeId, name: &str, kind: Kind) -> Result<NodeId, FsError> {
         match self {
             Self::Oceans(volume) => volume.create(dir, name, kind),
-            Self::Fat(_) => Err(FsError::ReadOnly),
+            Self::Fat(fat) => fat
+                .create(dir, name, kind == Kind::Directory)
+                .map_err(fat_error),
         }
     }
 
     pub fn remove(&mut self, dir: NodeId, name: &str) -> Result<(), FsError> {
         match self {
             Self::Oceans(volume) => volume.remove(dir, name),
-            Self::Fat(_) => Err(FsError::ReadOnly),
+            Self::Fat(fat) => fat.remove(dir, name).map_err(fat_error),
         }
     }
 
     pub fn truncate(&mut self, id: NodeId, size: u64) -> Result<(), FsError> {
         match self {
             Self::Oceans(volume) => volume.truncate(id, size),
-            Self::Fat(_) => Err(FsError::ReadOnly),
+            Self::Fat(fat) => fat.truncate(id, size).map_err(fat_error),
         }
     }
 
     pub fn commit(&mut self) -> Result<(), FsError> {
         match self {
             Self::Oceans(volume) => volume.commit(),
-            // Nothing is ever changed.
-            Self::Fat(_) => Ok(()),
+            // Everything is already written in order; this makes it
+            // durable and marks the volume clean.
+            Self::Fat(fat) => fat.sync().map_err(fat_error),
         }
     }
 }

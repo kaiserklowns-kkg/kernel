@@ -247,10 +247,14 @@ impl Node {
         let Some(first) = components.next() else {
             return Err(FsError::Status(Status::InvalidName));
         };
+        // Write access reaches a node only through writable directories,
+        // so the directories on the way are opened writable too when the
+        // target is (never with the create flags).
+        let through = open_flags & flags::WRITE;
         let mut flags_now = if components.peek().is_none() {
             open_flags
         } else {
-            0
+            through
         };
         let (mut node, mut kind) = self.open(first, flags_now)?;
         while let Some(name) = components.next() {
@@ -261,7 +265,7 @@ impl Node {
             flags_now = if components.peek().is_none() {
                 open_flags
             } else {
-                0
+                through
             };
             let next = node.open(name, flags_now);
             node.close();

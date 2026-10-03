@@ -44,5 +44,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0034](0034-usb-mass-storage.md) | USB mass storage and class drivers | Accepted |
 | [0035](0035-mounting-removable-media.md) | Mounting removable media | Accepted |
 | [0036](0036-read-only-fat.md) | Read-only FAT | Accepted |
+| [0037](0037-crash-safe-fat-writes.md) | Crash-safe FAT writes | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

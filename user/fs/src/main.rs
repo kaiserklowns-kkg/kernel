@@ -496,12 +496,36 @@ impl Fs {
     fn mount_fat(&mut self, block: Handle) -> Result<(), Status> {
         let disk = Disk::open(block, BLOCK_SIZE).map_err(|_| Status::NoMedium)?;
         let sectors = disk.info.sectors;
-        match Fat::open(FatDisk { disk, sectors }) {
-            Ok(fat) => {
+        let read_only = disk.info.read_only();
+        match Fat::open(FatDisk {
+            disk,
+            sectors,
+            read_only,
+        }) {
+            Ok(mut fat) => {
+                fat.set_clock(|| oceans_rt::unix_time_ms().map(|ms| ms / 1000));
+                // Writing needs a sound volume; after an unclean session
+                // it repairs what a crash can leave (ADR-0037).
+                let access = match fat.enable_writes() {
+                    Ok(recovery) => {
+                        if recovery.unclean {
+                            say(
+                                self.log,
+                                format_args!(
+                                    "the FAT volume was not synced: {} lost clusters freed, {} orphaned names removed, {} FAT sectors mirrored",
+                                    recovery.reclaimed, recovery.orphans, recovery.mirrored
+                                ),
+                            );
+                        }
+                        "read-write"
+                    }
+                    Err(oceans_fat::Error::ReadOnly) => "read-only (the disk is)",
+                    Err(_) => "read-only (damaged: check it on another system)",
+                };
                 say(
                     self.log,
                     format_args!(
-                        "mounted a {} volume \"{}\", read-only: {} KiB",
+                        "mounted a {} volume \"{}\", {access}: {} KiB",
                         fat.kind().name(),
                         fat.label(),
                         fat.capacity() / 1024

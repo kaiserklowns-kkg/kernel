@@ -573,6 +573,7 @@ version = "0.1.0"
 dependencies = [
  "oceans-archive",
  "oceans-dns",
+ "oceans-fat",
  "oceans-volume",
 ]
 
