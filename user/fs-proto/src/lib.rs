@@ -50,6 +50,11 @@ pub mod op {
     /// data = `[offset u64][at u32][len u32]`: reads up to `len` bytes into
     /// the shared buffer at `at` → `[read u32]`.
     pub const READ_BUF: u64 = 11;
+    /// On a writable directory (ADR-0038): data = `[old length u8][old
+    /// path][new path]`, both relative to the directory (components
+    /// separated by `/`): moves the entry. An existing file at the new
+    /// path is replaced (an empty directory too, by a directory).
+    pub const RENAME: u64 = 12;
 }
 
 /// Bounds of a shared buffer.
@@ -117,6 +122,8 @@ pub enum Status {
     /// The disk holds something other than an Oceans volume (left
     /// untouched).
     Unsupported = 13,
+    /// A rename between two filesystems (ADR-0038).
+    CrossDevice = 14,
 }
 
 impl Status {
@@ -135,6 +142,7 @@ impl Status {
             11 => Self::Corrupt,
             12 => Self::NoMedium,
             13 => Self::Unsupported,
+            14 => Self::CrossDevice,
             _ => Self::BadRequest,
         }
     }
@@ -155,6 +163,7 @@ impl Status {
             Self::Corrupt => "data corrupted on disk (checksum mismatch)",
             Self::NoMedium => "no disk",
             Self::Unsupported => "not an Oceans volume",
+            Self::CrossDevice => "not on the same filesystem",
         }
     }
 }
@@ -339,6 +348,30 @@ impl Node {
             Err(FsError::Status(Status::NotFound)) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Renames or moves `old` to `new`, both relative to this directory
+    /// (either may contain `/`). Needs write access to this directory.
+    pub fn rename(&self, old: &str, new: &str) -> Result<(), FsError> {
+        let (old, new) = (old.trim_matches('/'), new.trim_matches('/'));
+        if old.is_empty()
+            || new.is_empty()
+            || old.len() > 255
+            || 1 + old.len() + new.len() > MAX_DATA
+        {
+            return Err(FsError::Status(Status::InvalidName));
+        }
+        let mut data = [0u8; MAX_DATA];
+        data[0] = old.len() as u8;
+        data[1..1 + old.len()].copy_from_slice(old.as_bytes());
+        data[1 + old.len()..1 + old.len() + new.len()].copy_from_slice(new.as_bytes());
+        self.request(
+            op::RENAME,
+            &data[..1 + old.len() + new.len()],
+            &mut [],
+            &mut [],
+        )
+        .map(drop)
     }
 
     /// Removes child `name` of this directory.

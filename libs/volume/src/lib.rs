@@ -858,6 +858,126 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
+    /// Moves entry `name` of `dir` to `new_name` in `new_dir` (ADR-0038).
+    /// An existing file there is replaced, an existing empty directory too
+    /// (by a directory). Open handles keep working: nodes do not change.
+    /// Like every namespace change it becomes durable, atomically, with the
+    /// next commit.
+    pub fn rename(
+        &mut self,
+        dir: NodeId,
+        name: &str,
+        new_dir: NodeId,
+        new_name: &str,
+    ) -> Result<(), FsError> {
+        if !valid_name(new_name.as_bytes()) {
+            return Err(FsError::InvalidName);
+        }
+        let child = self.lookup(dir, name)?;
+        self.entries(new_dir)?;
+        let node = self.node(child)?;
+        let (moving_directory, volatile) = (node.kind() == Kind::Directory, node.volatile);
+        if node.read_only || self.node(dir)?.read_only || self.node(new_dir)?.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        // Volatile nodes (/bin) and disk nodes do not mix.
+        if self.node(new_dir)?.volatile != volatile {
+            return Err(FsError::ReadOnly);
+        }
+        if moving_directory && (new_dir == child || self.contains(child, new_dir)?) {
+            return Err(FsError::InvalidName);
+        }
+        let target = self.entries(new_dir)?.get(new_name).copied();
+        if let Some(target) = target {
+            if target == child {
+                return Ok(());
+            }
+            let target_node = self.node(target)?;
+            if target_node.read_only {
+                return Err(FsError::ReadOnly);
+            }
+            match (moving_directory, &target_node.content) {
+                (false, Content::Directory(_)) => return Err(FsError::IsADirectory),
+                (true, Content::File(_)) => return Err(FsError::NotADirectory),
+                (true, Content::Directory(entries)) if !entries.is_empty() => {
+                    return Err(FsError::NotEmpty);
+                }
+                _ => {}
+            }
+        }
+        let depth = self.node(new_dir)?.depth + 1;
+        let old_depth = self.node(child)?.depth;
+        let deepest = self.deepest(child)?;
+        if usize::from(deepest - old_depth + depth) > MAX_DEPTH {
+            return Err(FsError::NoSpace);
+        }
+        if !volatile {
+            self.ensure_room(2 + new_name.len() + 12, 0)?;
+        }
+        // Checks done: now the change.
+        if let Some(target) = target {
+            self.node_mut(target)?.linked = false;
+            self.free_if_unused(target);
+        }
+        if let Content::Directory(entries) = &mut self.node_mut(dir)?.content {
+            entries.remove(name);
+        }
+        if let Content::Directory(entries) = &mut self.node_mut(new_dir)?.content {
+            entries.insert(String::from(new_name), child);
+        }
+        self.shift_depth(child, i16::from(depth) - i16::from(old_depth));
+        self.dirty |= !volatile;
+        Ok(())
+    }
+
+    /// Whether `node` is below directory `dir`.
+    fn contains(&self, dir: NodeId, node: NodeId) -> Result<bool, FsError> {
+        let mut stack = vec![dir];
+        let mut seen = 0;
+        while let Some(current) = stack.pop() {
+            seen += 1;
+            if seen > MAX_NODES {
+                return Err(FsError::Corrupt);
+            }
+            if let Content::Directory(entries) = &self.node(current)?.content {
+                for &child in entries.values() {
+                    if child == node {
+                        return Ok(true);
+                    }
+                    stack.push(child);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// The greatest depth in the subtree of `id`.
+    fn deepest(&self, id: NodeId) -> Result<u8, FsError> {
+        let mut deepest = self.node(id)?.depth;
+        let mut stack = vec![id];
+        while let Some(current) = stack.pop() {
+            let node = self.node(current)?;
+            deepest = deepest.max(node.depth);
+            if let Content::Directory(entries) = &node.content {
+                stack.extend(entries.values().copied());
+            }
+        }
+        Ok(deepest)
+    }
+
+    fn shift_depth(&mut self, id: NodeId, by: i16) {
+        let mut stack = vec![id];
+        while let Some(current) = stack.pop() {
+            let Ok(node) = self.node_mut(current) else {
+                continue;
+            };
+            node.depth = (i16::from(node.depth) + by) as u8;
+            if let Content::Directory(entries) = &node.content {
+                stack.extend(entries.values().copied());
+            }
+        }
+    }
+
     // ---- File contents -----------------------------------------------------
 
     /// Reads up to `out.len()` bytes at `offset`; returns how many.
@@ -1425,6 +1545,95 @@ mod tests {
         let (volume, opened) = Volume::open(disk, false).expect("mount");
         assert_eq!(opened, Opened::Mounted);
         volume
+    }
+
+    #[test]
+    fn renames_move_replace_and_persist() {
+        let mut disk = MemDisk::new(256);
+        let (mut volume, _) = Volume::open(disk.clone(), true).unwrap();
+        let a = volume.create(ROOT, "a", Kind::Directory).unwrap();
+        let b = volume.create(ROOT, "b", Kind::Directory).unwrap();
+        let note = file(&mut volume, a, "note.txt", b"note");
+        file(&mut volume, b, "old.txt", b"old");
+        let held = file(&mut volume, b, "target.txt", b"replaced");
+        volume.retain(held).unwrap();
+        // Within a directory, across directories, replacing a file.
+        volume.rename(a, "note.txt", a, "renamed.txt").unwrap();
+        volume.rename(a, "renamed.txt", b, "target.txt").unwrap();
+        assert_eq!(volume.lookup(b, "target.txt"), Ok(note));
+        // The replaced file stays readable through its handle.
+        let mut bytes = [0u8; 8];
+        assert_eq!(volume.read(held, 0, &mut bytes), Ok(8));
+        volume.release(held);
+        // A directory moves with its contents, and its depth follows.
+        let inner = volume.create(a, "inner", Kind::Directory).unwrap();
+        file(&mut volume, inner, "deep.txt", b"deep");
+        volume.rename(ROOT, "a", b, "a-moved").unwrap();
+        assert_eq!(volume.node(inner).unwrap().depth, 3);
+        // Refusals.
+        assert_eq!(
+            volume.rename(ROOT, "b", inner, "loop"),
+            Err(FsError::InvalidName)
+        );
+        assert_eq!(volume.rename(ROOT, "b", ROOT, "b"), Ok(()));
+        assert_eq!(
+            volume.rename(b, "old.txt", b, "a-moved"),
+            Err(FsError::IsADirectory)
+        );
+        assert_eq!(volume.rename(b, "missing", b, "x"), Err(FsError::NotFound));
+        assert_eq!(
+            volume.rename(b, "old.txt", b, "a/b"),
+            Err(FsError::InvalidName)
+        );
+        volume.commit().unwrap();
+        disk = volume.device.take().unwrap();
+        let mut volume = reopen(&disk);
+        assert_eq!(
+            snapshot(&mut volume),
+            [
+                "/b/",
+                "/b/a-moved/",
+                "/b/a-moved/inner/",
+                "/b/a-moved/inner/deep.txt = deep",
+                "/b/old.txt = old",
+                "/b/target.txt = note",
+            ]
+        );
+        assert_eq!(
+            volume
+                .node(volume.lookup(ROOT, "b").unwrap())
+                .unwrap()
+                .depth,
+            1
+        );
+    }
+
+    #[test]
+    fn renames_respect_depth_and_volatility() {
+        let (mut volume, _) = Volume::open(MemDisk::new(256), true).unwrap();
+        let mut dir = ROOT;
+        for i in 0..MAX_DEPTH {
+            dir = volume
+                .create(dir, &format!("d{i}"), Kind::Directory)
+                .unwrap();
+        }
+        let tree = volume.create(ROOT, "tree", Kind::Directory).unwrap();
+        volume.create(tree, "child", Kind::Directory).unwrap();
+        let parent = volume.lookup(ROOT, "d0").unwrap();
+        // d0/…/d(MAX-2) holds a two-level tree only if it fits.
+        let mut deep = parent;
+        for i in 1..MAX_DEPTH - 1 {
+            deep = volume.lookup(deep, &format!("d{i}")).unwrap();
+        }
+        assert_eq!(
+            volume.rename(ROOT, "tree", deep, "tree"),
+            Err(FsError::NoSpace)
+        );
+        let bin = volume
+            .create_volatile_directory(ROOT, "bin", false)
+            .unwrap();
+        file(&mut volume, ROOT, "f", b"x");
+        assert_eq!(volume.rename(ROOT, "f", bin, "f"), Err(FsError::ReadOnly));
     }
 
     #[test]

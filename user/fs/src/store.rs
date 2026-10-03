@@ -208,6 +208,19 @@ impl Store {
         }
     }
 
+    pub fn rename(
+        &mut self,
+        dir: NodeId,
+        name: &str,
+        new_dir: NodeId,
+        new_name: &str,
+    ) -> Result<(), FsError> {
+        match self {
+            Self::Oceans(volume) => volume.rename(dir, name, new_dir, new_name),
+            Self::Fat(fat) => fat.rename(dir, name, new_dir, new_name).map_err(fat_error),
+        }
+    }
+
     pub fn truncate(&mut self, id: NodeId, size: u64) -> Result<(), FsError> {
         match self {
             Self::Oceans(volume) => volume.truncate(id, size),

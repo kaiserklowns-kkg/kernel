@@ -1,6 +1,7 @@
 //! Checking a volume's structure (and, after an unclean session of
 //! ours, reclaiming lost clusters; ADR-0037).
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -23,6 +24,13 @@ pub struct Report {
     /// Files whose chain is longer than their size needs (a crash while
     /// shrinking); trimmed by a repair.
     pub overlong: u32,
+    /// Entries naming clusters another entry with the same size and kind
+    /// already names (an interrupted rename); all but the first are
+    /// removed by a repair.
+    pub duplicates: u32,
+    /// Directories whose `..` does not name their parent (an interrupted
+    /// move); corrected by a repair.
+    pub parents: u32,
     pub free: u32,
 }
 
@@ -96,11 +104,23 @@ impl<D: Disk> Fat<D> {
             }
             report.used += 1;
         }
-        let mut directories = vec![root];
+        // Each directory with what its `..` should name (the root: none).
+        let mut directories: Vec<(u32, Option<u32>)> = vec![(root, None)];
+        // The chains entries start: first cluster → size and kind.
+        let mut starts: BTreeMap<u32, (u32, bool)> = BTreeMap::new();
+        let mut duplicates: Vec<crate::Entry> = Vec::new();
         // Over-long files: their entry, chain and clusters needed.
         let mut trims: Vec<(u64, Vec<u32>, usize)> = Vec::new();
-        while let Some(directory) = directories.pop() {
+        while let Some((directory, parent)) = directories.pop() {
             report.directories += 1;
+            if let Some(parent) = parent
+                && self.parent_link(directory)? != parent
+            {
+                report.parents += 1;
+                if reclaim {
+                    self.set_parent_link(directory, parent)?;
+                }
+            }
             if report.directories as usize > total {
                 return Err(Error::Corrupt);
             }
@@ -124,15 +144,22 @@ impl<D: Disk> Fat<D> {
                     report.files += 1;
                     continue;
                 }
+                if starts.get(&entry.first) == Some(&(entry.size, entry.directory)) {
+                    report.duplicates += 1;
+                    duplicates.push(entry);
+                    continue;
+                }
                 let chain = self.chain(entry.first)?;
                 for &cluster in &chain {
                     if !mark(cluster) {
                         return Err(Error::Corrupt);
                     }
                 }
+                starts.insert(entry.first, (entry.size, entry.directory));
                 report.used += chain.len() as u32;
                 if entry.directory {
-                    directories.push(entry.first);
+                    let link = if directory == root { 0 } else { directory };
+                    directories.push((entry.first, Some(link)));
                 } else {
                     report.files += 1;
                     let needed = u64::from(entry.size).div_ceil(cluster_bytes) as usize;
@@ -158,7 +185,12 @@ impl<D: Disk> Fat<D> {
             }
         }
         report.lost = lost.len() as u32;
-        if reclaim && report.orphans > 0 {
+        if reclaim {
+            for entry in &duplicates {
+                self.delete_entry(entry)?;
+            }
+        }
+        if reclaim && report.orphans + report.duplicates + report.parents > 0 {
             self.barrier()?;
         }
         if reclaim && !lost.is_empty() {

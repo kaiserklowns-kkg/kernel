@@ -248,6 +248,38 @@ fn exercise<D: Disk>(fat: &mut Fat<D>) -> Vec<(&'static str, Vec<u8>)> {
         fat.write_file(file, 0, format!("{n}\n").as_bytes())
             .unwrap();
     }
+    // Renames (ADR-0038): a new long name, a change of case only, a move
+    // to another directory, replacing a file, moving a directory.
+    let before = create_kept(fat, ROOT, "before.txt", false);
+    fat.write_file(before, 0, b"renamed\n").unwrap();
+    fat.rename(ROOT, "before.txt", ROOT, "After Rename.txt")
+        .unwrap();
+    assert_eq!(fat.lookup(ROOT, "before.txt"), Err(Error::NotFound));
+    assert!(
+        read_all(fat, before) == b"renamed\n",
+        "the open node follows"
+    );
+    fat.rename(ROOT, "notes.txt", ROOT, "NOTES.txt").unwrap();
+    fat.rename(ROOT, "grown.bin", dir, "grown.bin").unwrap();
+    let victim = create_kept(fat, ROOT, "victim.txt", false);
+    fat.write_file(victim, 0, b"victim").unwrap();
+    fat.rename(ROOT, "After Rename.txt", ROOT, "victim.txt")
+        .unwrap();
+    assert!(
+        read_all(fat, victim) == b"victim",
+        "a replaced file stays readable while open"
+    );
+    fat.release(victim);
+    fat.rename(dir, "sub", ROOT, "sub moved").unwrap();
+    assert_eq!(
+        fat.rename(ROOT, "New Dir", dir, "inside itself"),
+        Err(Error::InvalidName)
+    );
+    assert_eq!(
+        fat.rename(ROOT, "victim.txt", ROOT, "sub moved"),
+        Err(Error::IsADirectory)
+    );
+    assert_eq!(fat.rename(ROOT, "missing", ROOT, "x"), Err(Error::NotFound));
     fat.sync().unwrap();
     let mut mixed_expected = pattern(3000, 1);
     mixed_expected.truncate(100);
@@ -255,9 +287,10 @@ fn exercise<D: Disk>(fat: &mut Fat<D>) -> Vec<(&'static str, Vec<u8>)> {
         ("notes.txt", b"hello from Oceans\n".to_vec()),
         ("Mixed Case Name.md", mixed_expected),
         ("ไฟล์ใหม่.txt", "เขียนได้แล้ว\n".as_bytes().to_vec()),
-        ("New Dir/sub/deep file.bin", big),
+        ("sub moved/deep file.bin", big),
+        ("victim.txt", b"renamed\n".to_vec()),
         ("refilled.dat", b"again".to_vec()),
-        ("grown.bin", vec![0u8; 1500]),
+        ("New Dir/grown.bin", vec![0u8; 1500]),
         ("New Dir/Long File Name 11.txt", b"11\n".to_vec()),
         ("A long file name.txt", b"long names work\n".to_vec()),
     ]
@@ -289,7 +322,7 @@ fn writes_read_back() {
             !listing.contains(&"HELLO.TXT".to_string()) && !listing.contains(&"Docs".to_string())
         );
         assert!(
-            listing.contains(&"notes.txt".to_string()) && listing.contains(&"New Dir".to_string())
+            listing.contains(&"NOTES.txt".to_string()) && listing.contains(&"New Dir".to_string())
         );
         let dir = fat.lookup(ROOT, "New Dir").unwrap();
         assert_eq!(names(&mut fat, dir).len(), 13);
@@ -398,8 +431,14 @@ fn every_crash_leaves_a_repairable_volume() {
                     .check()
                     .unwrap_or_else(|e| panic!("{name}: check after repair: {e:?}"));
                 assert_eq!(
-                    (report.lost, report.orphans, report.overlong),
-                    (0, 0, 0),
+                    (
+                        report.lost,
+                        report.orphans,
+                        report.overlong,
+                        report.duplicates,
+                        report.parents
+                    ),
+                    (0, 0, 0, 0, 0),
                     "{name}"
                 );
                 read_everything(&mut fat, ROOT);

@@ -55,6 +55,11 @@ pub struct Recovery {
     pub mirrored: u32,
     /// Long-name entries without their short entry, removed.
     pub orphans: u32,
+    /// Second entries for the same clusters (an interrupted rename),
+    /// removed.
+    pub duplicates: u32,
+    /// Directories whose `..` was corrected (an interrupted move).
+    pub parents: u32,
 }
 
 const FSINFO_LEAD: u32 = 0x4161_5252;
@@ -81,6 +86,8 @@ impl<D: Disk> Fat<D> {
             reclaimed: 0,
             mirrored: 0,
             orphans: 0,
+            duplicates: 0,
+            parents: 0,
         };
         if self.writes.enabled {
             return Ok(recovery);
@@ -94,6 +101,8 @@ impl<D: Disk> Fat<D> {
             let report: Report = self.scan(true)?;
             recovery.reclaimed = report.reclaimed;
             recovery.orphans = report.orphans;
+            recovery.duplicates = report.duplicates;
+            recovery.parents = report.parents;
             self.writes.free = report.free;
             self.writes.hint = 2;
             self.update_fsinfo()?;
@@ -374,10 +383,7 @@ impl<D: Disk> Fat<D> {
         }
         self.begin()?;
         // 1. The entry goes: the short entry (what makes it exist) first.
-        self.write_bytes(entry.offset, &[DELETED])?;
-        for &long in &entry.long {
-            self.write_bytes(long, &[DELETED])?;
-        }
+        self.delete_entry(&entry)?;
         self.barrier()?;
         // 2. Its clusters: now, or when the last handle on it goes.
         let held = self
@@ -395,6 +401,195 @@ impl<D: Disk> Fat<D> {
             self.nodes[id] = None;
         }
         self.free_chain(entry.first)
+    }
+
+    /// Moves entry `name` of `dir` to `new_name` in `new_dir` (ADR-0038):
+    /// the new entry, a moved directory's `..`, then the old entry's
+    /// removal, with barriers. A crash in between leaves two entries for
+    /// the same clusters, which the next repair resolves to one of them.
+    /// An existing file there is replaced, but not atomically: FAT cannot
+    /// swap entries, so its entry goes first.
+    pub fn rename(
+        &mut self,
+        dir: NodeId,
+        name: &str,
+        new_dir: NodeId,
+        new_name: &str,
+    ) -> Result<(), Error> {
+        if !self.writes.enabled {
+            return Err(Error::ReadOnly);
+        }
+        names::validate(new_name)?;
+        let parent = self.directory(dir)?;
+        let new_parent = self.directory(new_dir)?;
+        let source = self.find(parent, name)?.ok_or(Error::NotFound)?;
+        if source.directory {
+            self.refuse_cycle(source.first, new_parent)?;
+        }
+        let mut target = self.find(new_parent, new_name)?;
+        if target.as_ref().is_some_and(|t| t.offset == source.offset) {
+            if source.name == new_name {
+                return Ok(());
+            }
+            // The same entry: only the case of its name changes.
+            target = None;
+        }
+        if let Some(t) = &target {
+            match (source.directory, t.directory) {
+                (false, true) => return Err(Error::IsADirectory),
+                (true, false) => return Err(Error::NotADirectory),
+                (true, true) => {
+                    let mut empty = true;
+                    self.walk(t.first, |_| {
+                        empty = false;
+                        true
+                    })?;
+                    if !empty {
+                        return Err(Error::NotEmpty);
+                    }
+                }
+                (false, false) => {}
+            }
+        }
+        self.begin()?;
+        let mut raw = [0u8; ENTRY];
+        self.read(source.offset, &mut raw)?;
+        let plan = names::plan(new_name);
+        if parent == new_parent
+            && !plan.long
+            && source.long.is_empty()
+            && plan.short == source.raw_short
+        {
+            // A short name whose case changes: one entry, rewritten whole.
+            raw[12] = (raw[12] & !0x18) | plan.case;
+            self.write_bytes(source.offset, &raw)?;
+            return self.barrier();
+        }
+        // The target's node no longer has an entry.
+        let target_node = target.as_ref().and_then(|t| {
+            self.nodes
+                .iter()
+                .position(|n| n.is_some_and(|n| n.entry == Some(t.offset) && !n.deleted))
+        });
+        if let Some(id) = target_node
+            && let Some(Some(node)) = self.nodes.get_mut(id)
+        {
+            node.entry = None;
+        }
+        // 1. A replaced target goes first.
+        if let Some(t) = &target {
+            self.delete_entry(t)?;
+            self.barrier()?;
+        }
+        // 2. The new entry: the same clusters, size, attributes and times.
+        let short = if plan.long {
+            self.unique_short(new_parent, &plan.short)?
+        } else {
+            plan.short
+        };
+        let long = if plan.long {
+            names::long_entries(new_name, &short)
+        } else {
+            Vec::new()
+        };
+        let slots = self.free_slots(new_parent, long.len() + 1)?;
+        raw[..11].copy_from_slice(&short);
+        raw[12] = (raw[12] & !0x18) | plan.case;
+        for (&slot, entry) in slots.iter().zip(&long) {
+            self.write_bytes(slot, entry)?;
+        }
+        if !long.is_empty() {
+            self.barrier()?;
+        }
+        let new_offset = slots[long.len()];
+        self.write_bytes(new_offset, &raw)?;
+        self.barrier()?;
+        // 3. A moved directory names its new parent.
+        if source.directory && parent != new_parent {
+            self.set_parent_link(source.first, if new_dir == ROOT { 0 } else { new_parent })?;
+            self.barrier()?;
+        }
+        // 4. The old entry goes.
+        self.delete_entry(&source)?;
+        self.barrier()?;
+        for node in self.nodes.iter_mut().flatten() {
+            if node.entry == Some(source.offset) && !node.deleted {
+                node.entry = Some(new_offset);
+            }
+        }
+        // 5. The replaced target's clusters: now, or when its last handle
+        //    goes.
+        if let Some(t) = target {
+            if let Some(id) = target_node
+                && let Some(Some(node)) = self.nodes.get_mut(id)
+            {
+                if node.refs > 0 {
+                    node.deleted = true;
+                    return Ok(());
+                }
+                self.nodes[id] = None;
+            }
+            self.free_chain(t.first)?;
+        }
+        Ok(())
+    }
+
+    /// Refuses moving directory `moving` into itself or below itself.
+    fn refuse_cycle(&mut self, moving: u32, new_parent: u32) -> Result<(), Error> {
+        let root = if self.g.kind == FatType::Fat32 {
+            self.g.root_cluster
+        } else {
+            0
+        };
+        let mut current = new_parent;
+        for _ in 0..=self.g.clusters {
+            if current == moving {
+                return Err(Error::InvalidName);
+            }
+            if current == root {
+                return Ok(());
+            }
+            let parent = self.parent_link(current)?;
+            current = if parent == 0 { root } else { parent };
+        }
+        Err(Error::Corrupt)
+    }
+
+    /// The cluster a directory's `..` entry names (0: the root).
+    pub(crate) fn parent_link(&mut self, directory: u32) -> Result<u32, Error> {
+        let mut raw = [0u8; ENTRY];
+        self.read(self.cluster_offset(directory)? + ENTRY as u64, &mut raw)?;
+        if &raw[..11] != b"..         " {
+            return Err(Error::Corrupt);
+        }
+        let first = u32::from(u16::from_le_bytes([raw[20], raw[21]])) << 16
+            | u32::from(u16::from_le_bytes([raw[26], raw[27]]));
+        Ok(if self.g.kind == FatType::Fat32 {
+            first
+        } else {
+            first & 0xffff
+        })
+    }
+
+    pub(crate) fn set_parent_link(&mut self, directory: u32, parent: u32) -> Result<(), Error> {
+        let offset = self.cluster_offset(directory)? + ENTRY as u64;
+        let mut raw = [0u8; ENTRY];
+        self.read(offset, &mut raw)?;
+        if &raw[..11] != b"..         " {
+            return Err(Error::Corrupt);
+        }
+        raw[20..22].copy_from_slice(&((parent >> 16) as u16).to_le_bytes());
+        raw[26..28].copy_from_slice(&(parent as u16).to_le_bytes());
+        self.write_bytes(offset, &raw)
+    }
+
+    /// Marks an entry deleted: the short entry first, then its long ones.
+    pub(crate) fn delete_entry(&mut self, entry: &crate::Entry) -> Result<(), Error> {
+        self.write_bytes(entry.offset, &[DELETED])?;
+        for &long in &entry.long {
+            self.write_bytes(long, &[DELETED])?;
+        }
+        Ok(())
     }
 
     /// `n` free clusters, searched from the hint (not yet marked).

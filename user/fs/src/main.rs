@@ -349,6 +349,20 @@ fn mount(log: Handle, block: Option<Handle>) -> Volume<DiskDevice> {
     }
 }
 
+/// A relative path's components, each a valid name.
+fn split_path(bytes: &[u8]) -> Result<Vec<&str>, Status> {
+    let text = core::str::from_utf8(bytes).map_err(|_| Status::InvalidName)?;
+    let parts: Vec<&str> = text.split('/').collect();
+    if parts
+        .iter()
+        .all(|p| oceans_volume::valid_name(p.as_bytes()))
+    {
+        Ok(parts)
+    } else {
+        Err(Status::InvalidName)
+    }
+}
+
 fn u64_at(data: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?))
 }
@@ -512,8 +526,11 @@ impl Fs {
                             say(
                                 self.log,
                                 format_args!(
-                                    "the FAT volume was not synced: {} lost clusters freed, {} orphaned names removed, {} FAT sectors mirrored",
-                                    recovery.reclaimed, recovery.orphans, recovery.mirrored
+                                    "the FAT volume was not synced: {} lost clusters freed, {} orphaned names removed, {} interrupted renames resolved, {} FAT sectors mirrored",
+                                    recovery.reclaimed,
+                                    recovery.orphans,
+                                    recovery.duplicates + recovery.parents,
+                                    recovery.mirrored
                                 ),
                             );
                         }
@@ -581,7 +598,7 @@ impl Fs {
         received: &[Handle],
     ) -> Reply {
         let changes = match operation {
-            op::WRITE | op::REMOVE | op::TRUNCATE | op::WRITE_BUF => true,
+            op::WRITE | op::REMOVE | op::TRUNCATE | op::WRITE_BUF | op::RENAME => true,
             op::OPEN => data.first().is_some_and(|f| {
                 f & (flags::WRITE | flags::CREATE_FILE | flags::CREATE_DIRECTORY) != 0
             }),
@@ -708,6 +725,7 @@ impl Fs {
             op::LIST => self.list(open, data),
             op::REMOVE => self.remove(open, data),
             op::TRUNCATE => self.truncate(open, data),
+            op::RENAME => self.rename(open, data),
             op::SYNC => {
                 self.sync_mounts();
                 self.commit("sync").map(|()| Reply::ok(&[])).map_err(status)
@@ -891,6 +909,92 @@ impl Fs {
         self.volume.remove(open.node, name).map_err(status)?;
         let _ = self.commit("remove");
         Ok(Reply::ok(&[]))
+    }
+
+    /// `RENAME` (ADR-0038): paths relative to the handle's directory; a
+    /// rename within one mounted filesystem is passed to it, one between
+    /// filesystems refused.
+    fn rename(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {
+        let (&old_len, rest) = data.split_first().ok_or(Status::BadRequest)?;
+        let old = rest.get(..usize::from(old_len)).ok_or(Status::BadRequest)?;
+        let new = &rest[usize::from(old_len)..];
+        let (old, new) = (split_path(old)?, split_path(new)?);
+        if !open.writable {
+            return Err(Status::PermissionDenied);
+        }
+        if open.node == ROOT && self.media.is_none() {
+            let mount =
+                |parts: &[&str]| self.mounts.iter().position(|(point, _)| *point == parts[0]);
+            match (mount(&old), mount(&new)) {
+                (None, None) => {}
+                (Some(a), Some(b)) if a == b && old.len() > 1 && new.len() > 1 => {
+                    return Ok(self.rename_in_mount(a, &old[1..], &new[1..]));
+                }
+                // Mount points themselves stay where they are.
+                (Some(_), _) if old.len() == 1 => return Err(Status::PermissionDenied),
+                (_, Some(_)) if new.len() == 1 => return Err(Status::PermissionDenied),
+                _ => return Err(Status::CrossDevice),
+            }
+        }
+        let (old_dir, old_name) = self.parent_of(open.node, &old)?;
+        let new_dir = self.parent_of(open.node, &new);
+        let result = new_dir.and_then(|(new_dir, new_name)| {
+            let result = self
+                .volume
+                .rename(old_dir, old_name, new_dir, new_name)
+                .map_err(status);
+            self.volume.release(new_dir);
+            result
+        });
+        self.volume.release(old_dir);
+        result?;
+        let _ = self.commit("rename");
+        Ok(Reply::ok(&[]))
+    }
+
+    /// The directory holding the last component of `parts`, held (the
+    /// caller releases it), and that component.
+    fn parent_of<'a>(
+        &mut self,
+        start: NodeId,
+        parts: &[&'a str],
+    ) -> Result<(NodeId, &'a str), Status> {
+        let (&name, dirs) = parts.split_last().ok_or(Status::InvalidName)?;
+        let mut dir = start;
+        self.volume.retain(dir).map_err(status)?;
+        for part in dirs {
+            let next = self.volume.lookup(dir, part).map_err(status);
+            let next = next.and_then(|next| match self.volume.kind(next).map_err(status)? {
+                oceans_volume::Kind::Directory => Ok(next),
+                oceans_volume::Kind::File => Err(Status::NotADirectory),
+            });
+            let next = match next
+                .and_then(|next| self.volume.retain(next).map(|()| next).map_err(status))
+            {
+                Ok(next) => next,
+                Err(error) => {
+                    self.volume.release(dir);
+                    return Err(error);
+                }
+            };
+            self.volume.release(dir);
+            dir = next;
+        }
+        Ok((dir, name))
+    }
+
+    /// A rename inside mount `index`, asked of the mounted service.
+    fn rename_in_mount(&mut self, index: usize, old: &[&str], new: &[&str]) -> Reply {
+        let (old, new) = (old.join("/"), new.join("/"));
+        let mut data = Vec::with_capacity(1 + old.len() + new.len());
+        data.push(old.len() as u8);
+        data.extend_from_slice(old.as_bytes());
+        data.extend_from_slice(new.as_bytes());
+        let root = self.mounts[index].1;
+        match oceans_rt::ipc_call_msg(root, op::RENAME, &data, &[], &mut [], &mut []) {
+            Ok(got) => Reply::status(Status::from_label(got.label)),
+            Err(_) => Reply::status(Status::IoError),
+        }
     }
 
     fn truncate(&mut self, open: Open, data: &[u8]) -> Result<Reply, Status> {

@@ -166,6 +166,17 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run disk out use:usbdisk -- info\r\n",
     b"ls /usb\r\n",
     b"write /usb/note.txt kept on a usb stick\r\n",
+    // Renames (ADR-0038): on the system disk, inside the stick (through
+    // the mount), and refused between the two.
+    b"write /keep/move-me.txt moved\r\n",
+    b"mkdir /keep/sub\r\n",
+    b"mv /keep/move-me.txt /keep/sub/moved.txt\r\n",
+    b"cat /keep/sub/moved.txt\r\n",
+    b"cat /keep/move-me.txt\r\n",
+    b"write /usb/tmp.txt temporary\r\n",
+    b"mv /usb/tmp.txt /usb/renamed.txt\r\n",
+    b"cat /usb/renamed.txt\r\n",
+    b"mv /keep/sub/moved.txt /usb/moved.txt\r\n",
     b"cat /usb/note.txt\r\n",
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /usb/big.bin\r\n",
     b"sync\r\n",
@@ -186,6 +197,12 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"sync\r\n",
     b"cat /usb/new.txt\r\n",
     b"cat /usb/oceans-dir/inside.txt\r\n",
+    // Renames on FAT: a directory moves (its ".." changes), a file into it.
+    b"mkdir /usb/outer\r\n",
+    b"mv /usb/oceans-dir /usb/outer/moved-dir\r\n",
+    b"mv /usb/new.txt /usb/outer/moved-dir/renamed-on-fat.txt\r\n",
+    b"cat /usb/outer/moved-dir/renamed-on-fat.txt\r\n",
+    b"sync\r\n",
     // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
     // and is removed again; then the hub goes, taking its tablet along.
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.2,id=hotplug",
@@ -306,6 +323,10 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("deep"),
     Expect::Line("written on FAT"),
     Expect::Line("nested"),
+    Expect::Line("moved"),
+    Expect::Contains("cat: /keep/move-me.txt: not found"),
+    Expect::Line("temporary"),
+    Expect::Contains("mv: /keep/sub/moved.txt: not on the same filesystem"),
     Expect::Contains("usb-storage: port 3: disk removed"),
     Expect::Contains("xhci: port 3: device removed"),
     Expect::Contains("disk: I/O error"),
@@ -839,7 +860,11 @@ fn check_smoke_fat() -> Result {
             .map_err(|e| format!("{e:?}"))?;
         Ok(bytes)
     };
-    if read("new.txt")? != b"written on FAT\n" || read("oceans-dir/inside.txt")? != b"nested\n" {
+    if read("outer/moved-dir/renamed-on-fat.txt")? != b"written on FAT\n"
+        || read("outer/moved-dir/inside.txt")? != b"nested\n"
+        || read("new.txt").is_ok()
+        || read("oceans-dir").is_ok()
+    {
         return Err("the FAT stick does not hold what the shell wrote".into());
     }
     if read("big.bin")? != big_body() {
