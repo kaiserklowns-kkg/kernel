@@ -39,5 +39,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0029](0029-framebuffer-console.md) | Framebuffer console and PS/2 keyboard | Accepted |
 | [0030](0030-shared-buffers.md) | Shared buffers for bulk data | Accepted |
 | [0031](0031-tls.md) | TLS and wall-clock time | Accepted |
+| [0032](0032-usb.md) | USB: an xHCI driver and boot keyboards | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

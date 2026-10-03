@@ -562,6 +562,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-usb"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-virtio"
 version = "0.1.0"
 dependencies = [
@@ -934,6 +938,7 @@ dependencies = [
  "oceans-net-proto",
  "oceans-rt",
  "oceans-tls",
+ "oceans-usb",
 ]
 
 [[package]]
@@ -1057,6 +1062,15 @@ dependencies = [
  "curve25519-dalek",
  "rand_core",
  "zeroize",
+]
+
+[[package]]
+name = "xhci"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
+ "oceans-usb",
+ "oceans-virtio",
 ]
 
 [[package]]

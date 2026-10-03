@@ -1,0 +1,17 @@
+[package]
+name = "xhci"
+description = "USB host controller (xHCI) driver: a userspace service holding one device capability, typing boot keyboards into the console (ADR-0032)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "xhci"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-usb.workspace = true
+oceans-virtio.workspace = true

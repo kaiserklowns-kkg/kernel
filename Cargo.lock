@@ -556,6 +556,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-usb"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-volume"
 version = "0.1.0"
 

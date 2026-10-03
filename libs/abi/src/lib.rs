@@ -20,9 +20,10 @@
 /// memory size); 6 = ADR-0020 (27: system information); 7 = ADR-0021
 /// (28–34: devices; errors -15 and -16); 8 = ADR-0023 (35–37: bound
 /// notifications, timers, clock); 9 = ADR-0026 (38: random); 10 = ADR-0031
-/// (39: wall time). Versions only
+/// (39: wall time); 11 = ADR-0032 (40: console input; class selectors for
+/// `DEVICE_OPEN`). Versions only
 /// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 10;
+pub const ABI_VERSION: u64 = 11;
 
 /// System call numbers.
 pub mod nr {
@@ -187,6 +188,13 @@ pub mod nr {
     /// read at boot plus the monotonic clock. `NotFound` if the machine has
     /// no usable real-time clock. Needs no capability.
     pub const TIME: u64 = 39;
+
+    // ABI 11
+
+    /// `(console, ptr, len) -> len` — appends `len` (at most
+    /// [`CONSOLE_IO_MAX`](super::CONSOLE_IO_MAX)) bytes to the console's
+    /// input, as if typed (keyboard drivers). Needs `MANAGE`.
+    pub const CONSOLE_INPUT: u64 = 40;
 }
 
 /// Largest single `RANDOM` request, in bytes.
@@ -573,6 +581,16 @@ pub mod device {
     pub const fn selector(vendor: u16, device: u16) -> u64 {
         ((vendor as u64) << 16) | device as u64
     }
+
+    /// Marks a class selector (ABI 11).
+    pub const CLASS_SELECTOR: u64 = 1 << 40;
+
+    /// A `DEVICE_OPEN` selector matching any function of this class,
+    /// subclass and programming interface (ABI 11), for standard
+    /// controller interfaces such as xHCI (`0c 03 30`).
+    pub const fn class_selector(class: u8, subclass: u8, prog_if: u8) -> u64 {
+        CLASS_SELECTOR | (class as u64) << 16 | (subclass as u64) << 8 | prog_if as u64
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +664,9 @@ mod tests {
         assert_eq!(DeviceRecord::decode(&bytes), Some(record));
         assert_eq!(DeviceRecord::decode(&bytes[..15]), None);
         assert_eq!(selector(0x1af4, 0x1042), 0x1af4_1042);
+        assert_eq!(class_selector(0x0c, 0x03, 0x30), (1 << 40) | 0x0c0330);
+        // A vendor selector never has the class bit.
+        assert_eq!(selector(0xffff, 0xffff) & CLASS_SELECTOR, 0);
     }
 
     #[test]

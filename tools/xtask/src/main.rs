@@ -32,6 +32,7 @@ const USER_PROGRAMS: &[&str] = &[
     "disk",
     "virtio-blk",
     "virtio-net",
+    "xhci",
     "net",
     "net-echo",
     "ifconfig",
@@ -40,6 +41,7 @@ const USER_PROGRAMS: &[&str] = &[
     "nc",
     "fetch",
     "date",
+    "lsusb",
     "ipc-test",
 ];
 /// The virtio disk QEMU attaches (ADR-0021), holding the filesystem
@@ -131,6 +133,16 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run fetch out use:net -- https://10.0.2.2:$HTTPS/tls.txt\r\n",
     b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.txt\r\n",
     b"run fetch out use:net use:fs -- --ca /keep/ca.pem https://10.0.2.2:$HTTPS/tls.bin /keep/tls.bin\r\n",
+    // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
+    // typed on it reaches the shell like any other input.
+    b"lsusb\r\n",
+    b"run lsusb out use:usb\r\n",
+    b"@usb echo typed on usb\r",
+    // Hot plug: a mouse appears, is listed, and is removed again.
+    b"@monitor device_add usb-mouse,bus=usb.0,id=hotplug",
+    b"run lsusb out use:usb\r\n",
+    b"@monitor device_del hotplug",
+    b"run lsusb out use:usb\r\n",
     b"exit\r\n",
 ];
 /// The second smoke boot, on the disk the first one left.
@@ -150,7 +162,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 10)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 11)"),
     Expect::Contains("net: configured 10.0.2.15/24"),
 ];
 /// Output the script must produce: `Line` must be a whole console line,
@@ -172,7 +184,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 10)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 11)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -211,6 +223,14 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello over https"),
     Expect::Contains("fetch: TLSv1_3 TLS13_"),
     Expect::Contains("fetch: saved 262144 bytes"),
+    Expect::Contains("lsusb: requests `use:usb`"),
+    Expect::Contains(
+        "xhci: port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s), keyboard (console input)",
+    ),
+    Expect::Line("port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s) keyboard (console input)"),
+    Expect::Line("typed on usb"),
+    Expect::Contains("QEMU USB Mouse (480 Mb/s) mouse (no driver)"),
+    Expect::Contains("device removed"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -512,8 +532,14 @@ fn prepare_disk(path: &str, fresh: bool) -> Result {
 /// The MAC QEMU gives the guest's network device.
 const GUEST_MAC: &str = "52:54:00:12:34:56";
 
-/// `forward`: host (UDP, TCP) ports forwarded to the guest's port 7.
-fn qemu_command(headless: bool, disk: &str, forward: Option<(u16, u16)>) -> Result<Command> {
+/// `forward`: host (UDP, TCP) ports forwarded to the guest's port 7;
+/// `monitor`: a host port for QEMU's monitor (to press USB keys).
+fn qemu_command(
+    headless: bool,
+    disk: &str,
+    forward: Option<(u16, u16)>,
+    monitor: Option<u16>,
+) -> Result<Command> {
     let qemu = find_qemu()?;
     let firmware = find_firmware(&qemu)?;
 
@@ -558,7 +584,19 @@ fn qemu_command(headless: bool, disk: &str, forward: Option<(u16, u16)>) -> Resu
     .arg(format!(
         "virtio-net-pci,netdev=net0,disable-legacy=on,mac={GUEST_MAC}"
     ))
+    // A USB 3 host controller (class 0c0330) with a keyboard, driven by the
+    // userspace xhci service (ADR-0032).
+    .args([
+        "-device",
+        "qemu-xhci,id=usb",
+        "-device",
+        "usb-kbd,bus=usb.0",
+    ])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
+    if let Some(port) = monitor {
+        cmd.arg("-monitor")
+            .arg(format!("tcp:127.0.0.1:{port},server=on,wait=off"));
+    }
     if headless {
         cmd.args(["-display", "none"]);
     }
@@ -628,7 +666,7 @@ fn find_firmware(qemu: &Path) -> Result<PathBuf> {
 fn run(profile: Profile) -> Result {
     build_image(profile, None)?;
     prepare_disk(DISK_IMAGE, false)?;
-    run_command(&mut qemu_command(false, DISK_IMAGE, None)?)
+    run_command(&mut qemu_command(false, DISK_IMAGE, None, None)?)
 }
 
 fn smoke(profile: Profile) -> Result {
@@ -674,11 +712,17 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
             .replace("$HTTP", &http_port.to_string())
             .into_bytes()
     };
-    let mut child = qemu_command(true, SMOKE_DISK_IMAGE, Some((udp_forward, tcp_forward)))?
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to start QEMU: {e}"))?;
+    let monitor_port = free_tcp_port()?;
+    let mut child = qemu_command(
+        true,
+        SMOKE_DISK_IMAGE,
+        Some((udp_forward, tcp_forward)),
+        Some(monitor_port),
+    )?
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .spawn()
+    .map_err(|e| format!("failed to start QEMU: {e}"))?;
     let mut serial_input = child.stdin.take().expect("stdin is piped");
 
     let stdout = child.stdout.take().expect("stdout is piped");
@@ -730,6 +774,27 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                     if commands.len() == 0 {
                         udp_answered = udp_answered || udp_echo.recv_timeout(PROBE_WAIT).is_ok();
                         tcp_answered = tcp_answered || tcp_echo.recv_timeout(PROBE_WAIT).is_ok();
+                    }
+                    // `@monitor COMMAND`: given to QEMU's monitor. It prints
+                    // no prompt, so the next command follows once the guest
+                    // has had time to react.
+                    let mut command = *command;
+                    while let Some(line) = command.strip_prefix(b"@monitor ") {
+                        monitor_command(monitor_port, line)?;
+                        thread::sleep(MONITOR_SETTLE);
+                        match commands.next() {
+                            Some(next) => command = next,
+                            None => break,
+                        }
+                    }
+                    // `@usb TEXT`: pressed on the USB keyboard; its Enter
+                    // brings the next prompt.
+                    if let Some(text) = command.strip_prefix(b"@usb ") {
+                        press_usb_keys(monitor_port, text)?;
+                        continue;
+                    }
+                    if command.starts_with(b"@") {
+                        continue;
                     }
                     for byte in expand(command) {
                         serial_input
@@ -992,6 +1057,40 @@ fn tcp_greeter() -> Result<u16> {
 /// The body of `/big`: 1 MiB in a pattern that catches reordering.
 fn big_body() -> Vec<u8> {
     (0..1_048_576u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// How long the guest gets to notice a monitor command (a USB device
+/// plugged in or out).
+const MONITOR_SETTLE: Duration = Duration::from_secs(2);
+
+/// Presses `text` (lowercase letters, digits, space, CR) on the guest's
+/// USB keyboard through QEMU's monitor (`sendkey`).
+fn press_usb_keys(port: u16, text: &[u8]) -> Result {
+    for &byte in text {
+        let key = match byte {
+            b'a'..=b'z' | b'0'..=b'9' => (byte as char).to_string(),
+            b' ' => "spc".to_string(),
+            b'\r' | b'\n' => "ret".to_string(),
+            other => return Err(format!("no USB key for {:?}", other as char)),
+        };
+        monitor_command(port, format!("sendkey {key}").as_bytes())?;
+        // One key at a time: sendkey holds each for 100 ms.
+        thread::sleep(Duration::from_millis(150));
+    }
+    Ok(())
+}
+
+/// Gives QEMU's (human) monitor one command line.
+fn monitor_command(port: u16, line: &[u8]) -> Result {
+    let mut monitor = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|e| format!("cannot reach QEMU's monitor: {e}"))?;
+    monitor
+        .write_all(line)
+        .and_then(|()| monitor.write_all(b"\n"))
+        .map_err(|e| format!("cannot talk to QEMU's monitor: {e}"))?;
+    // Let QEMU read the line before the connection closes.
+    thread::sleep(Duration::from_millis(100));
+    Ok(())
 }
 
 /// The TLS test material (ADR-0031): a CA, and a certificate it issued for

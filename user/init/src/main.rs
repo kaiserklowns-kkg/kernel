@@ -13,7 +13,11 @@
 //!    of endpoint NAME, provided by an earlier service), `grant = devices`
 //!    (the PCI device list, read-only), `grant = device:VVVV:DDDD` (the
 //!    PCI function with that vendor and device ID, opened exclusively:
-//!    what makes a service its driver, ADR-0021).
+//!    what makes a service its driver, ADR-0021), `grant =
+//!    device-class:CCSSPP` (the first function of that class, subclass
+//!    and programming interface, for standard interfaces such as xHCI),
+//!    `grant = console-input` (feeding the console's input and nothing
+//!    else: keyboard drivers, ADR-0032).
 //! 4. Supervises: one notification, a bit per service, signalled by the
 //!    kernel when a service exits. Restart policies `always`, `on-failure`
 //!    and `never`, with exponential backoff and a restart limit.
@@ -48,6 +52,8 @@ const BACKOFF_MAX_MS: u64 = 2000;
 /// pass narrower copies on to programs it starts; it never widens rights.
 const LOG_RIGHTS: u32 = rights::WRITE | rights::DUPLICATE | rights::TRANSFER;
 const CONSOLE_RIGHTS: u32 = rights::READ | rights::WRITE | rights::DUPLICATE | rights::TRANSFER;
+/// Input only: a keyboard driver can type but neither read nor print.
+const CONSOLE_INPUT_RIGHTS: u32 = rights::MANAGE | rights::TRANSFER;
 const SYSINFO_RIGHTS: u32 = rights::READ | rights::DUPLICATE | rights::TRANSFER;
 const USE_RIGHTS: u32 = rights::SEND | rights::DUPLICATE | rights::TRANSFER;
 const MODULE_RIGHTS: u32 = rights::READ | rights::MAP | rights::DUPLICATE | rights::TRANSFER;
@@ -77,6 +83,10 @@ enum Grant {
     /// The PCI function with this vendor and device ID; the text is the
     /// manifest's `VVVV:DDDD`.
     Device(u16, u16, &'static str),
+    /// The first PCI function of this class (`0xCCSSPP`); the text is the
+    /// manifest's `CCSSPP`.
+    DeviceClass(u32, &'static str),
+    ConsoleInput,
     Provide(&'static str),
     Use(&'static str),
     Module(&'static str),
@@ -326,6 +336,7 @@ fn parse(
                     ("grant", "console") => Grant::Console,
                     ("grant", "sysinfo") => Grant::SystemInfo,
                     ("grant", "devices") => Grant::Devices,
+                    ("grant", "console-input") => Grant::ConsoleInput,
                     ("grant", other) => {
                         if let Some(module) = other.strip_prefix("module:")
                             && !module.is_empty()
@@ -336,9 +347,14 @@ fn parse(
                                 Some((vendor, device)) => Grant::Device(vendor, device, id),
                                 None => return error("device grants are device:VVVV:DDDD (hex)"),
                             }
+                        } else if let Some(id) = other.strip_prefix("device-class:") {
+                            match parse_class(id) {
+                                Some(class) => Grant::DeviceClass(class, id),
+                                None => return error("class grants are device-class:CCSSPP (hex)"),
+                            }
                         } else {
                             return error(
-                                "unknown grant (known: log, console, sysinfo, devices, device:VVVV:DDDD, module:NAME)",
+                                "unknown grant (known: log, console, console-input, sysinfo, devices, device:VVVV:DDDD, device-class:CCSSPP, module:NAME)",
                             );
                         }
                     }
@@ -476,6 +492,16 @@ impl Init {
                         "device",
                         id,
                     ),
+                    Grant::DeviceClass(class, id) => (
+                        oceans_rt::device_open_class(self.bus, class, 0)?,
+                        "device",
+                        id,
+                    ),
+                    Grant::ConsoleInput => (
+                        oceans_rt::duplicate(self.console, CONSOLE_INPUT_RIGHTS)?,
+                        "console-input",
+                        "console-input",
+                    ),
                     Grant::Provide(name) => {
                         let (server, client) = oceans_rt::endpoint_create()?;
                         if !self.registry.set(name, client) {
@@ -601,6 +627,13 @@ fn parse_device_id(id: &str) -> Option<(u16, u16)> {
             .flatten()
     };
     Some((hex(vendor)?, hex(device)?))
+}
+
+/// `CCSSPP`: class, subclass and programming interface in hex.
+fn parse_class(id: &str) -> Option<u32> {
+    (id.len() == 6)
+        .then(|| u32::from_str_radix(id, 16).ok())
+        .flatten()
 }
 
 /// A read-only memory object holding `text`, for handing to a service.

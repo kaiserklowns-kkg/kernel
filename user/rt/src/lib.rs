@@ -647,6 +647,33 @@ pub fn unix_time_ms() -> Option<u64> {
     call(nr::TIME, [0; 6]).ok().map(|(ms, _)| ms)
 }
 
+/// Appends `bytes` to the console's input, as if typed (ABI 11; needs
+/// `MANAGE` on the console).
+pub fn console_input(console: Handle, bytes: &[u8]) -> Result<(), Error> {
+    for chunk in bytes.chunks(oceans_abi::CONSOLE_IO_MAX) {
+        call(
+            nr::CONSOLE_INPUT,
+            [
+                console.0,
+                chunk.as_ptr() as u64,
+                chunk.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Opens the `index`th PCI function of a class (`0xCCSSPP`), exclusively
+/// (ABI 11; needs `MANAGE` on the device bus).
+pub fn device_open_class(bus: Handle, class: u32, index: u64) -> Result<Handle, Error> {
+    let selector =
+        oceans_abi::device::class_selector((class >> 16) as u8, (class >> 8) as u8, class as u8);
+    call(nr::DEVICE_OPEN, [bus.0, selector, index, 0, 0, 0]).map(|(h, _)| Handle(h))
+}
+
 /// Maps a text memory object read-only for the rest of the process's life
 /// and returns its contents up to the first NUL (objects are zero-padded).
 pub fn map_text(memory: Handle) -> Option<&'static str> {

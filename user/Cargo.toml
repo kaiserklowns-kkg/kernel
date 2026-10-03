@@ -3,7 +3,7 @@
 # user/.cargo/config.toml. Built by `cargo xtask`.
 [workspace]
 resolver = "3"
-members = ["rt", "fs-proto", "block-proto", "net-proto", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "virtio-net", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
+members = ["rt", "fs-proto", "block-proto", "net-proto", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "virtio-net", "xhci", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,6 +24,7 @@ oceans-dns = { path = "../libs/dns" }
 oceans-archive = { path = "../libs/archive" }
 oceans-http = { path = "../libs/http" }
 oceans-tls = { path = "../libs/tls" }
+oceans-usb = { path = "../libs/usb" }
 oceans-elf = { path = "../libs/elf" }
 oceans-volume = { path = "../libs/volume" }
 

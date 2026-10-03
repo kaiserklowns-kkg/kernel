@@ -104,6 +104,15 @@ fn on_input(byte: u8) {
     }
 }
 
+/// Input from a keyboard driver in user space (ADR-0032), as if typed.
+pub fn inject(bytes: &[u8]) {
+    arch::without_interrupts(|| {
+        for &byte in bytes {
+            on_input(byte);
+        }
+    });
+}
+
 /// Blocks until input is available; copies up to `out.len()` bytes and
 /// returns how many. `out` must not be empty.
 pub fn read(out: &mut [u8]) -> usize {

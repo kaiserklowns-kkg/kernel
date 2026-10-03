@@ -73,6 +73,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::SLEEP => sleep(a0),
         nr::CONSOLE_READ => console_read(&process, a0, a1, a2),
         nr::CONSOLE_WRITE => console_write(&process, a0, a1, a2),
+        nr::CONSOLE_INPUT => console_input(&process, a0, a1, a2),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
         nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
@@ -707,6 +708,15 @@ fn console_write(process: &Process, raw: u64, ptr: u64, len: u64) -> SyscallResu
     Ok((len as u64, 0))
 }
 
+fn console_input(process: &Process, raw: u64, ptr: u64, len: u64) -> SyscallResult {
+    check_console(process, raw, Rights::MANAGE)?;
+    let len = len_arg(len, CONSOLE_IO_MAX)?;
+    let mut buffer = [0u8; CONSOLE_IO_MAX];
+    process.copy_from_user(ptr, &mut buffer[..len])?;
+    console::inject(&buffer[..len]);
+    Ok((len as u64, 0))
+}
+
 // ---- ABI 5 -----------------------------------------------------------------
 
 fn endpoint_mint(process: &Process, server: u64, badge: u64) -> SyscallResult {
@@ -867,8 +877,16 @@ fn device_list(process: &Process, bus: u64, ptr: u64, capacity: u64) -> SyscallR
 
 fn device_open(process: &Process, bus: u64, selector: u64, index: u64) -> SyscallResult {
     check_bus(process, bus, Rights::MANAGE)?;
-    let vendor = u16::try_from(selector >> 16).map_err(|_| Error::InvalidArgument)?;
-    let device = crate::pci::open(vendor, selector as u16, index)?;
+    let device = if selector & oceans_abi::device::CLASS_SELECTOR != 0 {
+        let class = u32::try_from(selector & !oceans_abi::device::CLASS_SELECTOR)
+            .ok()
+            .filter(|class| *class <= 0xff_ffff)
+            .ok_or(Error::InvalidArgument)?;
+        crate::pci::open_class(class, index)?
+    } else {
+        let vendor = u16::try_from(selector >> 16).map_err(|_| Error::InvalidArgument)?;
+        crate::pci::open(vendor, selector as u16, index)?
+    };
     let raw = insert(
         process,
         Capability::new(

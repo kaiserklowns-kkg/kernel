@@ -37,7 +37,8 @@ pub enum KernelObject {
     Log,
     /// A process: `WAIT` for its exit.
     Process(Arc<Process>),
-    /// The system console: `READ` input, `WRITE` output.
+    /// The system console: `READ` input, `WRITE` output, `MANAGE` feed
+    /// input (keyboard drivers, ADR-0032).
     Console,
     /// Read-only system information (`READ`): `SYSTEM_INFO`, ADR-0020.
     SystemInfo,
@@ -136,6 +137,7 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::TRANSFER),
         ObjectKind::Console => Rights::READ
             .union(Rights::WRITE)
+            .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::DeviceBus => Rights::READ

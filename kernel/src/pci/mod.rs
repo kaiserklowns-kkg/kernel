@@ -305,9 +305,24 @@ pub fn records() -> Vec<DeviceRecord> {
 /// Opens the `index`th endpoint with this vendor and device ID,
 /// exclusively.
 pub fn open(vendor: u16, device: u16, index: u64) -> Result<Arc<Device>, DeviceError> {
+    open_matching(index, |h| h.vendor == vendor && h.device == device)
+}
+
+/// Opens the `index`th function whose class, subclass and programming
+/// interface are `class` (`0xCCSSPP`), exclusively (ADR-0032).
+pub fn open_class(class: u32, index: u64) -> Result<Arc<Device>, DeviceError> {
+    open_matching(index, |h| {
+        u32::from(h.class) << 16 | u32::from(h.subclass) << 8 | u32::from(h.prog_if) == class
+    })
+}
+
+fn open_matching(
+    index: u64,
+    matches: impl Fn(&oceans_pci::Header) -> bool,
+) -> Result<Arc<Device>, DeviceError> {
     let function = functions()
         .iter()
-        .filter(|f| f.header.kind == 0 && f.header.vendor == vendor && f.header.device == device)
+        .filter(|f| f.header.kind == 0 && matches(&f.header))
         .nth(usize::try_from(index).map_err(|_| DeviceError::NotFound)?)
         .ok_or(DeviceError::NotFound)?;
     function
