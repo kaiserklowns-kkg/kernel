@@ -227,10 +227,7 @@ pub fn init(boot: &BootInfo) {
         return;
     };
     if fb.bpp != 32 {
-        klog::warn!(
-            "{}-bit framebuffer not supported; serial only",
-            fb.bpp
-        );
+        klog::warn!("{}-bit framebuffer not supported; serial only", fb.bpp);
         return;
     }
     let size = fb.pitch * fb.height;
@@ -245,11 +242,7 @@ pub fn init(boot: &BootInfo) {
     let cols = (fb.width as usize) / cell_width;
     let rows = (fb.height as usize) / CELL_HEIGHT;
     if cols < 20 || rows < 5 {
-        klog::warn!(
-            "{}x{} is too small for a console",
-            fb.width,
-            fb.height
-        );
+        klog::warn!("{}x{} is too small for a console", fb.width, fb.height);
         return;
     }
     let mut display = Display {

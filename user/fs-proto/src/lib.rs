@@ -13,8 +13,10 @@
 //! [`MAX_DATA`] bytes per call).
 //!
 //! Durability (ADR-0022): creating and removing entries is durable when the
-//! call returns; file contents when the handle that changed them closes, or
-//! at [`op::SYNC`].
+//! call returns; file contents at [`op::SYNC`], or once the service has
+//! processed the close of the handle that changed them. A close is not a
+//! call: it returns before that commit, so a program that must know its
+//! data is on disk (before reporting success, say) calls `sync`.
 
 #![no_std]
 

@@ -43,6 +43,16 @@ builds on the entropy of ADR-0026; that is the next step.
   program's output line. That interleaving made a smoke expectation
   flaky.
 
+## Found on the way
+
+CI's second boot found the downloaded file empty, while local runs
+passed. `fetch` reported success and exited; the filesystem commits a
+writer's data when it processes the handle's close, which is
+asynchronous, and the test machine shut down before that. `fetch` now
+calls `sync` before reporting a file saved. The fs protocol
+documentation states the rule: a program that must know its data is on
+disk calls `sync`.
+
 ## Consequences
 
 - Programs can fetch over HTTP. Throughput is bounded by the 248-byte

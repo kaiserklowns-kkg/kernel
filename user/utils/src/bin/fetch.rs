@@ -88,7 +88,12 @@ fn main(start: Start) -> i64 {
             let _ = writeln!(out, "fetch: HTTP {} {}", head.status, head.reason());
             return EXIT_FAILED;
         }
-        if let Sink::File { written, .. } = &sink {
+        if let Sink::File { node, written } = &sink {
+            // Durable before we say so: a close is committed only when the
+            // filesystem gets to it, which may be after we have exited.
+            if let Err(error) = node.sync() {
+                return fail(&mut out, error.message());
+            }
             let _ = writeln!(out, "fetch: saved {written} bytes");
         }
         return 0;

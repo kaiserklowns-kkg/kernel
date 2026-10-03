@@ -66,7 +66,7 @@ volume. The fs service stays the protocol front end.
 | Change | Durable when |
 |---|---|
 | Creating or removing an entry | before the call returns |
-| File contents | when the handle that wrote them closes, or on `SYNC` (new protocol op 8; shell `sync`) |
+| File contents | on `SYNC` (new protocol op 8; shell `sync`), or once the service has processed the close of the handle that wrote them. The close returns before that commit; see ADR-0028. |
 | Anything, on clean shutdown | the service commits when its endpoint closes |
 
 A crash loses at most the uncommitted writes of files still open. It
