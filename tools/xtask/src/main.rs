@@ -33,6 +33,7 @@ const USER_PROGRAMS: &[&str] = &[
     "virtio-blk",
     "virtio-net",
     "xhci",
+    "usb-storage",
     "net",
     "net-echo",
     "ifconfig",
@@ -51,6 +52,15 @@ const USER_PROGRAMS: &[&str] = &[
 const DISK_IMAGE: &str = "build/disk.img";
 const SMOKE_DISK_IMAGE: &str = "build/smoke-disk.img";
 const DISK_SIZE: u64 = 8 * 1024 * 1024;
+/// The USB stick QEMU plugs into the xHCI controller (ADR-0034): `run`
+/// keeps its own, `smoke` starts from a fresh one holding `STICK_TEXT` in
+/// sector 0; the first smoke boot writes `STICK_WRITTEN` to sector 1 and
+/// the second reads it back.
+const STICK_IMAGE: &str = "build/usb-stick.img";
+const SMOKE_STICK_IMAGE: &str = "build/smoke-stick.img";
+const STICK_SIZE: usize = 4 * 1024 * 1024;
+const STICK_TEXT: &str = "hello from a usb stick";
+const STICK_WRITTEN: &str = "written over usb";
 /// What the first smoke boot stores and the second reads back.
 const KEPT_PATH: [&str; 2] = ["keep", "note.txt"];
 const KEPT_TEXT: &str = "kept across reboots";
@@ -64,10 +74,10 @@ const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
 /// kernel log shows `SHELL_READY` (user/shell, ADR-0018), then requires
 /// every `SHELL_EXPECT` line in the console output.
 const SHELL_READY: &str = "shell: ready";
-/// The last device the USB driver finds at boot (behind the hub). Its log
-/// line would otherwise land in the middle of the first commands' output,
-/// so typing waits for it.
-const USB_SETTLED: &str = "xhci: port 6.1: ";
+/// The last USB log lines of a boot: the device behind the hub, and the
+/// stick's class driver. They would otherwise land in the middle of the
+/// first commands' output, so typing waits for them.
+const USB_SETTLED: [&str; 2] = ["xhci: port 6.1: ", "usb-storage: port 3: "];
 /// Delay between typed bytes.
 const TYPING_DELAY: Duration = Duration::from_millis(2);
 /// Lines end in CR LF: Enter is CR on a serial terminal, and QEMU's Windows
@@ -142,6 +152,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"lsusb\r\n",
     b"run lsusb out use:usb\r\n",
     b"@usb echo typed on usb\r",
+    // USB mass storage (ADR-0034): the stick through the block protocol,
+    // then unplugged.
+    b"run disk out use:usbdisk -- info\r\n",
+    b"run disk out use:usbdisk -- read 0\r\n",
+    b"run disk out use:usbdisk -- write 1 written over usb\r\n",
+    b"run disk out use:usbdisk -- read 1\r\n",
+    b"@monitor device_del stick",
+    b"run disk out use:usbdisk -- info\r\n",
     // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
     // and is removed again; then the hub goes, taking its tablet along.
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.2,id=hotplug",
@@ -159,9 +177,11 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"ls /\r\n",
     b"write /bin/evil x\r\n",
     b"uname\r\n",
+    b"run disk out use:usbdisk -- read 1\r\n",
     b"exit\r\n",
 ];
 const REBOOT_EXPECT: &[Expect] = &[
+    Expect::Line("written over usb"),
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept across reboots"),
     Expect::Line("  note.txt"),
@@ -237,6 +257,16 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s) keyboard (console input)"),
     Expect::Line("typed on usb"),
     Expect::Contains("xhci: port 6: 0409:55aa QEMU USB Hub (12 Mb/s), hub"),
+    Expect::Contains("xhci: port 3: interface 0 handed to a class driver"),
+    Expect::Contains("usb-storage: port 3: QEMU QEMU HARDDISK, 4 MiB (8192 blocks of 512 bytes)"),
+    Expect::Line("port 3: 46f4:0001 QEMU USB HARDDRIVE (5 Gb/s) mass storage"),
+    Expect::Line("disk: 8192 sectors of 512 bytes (4 MiB)"),
+    Expect::Line("hello from a usb stick"),
+    Expect::Line("disk: wrote sector 1"),
+    Expect::Line("written over usb"),
+    Expect::Contains("usb-storage: port 3: disk removed"),
+    Expect::Contains("xhci: port 3: device removed"),
+    Expect::Contains("disk: I/O error"),
     Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) no driver"),
     Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (no driver)"),
     Expect::Contains("xhci: port 6.2: device removed"),
@@ -261,7 +291,7 @@ impl Expect {
         }
     }
 }
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(90);
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long the last command waits for the host's echo probes.
 const PROBE_WAIT: Duration = Duration::from_secs(30);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
@@ -548,6 +578,7 @@ const GUEST_MAC: &str = "52:54:00:12:34:56";
 fn qemu_command(
     headless: bool,
     disk: &str,
+    stick: &str,
     forward: Option<(u16, u16)>,
     monitor: Option<u16>,
 ) -> Result<Command> {
@@ -602,6 +633,13 @@ fn qemu_command(
         "qemu-xhci,id=usb",
         "-device",
         "usb-kbd,bus=usb.0,port=1",
+    ])
+    // A USB 3 stick (ADR-0034); QEMU attaches it to xHCI port 3.
+    .arg("-drive")
+    .arg(format!("if=none,id=stick,format=raw,file={stick}"))
+    .args([
+        "-device",
+        "usb-storage,bus=usb.0,port=3,drive=stick,id=stick",
     ])
     // A hub with a tablet behind it (ADR-0033).
     .args(["-device", "usb-hub,bus=usb.0,port=2,id=hub"])
@@ -680,12 +718,51 @@ fn find_firmware(qemu: &Path) -> Result<PathBuf> {
 fn run(profile: Profile) -> Result {
     build_image(profile, None)?;
     prepare_disk(DISK_IMAGE, false)?;
-    run_command(&mut qemu_command(false, DISK_IMAGE, None, None)?)
+    prepare_stick(STICK_IMAGE, false)?;
+    run_command(&mut qemu_command(
+        false,
+        DISK_IMAGE,
+        STICK_IMAGE,
+        None,
+        None,
+    )?)
+}
+
+/// A USB stick image with `STICK_TEXT` in sector 0; an existing one is
+/// replaced only if `fresh`.
+fn prepare_stick(path: &str, fresh: bool) -> Result {
+    let path = root().join(path);
+    if path.is_file() && !fresh {
+        return Ok(());
+    }
+    let mut image = vec![0u8; STICK_SIZE];
+    image[..STICK_TEXT.len()].copy_from_slice(STICK_TEXT.as_bytes());
+    fs::write(&path, image).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// What the guest wrote to the stick over USB, read from its image.
+fn check_smoke_stick() -> Result {
+    let path = root().join(SMOKE_STICK_IMAGE);
+    let image = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let sector = image.get(512..1024).ok_or("the stick image shrank")?;
+    let text = &sector[..sector.iter().position(|&b| b == 0).unwrap_or(512)];
+    if text != STICK_WRITTEN.as_bytes() {
+        return Err(format!(
+            "the USB stick's sector 1 holds {:?}",
+            String::from_utf8_lossy(text)
+        ));
+    }
+    if !image.starts_with(STICK_TEXT.as_bytes()) {
+        return Err("the USB stick's sector 0 changed".into());
+    }
+    println!("the sector written over USB is on the stick image");
+    Ok(())
 }
 
 fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
     prepare_disk(SMOKE_DISK_IMAGE, true)?;
+    prepare_stick(SMOKE_STICK_IMAGE, true)?;
     println!("smoke boot 1 of 2: blank disk");
     smoke_boot(SHELL_SCRIPT, SHELL_EXPECT)?;
     println!("smoke boot 2 of 2: the same disk");
@@ -693,6 +770,7 @@ fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
     smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT)?;
     check_smoke_disk()?;
+    check_smoke_stick()?;
     println!("smoke test passed: kernel came online, files survived a reboot");
     Ok(())
 }
@@ -730,6 +808,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let mut child = qemu_command(
         true,
         SMOKE_DISK_IMAGE,
+        SMOKE_STICK_IMAGE,
         Some((udp_forward, tcp_forward)),
         Some(monitor_port),
     )?
@@ -768,7 +847,8 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
 
     let deadline = Instant::now() + SMOKE_TIMEOUT;
     let mut online = false;
-    let (mut shell_ready, mut usb_settled, mut prompt_waiting) = (false, false, false);
+    let (mut shell_ready, mut prompt_waiting) = (false, false);
+    let mut usb_settled = [false; USB_SETTLED.len()];
     let mut ready = false;
     let mut commands = script.iter();
     let mut unmet: Vec<Expect> = expected.to_vec();
@@ -780,9 +860,11 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                 println!("  | {line}");
                 online |= line.contains(ONLINE_BANNER);
                 shell_ready |= line.contains(SHELL_READY);
-                usb_settled |= line.contains(USB_SETTLED);
+                for (settled, marker) in usb_settled.iter_mut().zip(USB_SETTLED) {
+                    *settled |= line.contains(marker);
+                }
                 unmet.retain(|expect| !expect.matches(&line));
-                if !ready && shell_ready && usb_settled {
+                if !ready && shell_ready && usb_settled.iter().all(|&s| s) {
                     ready = true;
                     // The prompt came before the USB devices settled: act
                     // on it now.

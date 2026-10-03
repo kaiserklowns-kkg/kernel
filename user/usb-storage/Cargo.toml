@@ -1,0 +1,17 @@
+[package]
+name = "usb-storage"
+description = "USB mass storage class driver (Bulk-Only Transport, SCSI): serves the block protocol for a USB stick claimed from the xhci service (ADR-0034)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "usb-storage"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-block-proto.workspace = true
+oceans-usb.workspace = true

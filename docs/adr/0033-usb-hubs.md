@@ -61,7 +61,8 @@ must also be told about.
 - **Tests:** xtask now waits until the boot devices are enumerated
   before typing. A late enumeration log line could otherwise split the
   first commands' output. The kernel's smoke-mode limit on the scripted
-  session rose to 90 s, the same as xtask's.
+  session rose to 90 s, the same as xtask's (180 s from ADR-0034, as
+  the script grew).
 
 ## Consequences
 

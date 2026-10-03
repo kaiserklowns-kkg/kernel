@@ -31,11 +31,12 @@ use core::sync::atomic::{Ordering, compiler_fence};
 
 use oceans_rt::{Buffer, Directory, Handle, Start, prot};
 use oceans_usb::Speed;
-use oceans_usb::descriptor::{self, Configuration, Device};
+use oceans_usb::descriptor::{self, Bulk, Configuration, Device};
 use oceans_usb::hid::Keyboard;
 use oceans_usb::hub;
 use oceans_usb::request::Setup;
-use oceans_usb::service::{self, Kind, Path, Record};
+use oceans_usb::service::{self, Claim, Kind, Path, Record};
+use oceans_usb::storage;
 use oceans_usb::xhci::{
     self, Consumer, Event, HubSlot, InputContext, Params, Producer, Slot, TRB_SIZE, Trb, cap,
     completion, endpoint_type, interrupter, op, port,
@@ -48,7 +49,7 @@ const PAGE: usize = 4096;
 /// TRBs per ring: one page.
 const RING_TRBS: u16 = (PAGE / TRB_SIZE) as u16;
 /// Pages for the controller's own structures and every device's.
-const POOL_PAGES: usize = 112;
+const POOL_PAGES: usize = 140;
 const MAX_PORTS: usize = 32;
 const MAX_DEVICES: usize = 16;
 /// Interrupt reports kept queued per keyboard, and per hub.
@@ -61,6 +62,12 @@ const REPORT_STRIDE: usize = 64;
 const IRQ: u64 = 1;
 const POLL_MS: u64 = 10;
 const COMMAND_MS: u64 = 1000;
+/// A bulk transfer; slow media may take seconds.
+const BULK_MS: u64 = 10_000;
+/// After a short packet, how long to wait for the transfer's last event.
+const SHORT_TAIL_MS: u64 = 50;
+/// Class drivers waiting for an interface.
+const MAX_WATCHERS: usize = 4;
 const TRANSFER_MS: u64 = 1000;
 
 const EXIT_BAD_START: i64 = 2;
@@ -227,6 +234,34 @@ struct Pages {
     buffer: Page,
     reports: Page,
     interrupt: Page,
+    bulk_in: Page,
+    bulk_out: Page,
+}
+
+/// A configured bulk interface's transfer rings.
+#[derive(Clone, Copy)]
+struct BulkRings {
+    in_dci: u8,
+    out_dci: u8,
+    in_ring: Ring,
+    out_ring: Ring,
+}
+
+/// An interface handed to a class driver (ADR-0034).
+struct ClaimState {
+    badge: u64,
+    /// The class driver's buffer, mapped here.
+    buffer: *mut u8,
+    size: usize,
+    notification: Handle,
+    bits: u64,
+}
+
+/// A class driver waiting for an interface of `class`.
+struct Watcher {
+    class: (u8, u8, u8),
+    notification: Handle,
+    bits: u64,
 }
 
 /// An interrupt IN endpoint with reports kept queued.
@@ -268,6 +303,11 @@ struct UsbDevice {
     control: Ring,
     max_packet0: u16,
     driver: Driver,
+    configuration: u8,
+    /// A mass storage (BOT) interface, if the device has one.
+    storage: Option<(descriptor::Interface, Bulk, Bulk)>,
+    bulk: Option<BulkRings>,
+    claim: Option<ClaimState>,
 }
 
 impl UsbDevice {
@@ -321,6 +361,14 @@ struct Controller {
     pending_hubs: [u32; MAX_DEVICES],
     notification: Handle,
     interrupts: bool,
+    /// The controller's device capability (for more DMA memory).
+    device: Handle,
+    /// The `usb` endpoint (session handles are minted from it).
+    server: Handle,
+    next_badge: u64,
+    /// DMA memory bulk transfers pass through.
+    bounce: Option<Dma>,
+    watchers: [Option<Watcher>; MAX_WATCHERS],
 }
 
 fn main(start: Start) -> i64 {
@@ -502,6 +550,11 @@ impl Controller {
             pending_hubs: [0; MAX_DEVICES],
             notification,
             interrupts,
+            device,
+            server: Handle(0),
+            next_badge: 1,
+            bounce: None,
+            watchers: [const { None }; MAX_WATCHERS],
         })
     }
 
@@ -845,6 +898,7 @@ impl Controller {
         }) {
             self.detach(child, announce);
         }
+        self.release(index, true);
         if let Some(device) = self.devices[index].take() {
             let _ = self.command(Trb::disable_slot(device.slot));
             self.dcbaa.write64(usize::from(device.slot) * 8, 0);
@@ -874,6 +928,8 @@ impl Controller {
                     buffer: self.pool.page()?,
                     reports: self.pool.page()?,
                     interrupt: self.pool.page()?,
+                    bulk_in: self.pool.page()?,
+                    bulk_out: self.pool.page()?,
                 };
                 self.pages[free] = Some(pages);
                 pages
@@ -886,6 +942,8 @@ impl Controller {
             pages.buffer,
             pages.reports,
             pages.interrupt,
+            pages.bulk_in,
+            pages.bulk_out,
         ] {
             page.zero();
         }
@@ -911,11 +969,16 @@ impl Controller {
             control: Ring::new(pages.control),
             max_packet0: location.speed.default_max_packet0(),
             driver: Driver::None,
+            configuration: 0,
+            storage: None,
+            bulk: None,
+            claim: None,
         });
         let result = self.enumerate(free, pages);
-        if result.is_err() {
+        match result {
+            Ok(()) => self.announce(free),
             // Also forgets anything a half-configured hub found.
-            self.detach(free, false);
+            Err(_) => self.detach(free, false),
         }
         result
     }
@@ -1031,6 +1094,13 @@ impl Controller {
             d.name = name;
             d.name_len = name_len;
             d.kind = kind;
+            d.configuration = configuration.value;
+            d.storage = descriptor::find_bulk_interface(
+                full,
+                storage::CLASS,
+                storage::SUBCLASS_SCSI,
+                storage::PROTOCOL_BOT,
+            );
             d.path()
         };
         let speed = self.devices[index]
@@ -1224,6 +1294,414 @@ impl Controller {
         }
     }
 
+    // ---- Class drivers (ADR-0034) ----------------------------------------
+
+    /// Tells a waiting class driver about a newly enumerated interface it
+    /// wants.
+    fn announce(&mut self, index: usize) {
+        let Some(storage) = self.devices[index].as_ref().and_then(|d| d.storage) else {
+            return;
+        };
+        let (interface, _, _) = storage;
+        for watcher in self.watchers.iter().flatten() {
+            if watcher.class == (interface.class, interface.subclass, interface.protocol) {
+                let _ = oceans_rt::notification_signal(watcher.notification, watcher.bits);
+            }
+        }
+    }
+
+    /// `CLAIM`: hands the first unclaimed matching interface to the
+    /// caller, or remembers the caller's notification for when one comes.
+    fn claim(
+        &mut self,
+        data: &[u8],
+        received: &[Handle],
+        kept: &mut [bool],
+    ) -> (u64, [u8; Claim::SIZE], Option<Handle>) {
+        let refuse = (service::BAD_REQUEST, [0u8; Claim::SIZE], None);
+        if data.len() < 12 || received.len() != 2 {
+            return refuse;
+        }
+        let class = (data[0], data[1], data[2]);
+        let bits = u64::from_le_bytes(data[4..12].try_into().expect("8 bytes"));
+        if class
+            != (
+                storage::CLASS,
+                storage::SUBCLASS_SCSI,
+                storage::PROTOCOL_BOT,
+            )
+            || bits == 0
+        {
+            return refuse;
+        }
+        let Ok(size) = oceans_rt::memory_size(received[0]).map(|s| s as usize) else {
+            return refuse;
+        };
+        if !(service::MIN_BUFFER..=service::MAX_BUFFER).contains(&size) {
+            return refuse;
+        }
+        let notification = received[1];
+        let found = self.devices.iter().position(|d| {
+            d.as_ref()
+                .is_some_and(|d| d.storage.is_some() && d.claim.is_none())
+        });
+        let Some(index) = found else {
+            // Keep the notification: one watcher per class driver.
+            let slot = self
+                .watchers
+                .iter()
+                .position(|w| w.as_ref().is_some_and(|w| w.class == class))
+                .or_else(|| self.watchers.iter().position(Option::is_none));
+            let Some(slot) = slot else {
+                return refuse;
+            };
+            if let Some(old) = self.watchers[slot].replace(Watcher {
+                class,
+                notification,
+                bits,
+            }) {
+                let _ = oceans_rt::close(old.notification);
+            }
+            kept[1] = true;
+            return (service::NOT_FOUND, [0u8; Claim::SIZE], None);
+        };
+        if self.devices[index]
+            .as_ref()
+            .is_some_and(|d| d.bulk.is_none())
+            && let Err(problem) = self.configure_bulk(index)
+        {
+            let path = self.devices[index].as_ref().map(UsbDevice::path);
+            if let Some(path) = path {
+                say(self.log, format_args!("port {path}: {problem}"));
+            }
+            return (service::IO_ERROR, [0u8; Claim::SIZE], None);
+        }
+        let Ok(base) = oceans_rt::memory_map(received[0], 0, prot::READ | prot::WRITE) else {
+            return refuse;
+        };
+        let badge = self.next_badge;
+        let Ok(session) = oceans_rt::endpoint_mint(self.server, badge) else {
+            let _ = oceans_rt::memory_unmap(base);
+            return refuse;
+        };
+        self.next_badge += 1;
+        kept[1] = true;
+        let device = self.devices[index].as_mut().expect("found above");
+        let (interface, bulk_in, bulk_out) = device.storage.expect("found above");
+        device.claim = Some(ClaimState {
+            badge,
+            buffer: base,
+            size,
+            notification,
+            bits,
+        });
+        let claim = Claim {
+            interface: interface.number,
+            bulk_in: bulk_in.endpoint.address,
+            bulk_out: bulk_out.endpoint.address,
+            port: device.root_port,
+            route: device.route,
+            vendor: device.descriptor.vendor,
+            product: device.descriptor.product,
+        };
+        say(
+            self.log,
+            format_args!(
+                "port {}: interface {} handed to a class driver",
+                device.path(),
+                interface.number
+            ),
+        );
+        (service::OK, claim.encode(), Some(session))
+    }
+
+    /// Selects the configuration and sets up the claimed interface's bulk
+    /// endpoints.
+    fn configure_bulk(&mut self, index: usize) -> Result<(), &'static str> {
+        let mut pages = self.pages[index].ok_or("no pages")?;
+        let (slot, configuration, storage, context) = {
+            let d = self.devices[index].as_ref().ok_or("gone")?;
+            let (_, bulk_in, bulk_out) = d.storage.ok_or("no bulk interface")?;
+            let last = bulk_in.endpoint.dci().max(bulk_out.endpoint.dci());
+            (
+                d.slot,
+                d.configuration,
+                d.storage.ok_or("no bulk interface")?,
+                d.slot_context(last),
+            )
+        };
+        let (_, bulk_in, bulk_out) = storage;
+        self.control(index, Setup::set_configuration(configuration), None)?;
+        let rings = BulkRings {
+            in_dci: bulk_in.endpoint.dci(),
+            out_dci: bulk_out.endpoint.dci(),
+            in_ring: Ring::new(pages.bulk_in),
+            out_ring: Ring::new(pages.bulk_out),
+        };
+        {
+            let mut input = InputContext::new(pages.input.bytes(), self.params.context_size);
+            input.add(1 | 1 << rings.in_dci | 1 << rings.out_dci);
+            input.slot(&context);
+            for (bulk, dci, ring, kind) in [
+                (bulk_in, rings.in_dci, rings.in_ring, endpoint_type::BULK_IN),
+                (
+                    bulk_out,
+                    rings.out_dci,
+                    rings.out_ring,
+                    endpoint_type::BULK_OUT,
+                ),
+            ] {
+                input.endpoint(
+                    dci,
+                    kind,
+                    bulk.endpoint.packet_size(),
+                    0,
+                    ring.page.phys,
+                    true,
+                );
+                input.max_burst(dci, bulk.max_burst);
+            }
+        }
+        self.command(Trb::configure_endpoint(pages.input.phys, slot))?;
+        if let Some(d) = self.devices[index].as_mut() {
+            d.bulk = Some(rings);
+        }
+        Ok(())
+    }
+
+    fn bounce(&mut self) -> Result<Dma, &'static str> {
+        if let Some(dma) = self.bounce {
+            return Ok(dma);
+        }
+        let dma = Dma::new(self.device, service::MAX_TRANSFER)?;
+        self.bounce = Some(dma);
+        Ok(dma)
+    }
+
+    /// The claimed device of a session badge.
+    fn session(&self, badge: u64) -> Option<usize> {
+        self.devices.iter().position(|d| {
+            d.as_ref()
+                .is_some_and(|d| d.claim.as_ref().is_some_and(|c| c.badge == badge))
+        })
+    }
+
+    /// `BULK`: one transfer through the bounce buffer.
+    fn bulk(&mut self, index: usize, address: u8, offset: usize, len: usize) -> Result<usize, u64> {
+        let bounce = self.bounce().map_err(|_| service::IO_ERROR)?;
+        let device = self.devices[index].as_mut().ok_or(service::GONE)?;
+        let claim = device.claim.as_ref().ok_or(service::GONE)?;
+        let rings = device.bulk.as_mut().ok_or(service::BAD_REQUEST)?;
+        let input = address & 0x80 != 0;
+        let (dci, ring) = match device.storage {
+            Some((_, i, _)) if input && i.endpoint.address == address => {
+                (rings.in_dci, &mut rings.in_ring)
+            }
+            Some((_, _, o)) if !input && o.endpoint.address == address => {
+                (rings.out_dci, &mut rings.out_ring)
+            }
+            _ => return Err(service::BAD_REQUEST),
+        };
+        if len == 0
+            || len > service::MAX_TRANSFER
+            || offset.checked_add(len).is_none_or(|end| end > claim.size)
+        {
+            return Err(service::BAD_REQUEST);
+        }
+        if !input {
+            // SAFETY: `offset..offset + len` lies in the claimant's mapped
+            // buffer (checked) and in the bounce buffer (len ≤ its size).
+            unsafe { ptr::copy_nonoverlapping(claim.buffer.add(offset), bounce.virt, len) };
+        }
+        // One TRB per page, chained; only the last interrupts.
+        let mut trbs = [(0u64, 0usize, 0usize); service::MAX_TRANSFER / PAGE];
+        let count = len.div_ceil(PAGE);
+        for (i, entry) in trbs.iter_mut().enumerate().take(count) {
+            let start = i * PAGE;
+            let chunk = (len - start).min(PAGE);
+            let trb = Trb::normal(bounce.device + start as u64, chunk as u32);
+            let trb = if i + 1 < count { trb.chained() } else { trb };
+            *entry = (ring.push(trb), start, chunk);
+        }
+        let slot = device.slot;
+        self.doorbells
+            .write32(4 * usize::from(slot), u32::from(dci));
+        let first = trbs[0].0;
+        let last = trbs[count - 1].0;
+        let in_transfer = |trb: u64| trbs[..count].iter().position(|t| t.0 == trb);
+        let mut transferred = None;
+        loop {
+            let timeout = if transferred.is_some() {
+                SHORT_TAIL_MS
+            } else {
+                BULK_MS
+            };
+            let event = self.wait_event(
+                |e| matches!(e, Event::Transfer { slot: s, endpoint, trb, .. }
+                    if *s == slot && *endpoint == dci && (in_transfer(*trb).is_some() || *trb == first)),
+                timeout,
+            );
+            match event {
+                Some(Event::Transfer {
+                    trb, code, residue, ..
+                }) => {
+                    let at = in_transfer(trb).unwrap_or(0);
+                    match code {
+                        completion::SUCCESS | completion::SHORT_PACKET => {
+                            let (_, start, chunk) = trbs[at];
+                            let done = start + chunk.saturating_sub(residue as usize);
+                            // The first short packet ends the data; the
+                            // last TRB's event (if any) only confirms.
+                            let total = *transferred.get_or_insert(done);
+                            if trb == last {
+                                transferred = Some(total);
+                                break;
+                            }
+                        }
+                        completion::STALL => {
+                            self.recover(index, dci, true);
+                            return Err(service::STALL);
+                        }
+                        _ => {
+                            self.recover(index, dci, false);
+                            return Err(service::IO_ERROR);
+                        }
+                    }
+                }
+                None if transferred.is_some() => break,
+                None => {
+                    self.recover(index, dci, false);
+                    return Err(service::IO_ERROR);
+                }
+                Some(_) => {}
+            }
+        }
+        let transferred = transferred.unwrap_or(0).min(len);
+        if input {
+            let claim = self.devices[index]
+                .as_ref()
+                .and_then(|d| d.claim.as_ref())
+                .ok_or(service::GONE)?;
+            // SAFETY: as above.
+            unsafe { ptr::copy_nonoverlapping(bounce.virt, claim.buffer.add(offset), transferred) };
+        }
+        Ok(transferred)
+    }
+
+    /// Puts a bulk endpoint back in order after an error: a halted one is
+    /// reset, a running one stopped, and either way the controller skips
+    /// whatever is still queued.
+    fn recover(&mut self, index: usize, dci: u8, halted: bool) {
+        let Some(device) = self.devices[index].as_ref() else {
+            return;
+        };
+        let slot = device.slot;
+        let Some(rings) = device.bulk else {
+            return;
+        };
+        let ring = if dci == rings.in_dci {
+            rings.in_ring
+        } else {
+            rings.out_ring
+        };
+        let _ = self.command(if halted {
+            Trb::reset_endpoint(slot, dci)
+        } else {
+            Trb::stop_endpoint(slot, dci)
+        });
+        let dequeue = ring.page.phys + u64::from(ring.producer.index()) * TRB_SIZE as u64;
+        let _ = self.command(Trb::set_tr_dequeue(
+            slot,
+            dci,
+            dequeue,
+            ring.producer.cycle(),
+        ));
+    }
+
+    /// `CLEAR_HALT`: the device's halt (CLEAR_FEATURE) and the
+    /// controller's.
+    fn clear_halt(&mut self, index: usize, address: u8) -> Result<(), u64> {
+        let device = self.devices[index].as_ref().ok_or(service::GONE)?;
+        let (_, bulk_in, bulk_out) = device.storage.ok_or(service::BAD_REQUEST)?;
+        let rings = device.bulk.ok_or(service::BAD_REQUEST)?;
+        let dci = if address == bulk_in.endpoint.address {
+            rings.in_dci
+        } else if address == bulk_out.endpoint.address {
+            rings.out_dci
+        } else {
+            return Err(service::BAD_REQUEST);
+        };
+        let clear = Setup {
+            request_type: 0x02,
+            request: 1,
+            value: 0,
+            index: u16::from(address),
+            length: 0,
+        };
+        self.control(index, clear, None)
+            .map_err(|_| service::IO_ERROR)?;
+        // Reset fails harmlessly on an endpoint that is not halted.
+        self.recover(index, dci, true);
+        Ok(())
+    }
+
+    /// `CONTROL`: a class request to the claimed interface only.
+    fn session_control(&mut self, index: usize, data: &[u8]) -> Result<usize, u64> {
+        if data.len() != 12 {
+            return Err(service::BAD_REQUEST);
+        }
+        let setup = Setup {
+            request_type: data[0],
+            request: data[1],
+            value: u16::from_le_bytes([data[2], data[3]]),
+            index: u16::from_le_bytes([data[4], data[5]]),
+            length: u16::from_le_bytes([data[6], data[7]]),
+        };
+        let offset = u32::from_le_bytes(data[8..12].try_into().expect("4 bytes")) as usize;
+        let device = self.devices[index].as_ref().ok_or(service::GONE)?;
+        let (interface, _, _) = device.storage.ok_or(service::BAD_REQUEST)?;
+        let claim = device.claim.as_ref().ok_or(service::GONE)?;
+        // Class requests (type 1) to an interface (recipient 1): ours.
+        let class_to_interface = setup.request_type & 0x7f == 0x21;
+        let length = usize::from(setup.length);
+        if !class_to_interface
+            || setup.index & 0xff != u16::from(interface.number)
+            || (length > 0 && !setup.is_in())
+            || length > PAGE
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > claim.size)
+        {
+            return Err(service::BAD_REQUEST);
+        }
+        let mut bytes = [0u8; PAGE];
+        let len = match self.control(index, setup, Some(&mut bytes[..length])) {
+            Ok(len) => len,
+            Err("the device stalled a request") => return Err(service::STALL),
+            Err(_) => return Err(service::IO_ERROR),
+        };
+        let claim = self.devices[index]
+            .as_ref()
+            .and_then(|d| d.claim.as_ref())
+            .ok_or(service::GONE)?;
+        // SAFETY: in the claimant's buffer (checked).
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), claim.buffer.add(offset), len) };
+        Ok(len)
+    }
+
+    /// Ends a claim: the class driver closed its session or the device
+    /// left (then the driver hears of it).
+    fn release(&mut self, index: usize, gone: bool) {
+        let Some(claim) = self.devices[index].as_mut().and_then(|d| d.claim.take()) else {
+            return;
+        };
+        let _ = oceans_rt::memory_unmap(claim.buffer);
+        if gone {
+            let _ = oceans_rt::notification_signal(claim.notification, claim.bits);
+        }
+        let _ = oceans_rt::close(claim.notification);
+    }
+
     // ---- Clients ---------------------------------------------------------
 
     fn serve(&mut self, server: Handle) -> i64 {
@@ -1234,6 +1712,7 @@ impl Controller {
             );
             return EXIT_DEVICE;
         }
+        self.server = server;
         let mut data = [0u8; 16];
         let mut handles = [Handle(0); 4];
         loop {
@@ -1249,52 +1728,118 @@ impl Controller {
                     return 4;
                 }
             };
-            for &handle in &handles[..got.handles_len] {
+            let received = &handles[..got.handles_len];
+            let mut kept = [false; 4];
+            let mut reply = [0u8; service::MAX_RECORDS * service::RECORD_SIZE];
+            let mut reply_handle = None;
+            let (label, len) = if got.signals != 0 {
+                self.service_events();
+                (u64::MAX, 0)
+            } else if got.closed {
+                if let Some(index) = self.session(got.badge) {
+                    self.release(index, false);
+                }
+                (u64::MAX, 0)
+            } else if got.badge != 0 {
+                self.session_request(got.badge, got.label, &data[..got.data_len], &mut reply)
+            } else if got.label == service::CLAIM {
+                let (label, claim, session) =
+                    self.claim(&data[..got.data_len], received, &mut kept);
+                reply[..Claim::SIZE].copy_from_slice(&claim);
+                reply_handle = session;
+                (label, if label == service::OK { Claim::SIZE } else { 0 })
+            } else {
+                self.list(got.label, &data[..got.data_len], &mut reply)
+            };
+            for (&handle, kept) in received.iter().zip(kept) {
+                if !kept {
+                    let _ = oceans_rt::close(handle);
+                }
+            }
+            if label == u64::MAX {
+                continue;
+            }
+            let handles_out: &[Handle] = match &reply_handle {
+                Some(handle) => core::slice::from_ref(handle),
+                None => &[],
+            };
+            if oceans_rt::ipc_reply_msg(label, &reply[..len], handles_out).is_err()
+                && let Some(handle) = reply_handle
+            {
                 let _ = oceans_rt::close(handle);
             }
-            if got.signals != 0 {
-                self.service_events();
-                continue;
+        }
+    }
+
+    /// Requests on a class driver's session.
+    fn session_request(
+        &mut self,
+        badge: u64,
+        label: u64,
+        data: &[u8],
+        reply: &mut [u8],
+    ) -> (u64, usize) {
+        let Some(index) = self.session(badge) else {
+            return (service::GONE, 0);
+        };
+        let result = match label {
+            service::BULK if data.len() == 12 => {
+                let offset = u32::from_le_bytes(data[4..8].try_into().expect("4 bytes")) as usize;
+                let len = u32::from_le_bytes(data[8..12].try_into().expect("4 bytes")) as usize;
+                self.bulk(index, data[0], offset, len)
             }
-            if got.closed {
-                continue;
+            service::CONTROL => self.session_control(index, data),
+            service::CLEAR_HALT if data.len() == 1 => self.clear_halt(index, data[0]).map(|()| 0),
+            _ => Err(service::BAD_REQUEST),
+        };
+        match result {
+            Ok(count) => {
+                reply[..4].copy_from_slice(&(count as u32).to_le_bytes());
+                (service::OK, 4)
             }
-            let mut reply = [0u8; service::MAX_RECORDS * service::RECORD_SIZE];
-            let (label, len) = match got.label {
-                service::LIST => {
-                    // data: the number of records to skip (paging).
-                    let skip = data[..got.data_len].first().copied().map_or(0, usize::from);
-                    let mut count = 0;
-                    for device in self
-                        .devices
-                        .iter()
-                        .flatten()
-                        .skip(skip)
-                        .take(service::MAX_RECORDS)
-                    {
-                        let record = Record {
-                            port: device.root_port,
-                            route: device.route,
-                            speed: device.speed.id(),
-                            kind: device.kind,
-                            vendor: device.descriptor.vendor,
-                            product: device.descriptor.product,
-                            name: device.name,
-                            name_len: device.name_len as u8,
-                        };
-                        let at = count * service::RECORD_SIZE;
-                        let slot: &mut [u8; service::RECORD_SIZE] = (&mut reply
-                            [at..at + service::RECORD_SIZE])
-                            .try_into()
-                            .expect("record size");
-                        record.encode(slot);
-                        count += 1;
+            Err(label) => (label, 0),
+        }
+    }
+
+    /// `LIST`, and anything unknown.
+    fn list(&self, label: u64, data: &[u8], reply: &mut [u8]) -> (u64, usize) {
+        {
+            {
+                match label {
+                    service::LIST => {
+                        // data: the number of records to skip (paging).
+                        let skip = data.first().copied().map_or(0, usize::from);
+                        let mut count = 0;
+                        for device in self
+                            .devices
+                            .iter()
+                            .flatten()
+                            .skip(skip)
+                            .take(service::MAX_RECORDS)
+                        {
+                            let record = Record {
+                                port: device.root_port,
+                                route: device.route,
+                                speed: device.speed.id(),
+                                kind: device.kind,
+                                vendor: device.descriptor.vendor,
+                                product: device.descriptor.product,
+                                name: device.name,
+                                name_len: device.name_len as u8,
+                            };
+                            let at = count * service::RECORD_SIZE;
+                            let slot: &mut [u8; service::RECORD_SIZE] = (&mut reply
+                                [at..at + service::RECORD_SIZE])
+                                .try_into()
+                                .expect("record size");
+                            record.encode(slot);
+                            count += 1;
+                        }
+                        (service::OK, count * service::RECORD_SIZE)
                     }
-                    (service::OK, count * service::RECORD_SIZE)
+                    _ => (service::BAD_REQUEST, 0),
                 }
-                _ => (service::BAD_REQUEST, 0),
-            };
-            let _ = oceans_rt::ipc_reply_msg(label, &reply[..len], &[]);
+            }
         }
     }
 }

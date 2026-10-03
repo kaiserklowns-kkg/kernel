@@ -1,5 +1,5 @@
 //! `disk`: inspect and change a block device through the block service
-//! (needs `use:block`).
+//! (needs `use:block`, or another block service such as `use:usbdisk`).
 //!
 //! ```text
 //! disk info                  size and sector count
@@ -27,9 +27,16 @@ fn main(start: Start) -> i64 {
         Ok(found) => found,
         Err(code) => return code,
     };
-    let block = match require(&mut out, &directory, "disk", "use", "block", "use:block") {
-        Ok(block) => block,
-        Err(code) => return code,
+    // `block`, or whichever block service was granted (e.g. `use:usbdisk`).
+    let granted = directory
+        .find("use", "block")
+        .or_else(|| directory.find_kind("use"));
+    let block = match granted {
+        Some(block) => block,
+        None => match require(&mut out, &directory, "disk", "use", "block", "use:block") {
+            Ok(block) => block,
+            Err(code) => return code,
+        },
     };
     let args = directory.args();
     let mut words = args.split_whitespace();

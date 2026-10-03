@@ -127,6 +127,9 @@ pub mod trb_type {
     pub const ADDRESS_DEVICE: u8 = 11;
     pub const CONFIGURE_ENDPOINT: u8 = 12;
     pub const EVALUATE_CONTEXT: u8 = 13;
+    pub const RESET_ENDPOINT: u8 = 14;
+    pub const STOP_ENDPOINT: u8 = 15;
+    pub const SET_TR_DEQUEUE: u8 = 16;
     pub const NO_OP: u8 = 23;
     pub const TRANSFER_EVENT: u8 = 32;
     pub const COMMAND_COMPLETION: u8 = 33;
@@ -144,6 +147,7 @@ pub mod completion {
 const CYCLE: u32 = 1 << 0;
 const TOGGLE_CYCLE: u32 = 1 << 1;
 const INTERRUPT_ON_SHORT: u32 = 1 << 2;
+const CHAIN: u32 = 1 << 4;
 const INTERRUPT_ON_COMPLETION: u32 = 1 << 5;
 const IMMEDIATE_DATA: u32 = 1 << 6;
 const DIRECTION_IN: u32 = 1 << 16;
@@ -243,6 +247,13 @@ impl Trb {
         )
     }
 
+    /// Part of a multi-TRB transfer: chained to the next, which
+    /// completes the transfer (only the last interrupts on completion).
+    pub fn chained(mut self) -> Self {
+        self.0[3] = (self.0[3] & !INTERRUPT_ON_COMPLETION) | CHAIN;
+        self
+    }
+
     pub fn link(target: u64) -> Self {
         Self::new(target, 0, trb_type::LINK, TOGGLE_CYCLE)
     }
@@ -281,6 +292,36 @@ impl Trb {
             0,
             trb_type::EVALUATE_CONTEXT,
             u32::from(slot) << 24,
+        )
+    }
+
+    /// Clears a halted endpoint's state in the controller.
+    pub fn reset_endpoint(slot: u8, dci: u8) -> Self {
+        Self::new(
+            0,
+            0,
+            trb_type::RESET_ENDPOINT,
+            u32::from(slot) << 24 | u32::from(dci) << 16,
+        )
+    }
+
+    pub fn stop_endpoint(slot: u8, dci: u8) -> Self {
+        Self::new(
+            0,
+            0,
+            trb_type::STOP_ENDPOINT,
+            u32::from(slot) << 24 | u32::from(dci) << 16,
+        )
+    }
+
+    /// Moves a stopped or reset endpoint's dequeue pointer, abandoning the
+    /// TRBs before it.
+    pub fn set_tr_dequeue(slot: u8, dci: u8, address: u64, cycle: bool) -> Self {
+        Self::new(
+            address | u64::from(cycle),
+            0,
+            trb_type::SET_TR_DEQUEUE,
+            u32::from(slot) << 24 | u32::from(dci) << 16,
         )
     }
 
@@ -518,6 +559,15 @@ impl<'a> InputContext<'a> {
         self.set(1, 2, dword2);
     }
 
+    /// Sets an endpoint context's SuperSpeed burst size (packets per
+    /// burst, less one).
+    pub fn max_burst(&mut self, dci: u8, burst: u8) {
+        let context = 1 + usize::from(dci);
+        let at = context * self.size + 4;
+        let dword = u32::from_le_bytes(self.bytes[at..at + 4].try_into().expect("4 bytes"));
+        self.set(context, 1, (dword & !0xff00) | u32::from(burst) << 8);
+    }
+
     /// An endpoint context: `kind` from [`endpoint_type`], `interval` as
     /// the xHCI exponent, the transfer ring's address and cycle state.
     pub fn endpoint(
@@ -609,6 +659,13 @@ mod tests {
         assert_eq!(Trb::link(0x3000).0[3], 6 << 10 | 1 << 1);
         let trb = Trb::normal(0xdead_beef_0000, 8);
         assert_eq!(Trb::from_bytes(&trb.to_bytes()), trb);
+        assert_eq!(trb.chained().0[3], 1 << 10 | 1 << 2 | 1 << 4);
+        assert_eq!(Trb::reset_endpoint(2, 5).0[3], 2 << 24 | 5 << 16 | 14 << 10);
+        assert_eq!(Trb::stop_endpoint(2, 5).0[3], 2 << 24 | 5 << 16 | 15 << 10);
+        assert_eq!(
+            Trb::set_tr_dequeue(1, 3, 0x9000, true).0,
+            [0x9001, 0, 0, 1 << 24 | 3 << 16 | 16 << 10]
+        );
     }
 
     #[test]
@@ -708,6 +765,10 @@ mod tests {
         assert_eq!(dword(&bytes, 2, 2), 0x8001);
         assert_eq!(dword(&bytes, 2, 4), 8);
         assert_eq!(dword(&bytes, 3, 0), 0, "the rest is cleared");
+        let mut input = InputContext::new(&mut bytes, 32);
+        input.endpoint(3, endpoint_type::BULK_IN, 1024, 0, 0x4000, true);
+        input.max_burst(3, 3);
+        assert_eq!(dword(&bytes, 4, 1), 3 << 1 | 6 << 3 | 3 << 8 | 1024 << 16);
         let mut input = InputContext::new(&mut bytes, 32);
         input.slot(&Slot {
             speed: Speed::High,

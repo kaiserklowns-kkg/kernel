@@ -5,7 +5,9 @@
 //! - [`request`]: standard and HID control requests (setup packets).
 //! - [`hid`]: the HID boot keyboard protocol, as console bytes.
 //! - [`hub`]: hub descriptors, port status and requests; route strings.
-//! - [`service`]: the protocol of the driver's `usb` endpoint (`lsusb`).
+//! - [`service`]: the protocol of the driver's `usb` endpoint (`lsusb`,
+//!   class drivers).
+//! - [`storage`]: mass storage: Bulk-Only Transport and SCSI commands.
 //! - [`xhci`]: the xHCI controller's data structures: TRBs, rings and
 //!   device contexts (xHCI 1.2).
 
@@ -16,6 +18,7 @@ pub mod hid;
 pub mod hub;
 pub mod request;
 pub mod service;
+pub mod storage;
 pub mod xhci;
 
 /// Bus speeds, as xHCI port speed IDs (xHCI 1.2 §7.2.2.1.1, default

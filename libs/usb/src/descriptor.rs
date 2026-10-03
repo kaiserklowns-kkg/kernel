@@ -7,6 +7,8 @@ pub const CONFIGURATION: u8 = 2;
 pub const STRING: u8 = 3;
 pub const INTERFACE: u8 = 4;
 pub const ENDPOINT: u8 = 5;
+/// SuperSpeed endpoint companion (USB 3.2 §9.6.7).
+pub const SS_ENDPOINT_COMPANION: u8 = 0x30;
 
 /// Interface classes.
 pub const CLASS_HID: u8 = 3;
@@ -157,6 +159,10 @@ impl Endpoint {
 pub enum Item {
     Interface(Interface),
     Endpoint(Endpoint),
+    /// Follows a SuperSpeed endpoint: packets per burst, less one.
+    Companion {
+        max_burst: u8,
+    },
     /// Anything else: its type and bytes.
     Other(u8, usize),
 }
@@ -211,6 +217,9 @@ impl Iterator for Items<'_> {
                 max_packet: u16::from_le_bytes([item[4], item[5]]),
                 interval: item[6],
             }),
+            SS_ENDPOINT_COMPANION if len >= 6 => Item::Companion {
+                max_burst: item[2].min(15),
+            },
             kind => Item::Other(kind, len),
         })
     }
@@ -238,10 +247,73 @@ pub fn find_boot_interface(configuration: &[u8], protocol: u8) -> Option<(Interf
                     return Some((interface, endpoint));
                 }
             }
-            Item::Other(..) => {}
+            Item::Companion { .. } | Item::Other(..) => {}
         }
     }
     None
+}
+
+/// A bulk endpoint and its SuperSpeed burst size (0 below SuperSpeed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bulk {
+    pub endpoint: Endpoint,
+    pub max_burst: u8,
+}
+
+/// The first interface with this class, subclass and protocol in
+/// alternate setting 0, with its bulk IN and OUT endpoints.
+pub fn find_bulk_interface(
+    configuration: &[u8],
+    class: u8,
+    subclass: u8,
+    protocol: u8,
+) -> Option<(Interface, Bulk, Bulk)> {
+    let mut current: Option<Interface> = None;
+    let (mut bulk_in, mut bulk_out): (Option<Bulk>, Option<Bulk>) = (None, None);
+    let mut last: Option<bool> = None;
+    for item in Items::new(configuration) {
+        match item {
+            Item::Interface(interface) => {
+                if let (Some(found), Some(i), Some(o)) = (current, bulk_in, bulk_out) {
+                    return Some((found, i, o));
+                }
+                current = (interface.class == class
+                    && interface.subclass == subclass
+                    && interface.protocol == protocol
+                    && interface.alternate == 0)
+                    .then_some(interface);
+                (bulk_in, bulk_out, last) = (None, None, None);
+            }
+            Item::Endpoint(endpoint) if current.is_some() && endpoint.transfer_type() == BULK => {
+                let bulk = Some(Bulk {
+                    endpoint,
+                    max_burst: 0,
+                });
+                if endpoint.is_in() {
+                    bulk_in = bulk_in.or(bulk);
+                } else {
+                    bulk_out = bulk_out.or(bulk);
+                }
+                last = Some(endpoint.is_in());
+            }
+            Item::Companion { max_burst } => {
+                let target = match last {
+                    Some(true) => bulk_in.as_mut(),
+                    Some(false) => bulk_out.as_mut(),
+                    None => None,
+                };
+                if let Some(bulk) = target {
+                    bulk.max_burst = max_burst;
+                }
+                last = None;
+            }
+            _ => last = None,
+        }
+    }
+    match (current, bulk_in, bulk_out) {
+        (Some(found), Some(i), Some(o)) => Some((found, i, o)),
+        _ => None,
+    }
 }
 
 /// Decodes a string descriptor (UTF-16LE) into `out` as UTF-8, replacing
@@ -342,6 +414,28 @@ mod tests {
         short[2] = 27;
         assert!(find_boot_interface(&short, HID_PROTOCOL_KEYBOARD).is_none());
         assert!(Configuration::parse(&[9, 2, 3, 0, 1, 1, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn finds_bulk_interfaces() {
+        // A USB 3 stick: mass storage BOT, bulk IN 0x81 and OUT 0x02 with
+        // companions (burst 4 and 0).
+        let configuration = [
+            9, 2, 44, 0, 1, 1, 0, 0x80, 50, //
+            9, 4, 0, 0, 2, 8, 6, 0x50, 0, //
+            7, 5, 0x81, 2, 0, 4, 0, //
+            6, 0x30, 3, 0, 0, 0, //
+            7, 5, 0x02, 2, 0, 4, 0, //
+            6, 0x30, 0, 0, 0, 0,
+        ];
+        let (interface, bulk_in, bulk_out) =
+            find_bulk_interface(&configuration, 8, 6, 0x50).unwrap();
+        assert_eq!(interface.number, 0);
+        assert_eq!((bulk_in.endpoint.address, bulk_in.max_burst), (0x81, 3));
+        assert_eq!((bulk_out.endpoint.address, bulk_out.max_burst), (0x02, 0));
+        assert_eq!(bulk_in.endpoint.packet_size(), 1024);
+        assert!(find_bulk_interface(&configuration, 8, 6, 0x62).is_none());
+        assert!(find_bulk_interface(&configuration[..28], 8, 6, 0x50).is_none());
     }
 
     #[test]

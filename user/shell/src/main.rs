@@ -188,10 +188,13 @@ impl Shell {
             [] => {}
             ["help"] => self.help(),
             ["echo", words @ ..] => {
+                // One write: a log line cannot land inside it.
+                let mut text = Buffer::<{ LINE_MAX + 2 }>::new();
                 for (i, word) in words.iter().enumerate() {
-                    self.print(format_args!("{}{word}", if i > 0 { " " } else { "" }));
+                    let _ = write!(text, "{}{word}", if i > 0 { " " } else { "" });
                 }
-                self.write(b"\r\n");
+                let _ = text.write_str("\r\n");
+                self.write(text.as_bytes());
             }
             ["grants"] => {
                 for line in self.directory.lines() {
