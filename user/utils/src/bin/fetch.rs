@@ -7,7 +7,7 @@
 
 use core::fmt::Write;
 
-use oceans_fs_proto::{FsError, Node, flags};
+use oceans_fs_proto::{FsError, Node, Shared, flags};
 use oceans_http::{Event, Head, Parser, Url, get_request, redirect};
 use oceans_net_proto::{Read, TcpStream, resolve};
 use oceans_rt::{Buffer, Out, Start};
@@ -24,7 +24,12 @@ const MAX_URL: usize = 600;
 /// Where the body goes.
 enum Sink {
     Console,
-    File { node: Node, written: u64 },
+    File {
+        node: Node,
+        /// Bulk writes (ADR-0030), when the buffer could be set up.
+        shared: Option<Shared>,
+        written: u64,
+    },
 }
 
 fn main(start: Start) -> i64 {
@@ -50,7 +55,14 @@ fn main(start: Start) -> i64 {
             };
             match create(Node(fs), path) {
                 Ok(node) => match node.truncate(0) {
-                    Ok(()) => Sink::File { node, written: 0 },
+                    Ok(()) => {
+                        let shared = node.attach(16 * 1024).ok();
+                        Sink::File {
+                            node,
+                            shared,
+                            written: 0,
+                        }
+                    }
                     Err(error) => return fail(&mut out, error.message()),
                 },
                 Err(error) => {
@@ -61,6 +73,7 @@ fn main(start: Start) -> i64 {
         }
     };
 
+    let started = oceans_rt::clock_ms();
     let mut url_text = Buffer::<MAX_URL>::new();
     let _ = url_text.write_str(first);
     for _ in 0..=MAX_REDIRECTS {
@@ -88,13 +101,14 @@ fn main(start: Start) -> i64 {
             let _ = writeln!(out, "fetch: HTTP {} {}", head.status, head.reason());
             return EXIT_FAILED;
         }
-        if let Sink::File { node, written } = &sink {
+        if let Sink::File { node, written, .. } = &sink {
             // Durable before we say so: a close is committed only when the
             // filesystem gets to it, which may be after we have exited.
             if let Err(error) = node.sync() {
                 return fail(&mut out, error.message());
             }
-            let _ = writeln!(out, "fetch: saved {written} bytes");
+            let ms = oceans_rt::clock_ms() - started;
+            let _ = writeln!(out, "fetch: saved {written} bytes ({ms} ms)");
         }
         return 0;
     }
@@ -142,7 +156,7 @@ fn get(
     let mut parser = Parser::new();
     let mut head: Option<Head> = None;
     let mut problem = None;
-    let mut buffer = [0u8; 256];
+    let mut buffer = [0u8; 16 * 1024];
     loop {
         let len = match stream.read_wait(&mut buffer, IDLE_MS) {
             Ok(Read::Data(len)) => len,
@@ -186,8 +200,15 @@ fn deliver(sink: &mut Sink, out: &mut Out, bytes: &[u8]) -> Result<(), FsError> 
             }
             Ok(())
         }
-        Sink::File { node, written } => {
-            node.write_all(*written, bytes)?;
+        Sink::File {
+            node,
+            shared,
+            written,
+        } => {
+            match shared {
+                Some(shared) => node.write_shared(shared, *written, bytes)?,
+                None => node.write_all(*written, bytes)?,
+            }
             *written += bytes.len() as u64;
             Ok(())
         }

@@ -25,7 +25,10 @@ use core::fmt::Write;
 
 use oceans_net::{Config, Dotted, NetError as StackError, Recv, SocketId, Stack, TcpState};
 use oceans_net_proto::netdev::{self, BUFFER_SIZE, RX_AREA, TX_AREA};
-use oceans_net_proto::{MAX_DATA, MAX_STREAM, NetInfo, Status, TRUNCATED, op, state};
+use oceans_net_proto::{
+    MAX_DATA, MAX_STREAM, MAX_STREAM_BUFFER, MIN_STREAM_BUFFER, NetInfo, Status, TRUNCATED, op,
+    state,
+};
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 
 oceans_rt::entry!(main);
@@ -43,6 +46,8 @@ struct Client {
     socket: SocketId,
     notification: Handle,
     bits: u64,
+    /// TCP: the shared buffer (ADR-0030), mapped here.
+    buffer: Option<(*mut u8, usize)>,
 }
 
 struct Net {
@@ -214,6 +219,9 @@ impl Net {
             if got.closed {
                 if let Some(client) = self.clients.remove(&got.badge) {
                     self.stack.release(client.socket, now);
+                    if let Some((base, _)) = client.buffer {
+                        let _ = oceans_rt::memory_unmap(base);
+                    }
                     let _ = oceans_rt::close(client.notification);
                 }
                 continue;
@@ -462,6 +470,53 @@ impl Net {
                 self.open_client(socket, received[0], bits, reply_handle, now)?;
                 Ok(0)
             }
+            (op::TCP_ATTACH, badge) if badge != 0 => {
+                let client = self.clients.get_mut(&badge).ok_or(Status::BadRequest)?;
+                if received.len() != 1 {
+                    return Err(Status::BadRequest);
+                }
+                let size =
+                    oceans_rt::memory_size(received[0]).map_err(|_| Status::BadRequest)? as usize;
+                if !(MIN_STREAM_BUFFER..=MAX_STREAM_BUFFER).contains(&size) {
+                    return Err(Status::BadRequest);
+                }
+                let base = oceans_rt::memory_map(received[0], 0, prot::READ | prot::WRITE)
+                    .map_err(|_| Status::BadRequest)?;
+                // The mapping keeps the memory; its handle is closed after
+                // the reply.
+                if let Some((old, _)) = client.buffer.replace((base, size)) {
+                    let _ = oceans_rt::memory_unmap(old);
+                }
+                Ok(0)
+            }
+            (op::TCP_SEND_BUF | op::TCP_RECV_BUF, badge) if badge != 0 => {
+                let client = self.clients.get(&badge).ok_or(Status::BadRequest)?;
+                let (base, size) = client.buffer.ok_or(Status::BadRequest)?;
+                let socket = client.socket;
+                if data.len() != 8 {
+                    return Err(Status::BadRequest);
+                }
+                let offset = u32::from_le_bytes(data[..4].try_into().expect("4 bytes")) as usize;
+                let len = u32::from_le_bytes(data[4..].try_into().expect("4 bytes")) as usize;
+                if offset.checked_add(len).is_none_or(|end| end > size) {
+                    return Err(Status::BadRequest);
+                }
+                // SAFETY: `offset..offset + len` lies inside the client's
+                // shared buffer (checked), mapped read-write here; the client
+                // waits in this call while we use it.
+                let window = unsafe { core::slice::from_raw_parts_mut(base.add(offset), len) };
+                let moved = if label == op::TCP_SEND_BUF {
+                    self.stack.tcp_send(socket, window, now).map_err(status)?
+                } else {
+                    match self.stack.tcp_recv(socket, window, now).map_err(status)? {
+                        Recv::Data(len) => len,
+                        Recv::WouldBlock => return Err(Status::Empty),
+                        Recv::Eof => return Err(Status::Eof),
+                    }
+                };
+                reply[..4].copy_from_slice(&(moved as u32).to_le_bytes());
+                Ok(4)
+            }
             (op::TCP_SEND, badge) if badge != 0 => {
                 let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
                 let sent = self.stack.tcp_send(socket, data, now).map_err(status)?;
@@ -545,6 +600,7 @@ impl Net {
                 socket,
                 notification,
                 bits,
+                buffer: None,
             },
         );
         self.next_badge += 1;

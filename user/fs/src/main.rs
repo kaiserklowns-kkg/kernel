@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use oceans_block_proto::{Disk, SECTOR_SIZE};
-use oceans_fs_proto::{Kind, MAX_DATA, MAX_NAME, Status, flags, op};
+use oceans_fs_proto::{Kind, MAX_DATA, MAX_NAME, MAX_SHARED, MIN_SHARED, Status, flags, op};
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot};
 use oceans_volume::{
     BLOCK_SIZE, BlockBuf, BlockDevice, FsError, IoError, MountError, NodeId, Opened, ROOT, Volume,
@@ -88,6 +88,8 @@ struct Fs {
     log: Handle,
     volume: Volume<DiskDevice>,
     handles: BTreeMap<u64, Open>,
+    /// Shared buffers of open handles (ADR-0030), mapped here.
+    buffers: BTreeMap<u64, (*mut u8, usize)>,
     next_badge: u64,
 }
 
@@ -161,6 +163,7 @@ fn main(start: Start) -> i64 {
         log,
         volume,
         handles: BTreeMap::new(),
+        buffers: BTreeMap::new(),
         next_badge: 1,
     };
     let published = fs.publish_programs(&directory);
@@ -182,11 +185,17 @@ fn main(start: Start) -> i64 {
             fs.close_handle(got.badge);
             continue;
         }
-        // The protocol never sends capabilities to the server.
-        for &handle in &received_handles[..got.handles_len] {
+        let received = &received_handles[..got.handles_len];
+        let reply = if got.label == op::ATTACH {
+            fs.attach(got.badge, received)
+        } else {
+            fs.handle(got.badge, got.label, &request[..got.data_len])
+        };
+        // Capabilities sent with requests are never kept (a shared buffer
+        // stays mapped without its handle).
+        for &handle in received {
             let _ = oceans_rt::close(handle);
         }
-        let reply = fs.handle(got.badge, got.label, &request[..got.data_len]);
         let handles = reply.handle.as_slice();
         if oceans_rt::ipc_reply_msg(reply.status as u64, &reply.data[..reply.len], handles).is_err()
         {
@@ -333,6 +342,9 @@ impl Fs {
     }
 
     fn close_handle(&mut self, badge: u64) {
+        if let Some((base, _)) = self.buffers.remove(&badge) {
+            let _ = oceans_rt::memory_unmap(base);
+        }
         if let Some(open) = self.handles.remove(&badge) {
             self.volume.release(open.node);
             if open.writable {
@@ -362,9 +374,63 @@ impl Fs {
             op::REMOVE => self.remove(open, data),
             op::TRUNCATE => self.truncate(open, data),
             op::SYNC => self.commit("sync").map(|()| Reply::ok(&[])).map_err(status),
+            op::WRITE_BUF | op::READ_BUF => self.bulk(badge, open, operation, data),
             _ => Err(Status::BadRequest),
         };
         result.unwrap_or_else(Reply::status)
+    }
+
+    /// Maps the shared buffer sent for an opened handle (ADR-0030).
+    fn attach(&mut self, badge: u64, received: &[Handle]) -> Reply {
+        if badge == 0 || !self.handles.contains_key(&badge) || received.len() != 1 {
+            return Reply::status(Status::BadRequest);
+        }
+        let Ok(size) = oceans_rt::memory_size(received[0]).map(|s| s as usize) else {
+            return Reply::status(Status::BadRequest);
+        };
+        if !(MIN_SHARED..=MAX_SHARED).contains(&size) {
+            return Reply::status(Status::BadRequest);
+        }
+        let Ok(base) = oceans_rt::memory_map(received[0], 0, prot::READ | prot::WRITE) else {
+            return Reply::status(Status::BadRequest);
+        };
+        if let Some((old, _)) = self.buffers.insert(badge, (base, size)) {
+            let _ = oceans_rt::memory_unmap(old);
+        }
+        Reply::ok(&[])
+    }
+
+    /// `WRITE_BUF` / `READ_BUF`: file data through the shared buffer.
+    fn bulk(
+        &mut self,
+        badge: u64,
+        open: Open,
+        operation: u64,
+        data: &[u8],
+    ) -> Result<Reply, Status> {
+        let &(base, size) = self.buffers.get(&badge).ok_or(Status::BadRequest)?;
+        let offset = u64_at(data, 0).ok_or(Status::BadRequest)?;
+        let at = u32_at(data, 8).ok_or(Status::BadRequest)? as usize;
+        let len = u32_at(data, 12).ok_or(Status::BadRequest)? as usize;
+        if at.checked_add(len).is_none_or(|end| end > size) {
+            return Err(Status::BadRequest);
+        }
+        // SAFETY: `at..at + len` lies inside the handle's shared buffer
+        // (checked), mapped read-write here; the client waits in its call.
+        let window = unsafe { core::slice::from_raw_parts_mut(base.add(at), len) };
+        let moved = if operation == op::WRITE_BUF {
+            if !open.writable {
+                return Err(Status::PermissionDenied);
+            }
+            self.volume
+                .write(open.node, offset, window)
+                .map_err(status)?
+        } else {
+            self.volume
+                .read(open.node, offset, window)
+                .map_err(status)?
+        };
+        Ok(Reply::ok(&(moved as u32).to_le_bytes()))
     }
 
     fn name(data: &[u8]) -> Result<&str, Status> {

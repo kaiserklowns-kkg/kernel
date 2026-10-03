@@ -17,7 +17,7 @@
 
 #![no_std]
 
-use oceans_rt::{Error, Handle, rights};
+use oceans_rt::{Error, Handle, prot, rights};
 
 pub type Ipv4 = [u8; 4];
 pub type Mac = [u8; 6];
@@ -189,7 +189,22 @@ pub mod op {
     pub const TCP_SHUTDOWN: u64 = 11;
     /// On a connection or listener: → `[state u8][error status u8]`.
     pub const TCP_STATUS: u64 = 12;
+    /// On a connection (ADR-0030): handle = a memory object (`READ`,
+    /// `WRITE`, `MAP`, `TRANSFER`) of 4 KiB to 1 MiB, the connection's
+    /// shared buffer.
+    pub const TCP_ATTACH: u64 = 13;
+    /// On a connection: data = `[offset u32][len u32]`: sends those bytes
+    /// of the shared buffer → `[accepted u32]` (0: full).
+    pub const TCP_SEND_BUF: u64 = 14;
+    /// On a connection: data = `[offset u32][capacity u32]`: receives into
+    /// the shared buffer → `[len u32]`, `Empty` or `Eof`.
+    pub const TCP_RECV_BUF: u64 = 15;
 }
+
+/// Shared buffer `TcpStream` attaches to each connection (ADR-0030).
+pub const STREAM_BUFFER: usize = 64 * 1024;
+pub const MIN_STREAM_BUFFER: usize = 4096;
+pub const MAX_STREAM_BUFFER: usize = 1024 * 1024;
 
 /// Largest TCP payload per send or receive call.
 pub const MAX_STREAM: usize = 248;
@@ -533,14 +548,59 @@ pub enum Read {
     Eof,
 }
 
-/// A TCP connection.
+/// A TCP connection. It moves data through a shared buffer attached at
+/// creation (ADR-0030), or inline [`MAX_STREAM`] bytes at a time if the
+/// buffer could not be set up.
 pub struct TcpStream {
     handle: Handle,
     notification: Handle,
     owned: bool,
+    /// The shared buffer, mapped here.
+    shared: Option<(*mut u8, usize)>,
 }
 
 impl TcpStream {
+    fn new(handle: Handle, notification: Handle, owned: bool) -> Self {
+        let mut stream = Self {
+            handle,
+            notification,
+            owned,
+            shared: None,
+        };
+        stream.shared = stream.attach(STREAM_BUFFER).ok();
+        stream
+    }
+
+    /// Gives the connection a shared buffer of `size` bytes.
+    fn attach(&self, size: usize) -> Result<(*mut u8, usize), NetError> {
+        let ipc = NetError::Ipc;
+        let memory = oceans_rt::memory_create(size as u64).map_err(ipc)?;
+        let base = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE);
+        let shared = oceans_rt::duplicate(
+            memory,
+            rights::READ | rights::WRITE | rights::MAP | rights::TRANSFER,
+        );
+        let _ = oceans_rt::close(memory);
+        let base = base.map_err(ipc)?;
+        let result = shared.map_err(ipc).and_then(|shared| {
+            request(
+                self.handle,
+                op::TCP_ATTACH,
+                &[],
+                &[shared],
+                &mut [],
+                &mut [],
+            )
+        });
+        match result {
+            Ok(_) => Ok((base, size)),
+            Err(error) => {
+                let _ = oceans_rt::memory_unmap(base);
+                Err(error)
+            }
+        }
+    }
+
     /// Starts connecting to `address:port`; see [`wait_connected`](Self::wait_connected).
     pub fn connect(net: Handle, address: Ipv4, port: u16) -> Result<Self, NetError> {
         let mut data = [0u8; 14];
@@ -548,11 +608,7 @@ impl TcpStream {
         data[4..6].copy_from_slice(&port.to_le_bytes());
         data[6..].copy_from_slice(&READABLE.to_le_bytes());
         let (handle, notification) = open_with_notification(net, op::TCP_CONNECT, &data)?;
-        Ok(Self {
-            handle,
-            notification,
-            owned: true,
-        })
+        Ok(Self::new(handle, notification, true))
     }
 
     /// The notification signalled on every change; also usable for timers
@@ -579,8 +635,27 @@ impl TcpStream {
         })
     }
 
-    /// Queues up to [`MAX_STREAM`] bytes; returns how many (0: full).
+    /// Queues bytes (as many as the shared buffer holds); returns how many
+    /// (0: the connection's send buffer is full).
     pub fn send(&self, data: &[u8]) -> Result<usize, NetError> {
+        if let Some((base, size)) = self.shared {
+            let take = data.len().min(size);
+            // SAFETY: `base` maps `size` bytes read-write for our lifetime;
+            // the service reads them only during the call below.
+            unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), base, take) };
+            let mut request_data = [0u8; 8];
+            request_data[4..].copy_from_slice(&(take as u32).to_le_bytes());
+            let mut reply = [0u8; 4];
+            request(
+                self.handle,
+                op::TCP_SEND_BUF,
+                &request_data,
+                &[],
+                &mut reply,
+                &mut [],
+            )?;
+            return Ok(u32::from_le_bytes(reply) as usize);
+        }
         let take = data.len().min(MAX_STREAM);
         let mut reply = [0u8; 4];
         request(
@@ -607,6 +682,31 @@ impl TcpStream {
 
     /// Copies received bytes into `buffer`.
     pub fn read(&self, buffer: &mut [u8]) -> Result<Read, NetError> {
+        if let Some((base, size)) = self.shared {
+            let capacity = buffer.len().min(size);
+            let mut request_data = [0u8; 8];
+            request_data[4..].copy_from_slice(&(capacity as u32).to_le_bytes());
+            let mut reply = [0u8; 4];
+            return match request(
+                self.handle,
+                op::TCP_RECV_BUF,
+                &request_data,
+                &[],
+                &mut reply,
+                &mut [],
+            ) {
+                Ok(_) => {
+                    let len = (u32::from_le_bytes(reply) as usize).min(capacity);
+                    // SAFETY: the service wrote `len` bytes at the start of
+                    // the shared buffer during the call.
+                    unsafe { core::ptr::copy_nonoverlapping(base, buffer.as_mut_ptr(), len) };
+                    Ok(Read::Data(len))
+                }
+                Err(NetError::Status(Status::Empty)) => Ok(Read::WouldBlock),
+                Err(NetError::Status(Status::Eof)) => Ok(Read::Eof),
+                Err(error) => Err(error),
+            };
+        }
         let mut reply = [0u8; MAX_STREAM];
         match request(self.handle, op::TCP_RECV, &[], &[], &mut reply, &mut []) {
             Ok((len, _)) => {
@@ -639,6 +739,9 @@ impl TcpStream {
 impl Drop for TcpStream {
     fn drop(&mut self) {
         let _ = oceans_rt::close(self.handle);
+        if let Some((base, _)) = self.shared {
+            let _ = oceans_rt::memory_unmap(base);
+        }
         if self.owned {
             let _ = oceans_rt::close(self.notification);
         }
@@ -696,11 +799,7 @@ impl TcpListener {
             &bits.to_le_bytes(),
             notification,
         ) {
-            Ok(handle) => Ok(Some(TcpStream {
-                handle,
-                notification,
-                owned: false,
-            })),
+            Ok(handle) => Ok(Some(TcpStream::new(handle, notification, false))),
             Err(NetError::Status(Status::Empty)) => Ok(None),
             Err(error) => Err(error),
         }
@@ -713,11 +812,7 @@ impl TcpListener {
     /// An established connection, if one is waiting.
     pub fn accept(&self) -> Result<Option<TcpStream>, NetError> {
         match open_with_notification(self.handle, op::TCP_ACCEPT, &READABLE.to_le_bytes()) {
-            Ok((handle, notification)) => Ok(Some(TcpStream {
-                handle,
-                notification,
-                owned: true,
-            })),
+            Ok((handle, notification)) => Ok(Some(TcpStream::new(handle, notification, true))),
             Err(NetError::Status(Status::Empty)) => Ok(None),
             Err(error) => Err(error),
         }

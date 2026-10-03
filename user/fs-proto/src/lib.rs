@@ -20,7 +20,7 @@
 
 #![no_std]
 
-use oceans_rt::{Error, Handle};
+use oceans_rt::{Error, Handle, prot, rights};
 
 /// Operations (request labels).
 pub mod op {
@@ -40,7 +40,21 @@ pub mod op {
     pub const TRUNCATE: u64 = 7;
     /// Makes every change so far durable (ADR-0022).
     pub const SYNC: u64 = 8;
+    /// On an opened node (ADR-0030): handle = a memory object (`READ`,
+    /// `WRITE`, `MAP`, `TRANSFER`) of 4 KiB to 1 MiB, the handle's shared
+    /// buffer.
+    pub const ATTACH: u64 = 9;
+    /// data = `[offset u64][at u32][len u32]`: writes `len` bytes from the
+    /// shared buffer at `at` → `[written u32]`.
+    pub const WRITE_BUF: u64 = 10;
+    /// data = `[offset u64][at u32][len u32]`: reads up to `len` bytes into
+    /// the shared buffer at `at` → `[read u32]`.
+    pub const READ_BUF: u64 = 11;
 }
+
+/// Bounds of a shared buffer.
+pub const MIN_SHARED: usize = 4096;
+pub const MAX_SHARED: usize = 1024 * 1024;
 
 /// `OPEN` flags.
 pub mod flags {
@@ -327,6 +341,81 @@ impl Node {
             .map(drop)
     }
 
+    /// Gives this handle a shared buffer of `size` bytes for bulk reads
+    /// and writes (ADR-0030).
+    pub fn attach(&self, size: usize) -> Result<Shared, FsError> {
+        let ipc = FsError::Ipc;
+        let memory = oceans_rt::memory_create(size as u64).map_err(ipc)?;
+        let base = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE);
+        let shared = oceans_rt::duplicate(
+            memory,
+            rights::READ | rights::WRITE | rights::MAP | rights::TRANSFER,
+        );
+        let _ = oceans_rt::close(memory);
+        let base = base.map_err(ipc)?;
+        let result = shared.map_err(ipc).and_then(|shared| {
+            let got = oceans_rt::ipc_call_msg(self.0, op::ATTACH, &[], &[shared], &mut [], &mut [])
+                .map_err(ipc)?;
+            match Status::from_label(got.label) {
+                Status::Ok => Ok(()),
+                status => Err(FsError::Status(status)),
+            }
+        });
+        match result {
+            Ok(()) => Ok(Shared { base, size }),
+            Err(error) => {
+                let _ = oceans_rt::memory_unmap(base);
+                Err(error)
+            }
+        }
+    }
+
+    fn bulk(&self, op: u64, offset: u64, len: usize) -> Result<usize, FsError> {
+        let mut data = [0u8; 16];
+        data[..8].copy_from_slice(&offset.to_le_bytes());
+        data[12..].copy_from_slice(&(len as u32).to_le_bytes());
+        let mut reply = [0u8; 4];
+        self.request(op, &data, &mut reply, &mut [])?;
+        Ok(u32::from_le_bytes(reply) as usize)
+    }
+
+    /// Writes `bytes` at `offset` through the shared buffer, in pieces of
+    /// its size.
+    pub fn write_shared(
+        &self,
+        shared: &Shared,
+        mut offset: u64,
+        mut bytes: &[u8],
+    ) -> Result<(), FsError> {
+        while !bytes.is_empty() {
+            let take = bytes.len().min(shared.size);
+            // SAFETY: `base` maps `size` bytes read-write while `shared`
+            // lives; the service reads them only during the call.
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), shared.base, take) };
+            let written = self.bulk(op::WRITE_BUF, offset, take)?;
+            if written == 0 {
+                return Err(FsError::Status(Status::NoSpace));
+            }
+            offset += written as u64;
+            bytes = &bytes[written..];
+        }
+        Ok(())
+    }
+
+    /// Reads up to `out.len()` bytes at `offset` through the shared buffer.
+    pub fn read_shared(
+        &self,
+        shared: &Shared,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let len = self.bulk(op::READ_BUF, offset, out.len().min(shared.size))?;
+        let len = len.min(out.len());
+        // SAFETY: the service wrote `len` bytes at the start of the buffer.
+        unsafe { core::ptr::copy_nonoverlapping(shared.base, out.as_mut_ptr(), len) };
+        Ok(len)
+    }
+
     /// Makes every change in the filesystem durable now.
     pub fn sync(&self) -> Result<(), FsError> {
         self.request(op::SYNC, &[], &mut [], &mut []).map(drop)
@@ -335,5 +424,17 @@ impl Node {
     /// Closes the handle (the service then forgets it).
     pub fn close(self) {
         let _ = oceans_rt::close(self.0);
+    }
+}
+
+/// A node handle's shared buffer (ADR-0030), mapped here.
+pub struct Shared {
+    base: *mut u8,
+    size: usize,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        let _ = oceans_rt::memory_unmap(self.base);
     }
 }

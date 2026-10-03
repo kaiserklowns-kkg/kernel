@@ -197,7 +197,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("you were redirected"),
     Expect::Line("chunked transfer works"),
     Expect::Contains("fetch: HTTP 404 Not Found"),
-    Expect::Line("fetch: saved 20000 bytes"),
+    Expect::Contains("fetch: saved 1048576 bytes"),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -966,9 +966,9 @@ fn tcp_greeter() -> Result<u16> {
     Ok(port)
 }
 
-/// The body of `/big`: 20000 bytes in a pattern that catches reordering.
+/// The body of `/big`: 1 MiB in a pattern that catches reordering.
 fn big_body() -> Vec<u8> {
-    (0..20_000u32).map(|i| (i % 251) as u8).collect()
+    (0..1_048_576u32).map(|i| (i % 251) as u8).collect()
 }
 
 /// An HTTP server on the host for the guest's `fetch`. Returns its port.

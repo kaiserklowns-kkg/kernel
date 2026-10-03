@@ -17,7 +17,7 @@
 use core::fmt::{self, Write};
 
 use oceans_elf::{Executable, Limits};
-use oceans_fs_proto::{FsError, Kind, MAX_NAME, Node, flags};
+use oceans_fs_proto::{FsError, Kind, MAX_NAME, Node, Shared, flags};
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 
 oceans_rt::entry!(main);
@@ -339,10 +339,11 @@ impl Shell {
             }
             Err(error) => return self.print(format_args!("cat: {path}: {}\r\n", error.message())),
         };
+        let shared = file.attach(CAT_BUFFER).ok();
         let mut offset = 0;
-        let mut chunk = [0u8; oceans_fs_proto::MAX_DATA];
+        let mut chunk = [0u8; CAT_BUFFER];
         loop {
-            match file.read(offset, &mut chunk) {
+            match read_at(&file, shared.as_ref(), offset, &mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
                     // Files use LF; the terminal needs CR LF.
@@ -461,10 +462,11 @@ impl Shell {
                     .map_err(|_| "out of memory")?;
                 // SAFETY: just mapped `size` writable bytes (rounded up).
                 let target = unsafe { core::slice::from_raw_parts_mut(base, size as usize) };
+                let shared = file.attach(LOAD_BUFFER).ok();
                 let mut done = 0;
                 let mut outcome = Ok(());
                 while done < target.len() {
-                    match file.read(done as u64, &mut target[done..]) {
+                    match read_at(&file, shared.as_ref(), done as u64, &mut target[done..]) {
                         Ok(0) => break,
                         Ok(n) => done += n,
                         Err(error) => {
@@ -728,5 +730,23 @@ impl Input {
         let byte = *self.buffer.get(self.position)?;
         self.position += 1;
         Some(byte)
+    }
+}
+
+/// Shared buffers (ADR-0030) for `cat` and for loading programs.
+const CAT_BUFFER: usize = 4096;
+const LOAD_BUFFER: usize = 64 * 1024;
+
+/// Reads at `offset`: in bulk through `shared` if the file has one,
+/// otherwise inline.
+fn read_at(
+    file: &Node,
+    shared: Option<&Shared>,
+    offset: u64,
+    out: &mut [u8],
+) -> Result<usize, FsError> {
+    match shared {
+        Some(shared) => file.read_shared(shared, offset, out),
+        None => file.read(offset, out),
     }
 }
