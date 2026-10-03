@@ -111,6 +111,22 @@ pub fn init(boot: &BootInfo) {
     map_kernel_image(&mut space, image);
     let mapped = map_direct_map(&mut space, boot, direct_map_offset, features.gigabyte_pages);
 
+    // Boot modules (program images) sit in kernel+modules memory, which the
+    // direct map skips; map just the modules, read-only.
+    for module in boot.modules() {
+        let start = module.physical_base - module.physical_base % PAGE_SIZE;
+        let end = (module.physical_base + module.size).next_multiple_of(PAGE_SIZE);
+        map_range(
+            &mut space,
+            direct_map_offset + start,
+            start,
+            end - start,
+            MapFlags::KERNEL_RODATA,
+            false,
+        )
+        .unwrap_or_else(|err| panic!("mapping boot module {}: {err:?}", module.name()));
+    }
+
     // Every top-level kernel slot that will ever be used exists now, so
     // address spaces created later can share the kernel half by copying the
     // top-level entries once.
@@ -251,6 +267,16 @@ pub fn map_mmio(phys: u64, size: u64) -> Result<*mut u8, MapError> {
         Ok(())
     })?;
     Ok((virt + (phys - start)) as *mut u8)
+}
+
+/// A new user address space sharing the kernel half.
+pub fn new_user_address_space() -> Result<AddressSpace, MapError> {
+    with_kernel_space(|kernel| AddressSpace::new_user(kernel))
+}
+
+/// Root of the kernel address space (kernel threads run in it).
+pub fn kernel_root() -> u64 {
+    with_kernel_space(|kernel| kernel.root())
 }
 
 /// Physical address and flags `virt` maps to in the kernel address space.

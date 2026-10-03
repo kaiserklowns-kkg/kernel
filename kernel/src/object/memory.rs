@@ -51,6 +51,11 @@ impl MemoryObject {
         self.size
     }
 
+    /// Physical frames backing the object, in order.
+    pub fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
     /// Copies `buffer.len()` bytes starting at `offset` out of the object.
     pub fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<(), ObjectError> {
         self.for_each_chunk(offset, buffer.len(), |object_ptr, at, len| {

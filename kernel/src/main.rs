@@ -23,7 +23,9 @@ mod klog;
 mod memory;
 mod object;
 mod panic;
+mod process;
 mod sched;
+mod syscall;
 mod time;
 
 use boot::BootInfo;
@@ -68,6 +70,7 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     let boot = boot::info();
     memory::reclaim_bootloader_memory(boot);
     sched::init();
+    process::init();
 
     let smoke_test = boot.cmdline_has(SMOKE_TEST_FLAG);
     if smoke_test {
@@ -91,5 +94,6 @@ fn self_test() {
     object::self_test();
     sched::self_test();
     ipc::self_test();
+    process::self_test(boot::info());
     klog::info!("self-tests passed");
 }

@@ -31,6 +31,8 @@ pub enum KernelObject {
     /// Calling side of an IPC endpoint.
     EndpointClient(Arc<ClientEnd>),
     Notification(Arc<Notification>),
+    /// Permission to write to the kernel log (`WRITE`).
+    Log,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +42,7 @@ pub enum ObjectKind {
     EndpointServer,
     EndpointClient,
     Notification,
+    Log,
 }
 
 impl KernelObject {
@@ -50,6 +53,7 @@ impl KernelObject {
             Self::EndpointServer(_) => ObjectKind::EndpointServer,
             Self::EndpointClient(_) => ObjectKind::EndpointClient,
             Self::Notification(_) => ObjectKind::Notification,
+            Self::Log => ObjectKind::Log,
         }
     }
 }
@@ -92,6 +96,9 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::WAIT)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
+        ObjectKind::Log => Rights::WRITE
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
     }
 }
 
@@ -101,8 +108,12 @@ pub fn memory(
     handle: oceans_capability::Handle,
     required: Rights,
 ) -> Result<Arc<MemoryObject>, ObjectError> {
-    match table.get(handle, required)?.object() {
-        KernelObject::Memory(memory) => Ok(memory.clone()),
+    let capability = table.get(handle, Rights::NONE)?;
+    match capability.object() {
+        KernelObject::Memory(memory) => {
+            capability.check(required)?;
+            Ok(memory.clone())
+        }
         other => Err(ObjectError::WrongType {
             expected: ObjectKind::Memory,
             found: other.kind(),
@@ -118,8 +129,14 @@ macro_rules! typed_lookup {
             handle: oceans_capability::Handle,
             required: Rights,
         ) -> Result<Arc<$ty>, ObjectError> {
-            match table.get(handle, required)?.object() {
-                KernelObject::$variant(object) => Ok(object.clone()),
+            // Type before rights: a capability of the wrong type is reported
+            // as such, whatever rights it carries.
+            let capability = table.get(handle, Rights::NONE)?;
+            match capability.object() {
+                KernelObject::$variant(object) => {
+                    capability.check(required)?;
+                    Ok(object.clone())
+                }
                 other => Err(ObjectError::WrongType {
                     expected: ObjectKind::$variant,
                     found: other.kind(),

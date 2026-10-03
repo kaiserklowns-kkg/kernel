@@ -1,0 +1,7 @@
+# Overrides the kernel-only flags from the repository-level config: user
+# programs live in the lower half, so they use the small code model.
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = ["-C", "code-model=small", "-C", "relocation-model=static"]

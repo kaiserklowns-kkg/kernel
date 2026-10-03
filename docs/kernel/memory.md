@@ -8,7 +8,7 @@ Implemented incrementally (master spec §15). State per step:
 | 2 | Physical frame allocator | **Done** — ADR-0008, `kernel/src/memory/frames.rs`, `libs/frame-allocator` |
 | 3 | Kernel-owned page tables | **Done** — ADR-0009, `kernel/src/memory/paging.rs`, `kernel/src/arch/x86_64/paging.rs` |
 | 4 | Kernel heap | **Done** — ADR-0010, `kernel/src/memory/heap.rs`, `libs/heap` |
-| 5 | User address spaces | Phase 2 |
+| 5 | User address spaces | **Done** — ADR-0014 (`kernel/src/process`) |
 | 6 | Memory protection (NX, W^X, SMEP/SMAP/UMIP) | **Done** for the kernel — ADR-0009; user side with processes |
 | 7 | Shared memory (capability-mediated) | Phase 2, with IPC |
 | 8 | Memory mapping | Phase 3 |
@@ -34,7 +34,7 @@ Decided in [ADR-0009](../adr/0009-kernel-address-space.md); source of truth
 
 | Range | Contents |
 |---|---|
-| `0x0000_0000_0000_1000`.. | user space (128 TiB) |
+| `0x0000_0000_0001_0000`.. | user programs (ELF segments, ADR-0014); `0x7fff_f000_0000` user stack top |
 | `0xffff_8000_0000_0000` | direct map of RAM (RW, NX; no MMIO, no kernel image) |
 | `0xffff_c000_0000_0000` | reserved: virtually contiguous allocations > 4 MiB (the heap itself lives in the direct map, ADR-0010) |
 | `0xffff_c080_0000_0000` | kernel stacks (64 KiB + unmapped guard page each) |

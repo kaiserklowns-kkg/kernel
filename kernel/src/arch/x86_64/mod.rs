@@ -8,6 +8,7 @@ mod interrupts;
 mod paging;
 mod pic;
 mod serial;
+mod syscall;
 
 use core::arch::asm;
 
@@ -15,7 +16,9 @@ use ::x86_64::instructions::{self as insn, port::Port};
 
 pub use context::{prepare_stack, switch_context};
 pub use cpu::{enable_protections, features as cpu_features};
-pub use paging::AddressSpace;
+pub use interrupts::{TrapFrame, set_user_fault_handler};
+pub use paging::{AddressSpace, activate_root, active_root};
+pub use syscall::{SyscallFrame, enter_user, init as init_syscalls, set_kernel_stack};
 
 pub const NAME: &str = "x86_64";
 
@@ -120,4 +123,19 @@ pub fn wait_for_interrupt() {
 pub fn cycles() -> u64 {
     // SAFETY: RDTSC is available on every x86_64 CPU and has no side effects.
     unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// Faulting address of the most recent page fault (CR2).
+pub fn fault_address() -> u64 {
+    let address: u64;
+    // SAFETY: reading CR2 has no side effects.
+    unsafe {
+        asm!("mov {}, cr2", out(reg) address, options(nomem, nostack, preserves_flags));
+    }
+    address
+}
+
+/// Human-readable name of exception `vector`.
+pub fn exception_name(vector: u64) -> &'static str {
+    interrupts::exception_name(vector)
 }

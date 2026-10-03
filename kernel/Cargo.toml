@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "oceans-kernel"
 description = "The Oceans kernel"
 version.workspace = true
@@ -12,7 +12,9 @@ test = false
 bench = false
 
 [dependencies]
+oceans-abi.workspace = true
 oceans-capability.workspace = true
+oceans-elf.workspace = true
 oceans-frame-allocator.workspace = true
 oceans-heap.workspace = true
 oceans-memory-map.workspace = true

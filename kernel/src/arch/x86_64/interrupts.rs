@@ -33,6 +33,14 @@ pub fn set_timer_handler(handler: fn()) {
     TIMER_HANDLER.call_once(|| handler);
 }
 
+/// Called for CPU exceptions raised in ring 3. Must not return: the kernel
+/// terminates the faulting process instead of resuming it.
+static USER_FAULT_HANDLER: Once<fn(&TrapFrame) -> !> = Once::new();
+
+pub fn set_user_fault_handler(handler: fn(&TrapFrame) -> !) {
+    USER_FAULT_HANDLER.call_once(|| handler);
+}
+
 /// Register state at the time of the exception, in stack order.
 #[repr(C)]
 #[derive(Debug)]
@@ -178,6 +186,13 @@ unsafe extern "C" fn exception_common() {
 }
 
 extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
+    let from_user = frame.cs & 3 == 3;
+    if from_user
+        && frame.vector < EXCEPTION_COUNT as u64
+        && let Some(handler) = USER_FAULT_HANDLER.get()
+    {
+        handler(frame);
+    }
     match frame.vector {
         VECTOR_BREAKPOINT => klog::info!("breakpoint at {:#x}, resuming", frame.rip),
         v if v == u64::from(VECTOR_TIMER) => {
@@ -193,11 +208,15 @@ extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
     }
 }
 
-fn fatal_exception(frame: &TrapFrame) -> ! {
-    let name = EXCEPTION_NAMES
-        .get(frame.vector as usize)
+pub fn exception_name(vector: u64) -> &'static str {
+    EXCEPTION_NAMES
+        .get(vector as usize)
         .copied()
-        .unwrap_or("unknown");
+        .unwrap_or("unknown")
+}
+
+fn fatal_exception(frame: &TrapFrame) -> ! {
+    let name = exception_name(frame.vector);
     if frame.vector == VECTOR_PAGE_FAULT {
         let address: u64;
         // SAFETY: reading CR2 has no side effects.

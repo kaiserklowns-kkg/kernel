@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_PACKAGE: &str = "oceans-kernel";
+/// User programs (in the `user/` workspace) shipped as boot modules.
+const USER_PROGRAMS: &[&str] = &["ipc-test"];
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const LIMINE_BRANCH: &str = "v9.x-binary";
 const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
@@ -138,7 +140,32 @@ fn check() -> Result {
         "-D",
         "warnings",
     ]))?;
-    run_command(cargo().args(["test", "--workspace", "--exclude", KERNEL_PACKAGE]))
+    run_command(cargo().args(["test", "--workspace", "--exclude", KERNEL_PACKAGE]))?;
+    run_command(user_cargo().args(["fmt", "--all", "--check"]))?;
+    run_command(user_cargo().args(["clippy", "--release", "--", "-D", "warnings"]))
+}
+
+/// Cargo in the `user/` workspace, whose `.cargo/config.toml` selects the
+/// target and the user code model.
+fn user_cargo() -> Command {
+    let mut cmd = cargo();
+    cmd.current_dir(root().join("user"));
+    cmd
+}
+
+/// Builds the user programs; returns the directory holding the binaries.
+fn build_user(profile: Profile) -> Result<PathBuf> {
+    let mut cmd = user_cargo();
+    cmd.arg("build");
+    if let Profile::Release = profile {
+        cmd.arg("--release");
+    }
+    run_command(&mut cmd)?;
+    Ok(root()
+        .join("user")
+        .join("target")
+        .join(KERNEL_TARGET)
+        .join(profile.dir()))
 }
 
 fn build_kernel(profile: Profile) -> Result<PathBuf> {
@@ -182,9 +209,11 @@ fn fetch_limine() -> Result {
 /// EFI/BOOT/BOOTX64.EFI        Limine
 /// boot/limine/limine.conf
 /// boot/oceans-kernel
+/// boot/<user program>…       boot modules
 /// ```
 fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     let kernel = build_kernel(profile)?;
+    let user = build_user(profile)?;
 
     let limine_efi = limine_dir().join("BOOTX64.EFI");
     if !limine_efi.is_file() {
@@ -206,11 +235,17 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
 
     copy(&limine_efi, &efi_boot.join("BOOTX64.EFI"))?;
     copy(&kernel, &esp.join("boot").join(KERNEL_PACKAGE))?;
+    for program in USER_PROGRAMS {
+        copy(&user.join(program), &esp.join("boot").join(program))?;
+    }
 
     let mut conf = String::from("timeout: 0\n\n/Oceans\n    protocol: limine\n");
     conf.push_str(&format!("    path: boot():/boot/{KERNEL_PACKAGE}\n"));
     if let Some(cmdline) = cmdline {
         conf.push_str(&format!("    cmdline: {cmdline}\n"));
+    }
+    for program in USER_PROGRAMS {
+        conf.push_str(&format!("    module_path: boot():/boot/{program}\n"));
     }
     let conf_path = limine_conf_dir.join("limine.conf");
     fs::write(&conf_path, conf)

@@ -1,0 +1,19 @@
+# Userspace programs. A separate workspace: they build for the same bare-metal
+# target as the kernel but with the normal (small) code model, set in
+# user/.cargo/config.toml. Built by `cargo xtask`.
+[workspace]
+resolver = "3"
+members = ["rt", "ipc-test"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+rust-version = "1.97"
+
+[workspace.dependencies]
+oceans-abi = { path = "../libs/abi" }
+oceans-rt = { path = "rt" }
+
+[profile.release]
+debug = 1

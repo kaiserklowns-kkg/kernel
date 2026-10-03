@@ -16,7 +16,8 @@ controlled set of modern hardware instead of maximum compatibility.
 |---|---|---|
 | 0 — Architecture | ADRs, system architecture, repo layout | **In progress** — see [docs/adr](docs/adr) |
 | 1 — Boot | Boot in QEMU, `OCEANS KERNEL ONLINE` | **Done** — `cargo xtask smoke` passes |
-| 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **In progress** — frames (0008), address space (0009), heap (0010), capabilities (0011), threads + scheduler (0012), IPC (0013) |
+| 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **Done** — ADRs 0008–0014; exit criterion (isolated processes exchanging IPC) passes in `cargo xtask smoke` |
+| 3 — Userspace | init, service manager, filesystem, shell | Next |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 
@@ -44,11 +45,16 @@ kernel/            Oceans kernel (Rust, no_std)
   src/object/        kernel objects reachable by capability
   src/sched/         kernel threads, context switch, preemptive scheduler
   src/ipc/           endpoints (call/reply + capability transfer), notifications
+  src/process/       processes: ELF loading, user address spaces, user faults
+  src/syscall.rs     system call dispatch (ABI v1)
 libs/memory-map/   host-testable physical memory map model
 libs/frame-allocator/ host-testable buddy allocator for physical frames
 libs/heap/          host-testable slab + page-block kernel heap
 libs/capability/    host-testable capability tables, rights, revocation
 libs/scheduler/     host-testable scheduling policy (run queue, sleep, slices)
+libs/abi/           system call ABI shared by kernel and userspace
+libs/elf/           strict ELF64 executable parser
+user/               userspace workspace: oceans-rt runtime, ipc-test
 tools/xtask/       build, image and QEMU tooling (`cargo xtask`)
 docs/              architecture, ADRs, hardware, development guides
 ```

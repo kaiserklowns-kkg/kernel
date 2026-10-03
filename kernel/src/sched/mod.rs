@@ -17,7 +17,9 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use oceans_scheduler::{RunQueue, TimeSlice};
 use spin::Mutex;
 
+use crate::ipc::endpoint::ReplyToken;
 use crate::memory::paging::{self, KernelStack, MapError};
+use crate::process::Process;
 use crate::{arch, klog, time};
 
 /// Ticks a thread may run before another ready thread gets the CPU
@@ -37,8 +39,26 @@ pub struct Thread {
     /// Set while the thread waits in [`block`] for a [`wake`]. Guards
     /// against double wake-ups, which would queue a thread twice.
     blocked: AtomicBool,
+    /// Page-table root the thread runs in: the kernel's for kernel threads,
+    /// its process's for user threads.
+    root: u64,
+    /// The process a user thread belongs to (keeps its address space and
+    /// capabilities alive while the thread exists).
+    process: Option<Arc<Process>>,
+    /// Call received with `IPC_RECEIVE`, answered by `IPC_REPLY`.
+    pending_call: Mutex<Option<ReplyToken>>,
     /// The thread's stack; freed when the thread is reaped.
-    _stack: KernelStack,
+    stack: KernelStack,
+}
+
+impl Thread {
+    pub fn process(&self) -> Option<&Arc<Process>> {
+        self.process.as_ref()
+    }
+
+    pub fn pending_call(&self) -> &Mutex<Option<ReplyToken>> {
+        &self.pending_call
+    }
 }
 
 // SAFETY: `saved_rsp` is only accessed by the scheduler with interrupts
@@ -103,15 +123,19 @@ pub fn init() {
         .lock()
         .take()
         .expect("boot code hands over its stack first");
+    let kernel_root = paging::kernel_root();
     let boot = Arc::new(Thread {
         id: next_id(),
         name: "boot",
         // Filled in by the first switch away from it.
         saved_rsp: UnsafeCell::new(0),
         blocked: AtomicBool::new(false),
-        _stack: stack,
+        root: kernel_root,
+        process: None,
+        pending_call: Mutex::new(None),
+        stack,
     });
-    let idle = new_thread("idle", idle_main, 0)
+    let idle = new_thread("idle", idle_main, 0, kernel_root, None)
         .unwrap_or_else(|err| panic!("cannot create the idle thread: {err:?}"));
 
     arch::without_interrupts(|| {
@@ -129,7 +153,55 @@ pub fn init() {
 
 /// Starts a kernel thread running `entry(arg)`. It exits when `entry` returns.
 pub fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError> {
-    let thread = new_thread(name, entry, arg)?;
+    let thread = new_thread(name, entry, arg, paging::kernel_root(), None)?;
+    let id = thread.id;
+    arch::without_interrupts(|| SCHEDULER.lock().queue.push_ready(thread));
+    Ok(id)
+}
+
+/// Starts the first thread of `process`, entering user mode at `entry` with
+/// stack `user_rsp` and `args` in the first three argument registers.
+pub fn spawn_user(
+    name: &'static str,
+    process: Arc<Process>,
+    entry: u64,
+    user_rsp: u64,
+    args: [u64; 3],
+) -> Result<ThreadId, SpawnError> {
+    struct UserStart {
+        entry: u64,
+        user_rsp: u64,
+        args: [u64; 3],
+    }
+    fn user_thread_main(arg: usize) {
+        // SAFETY: `arg` is the `Box<UserStart>` leaked below, used once.
+        let start = unsafe { alloc::boxed::Box::from_raw(arg as *mut UserStart) };
+        let UserStart {
+            entry,
+            user_rsp,
+            args,
+        } = *start;
+        // SAFETY: the scheduler switched to this thread's process address
+        // space (which maps `entry` and the stack for user mode, see
+        // `process::spawn`) and set this thread's kernel stack.
+        unsafe { arch::enter_user(entry, user_rsp, args) }
+    }
+
+    let root = process.root();
+    let start = alloc::boxed::Box::new(UserStart {
+        entry,
+        user_rsp,
+        args,
+    });
+    let arg = alloc::boxed::Box::into_raw(start) as usize;
+    let thread = match new_thread(name, user_thread_main, arg, root, Some(process)) {
+        Ok(thread) => thread,
+        Err(err) => {
+            // SAFETY: the thread was not created, so we still own `arg`.
+            drop(unsafe { alloc::boxed::Box::from_raw(arg as *mut UserStart) });
+            return Err(err);
+        }
+    };
     let id = thread.id;
     arch::without_interrupts(|| SCHEDULER.lock().queue.push_ready(thread));
     Ok(id)
@@ -200,7 +272,13 @@ fn next_id() -> ThreadId {
     ThreadId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-fn new_thread(name: &'static str, entry: fn(usize), arg: usize) -> Result<Arc<Thread>, SpawnError> {
+fn new_thread(
+    name: &'static str,
+    entry: fn(usize),
+    arg: usize,
+    root: u64,
+    process: Option<Arc<Process>>,
+) -> Result<Arc<Thread>, SpawnError> {
     let stack = paging::allocate_kernel_stack().map_err(SpawnError::Stack)?;
     // SAFETY: the stack was just mapped for this thread alone.
     let rsp = unsafe { arch::prepare_stack(stack.top(), thread_start, entry as usize, arg) };
@@ -209,7 +287,10 @@ fn new_thread(name: &'static str, entry: fn(usize), arg: usize) -> Result<Arc<Th
         name,
         saved_rsp: UnsafeCell::new(rsp),
         blocked: AtomicBool::new(false),
-        _stack: stack,
+        root,
+        process,
+        pending_call: Mutex::new(None),
+        stack,
     }))
 }
 
@@ -251,7 +332,7 @@ fn schedule(reason: Reason) {
 /// [`schedule`], optionally running `target` next instead of the head of the
 /// ready queue (`target` must not be in the ready queue).
 fn schedule_to(target: Option<Arc<Thread>>, reason: Reason) {
-    let (save, load) = {
+    let (save, load, root, kernel_stack) = {
         let mut scheduler = SCHEDULER.lock();
         if matches!(reason, Reason::Block) {
             let current = scheduler.current.as_ref().expect("scheduler running");
@@ -283,10 +364,20 @@ fn schedule_to(target: Option<Arc<Thread>>, reason: Reason) {
         }
         // SAFETY: `next` is not running, so its saved stack pointer is stable.
         let load = unsafe { *next.saved_rsp.get() };
+        let (root, kernel_stack) = (next.root, next.stack.top());
         scheduler.current = Some(next);
         scheduler.slice.reset();
-        (save, load)
+        (save, load, root, kernel_stack)
     };
+    // Ring-3 entries (syscalls, interrupts) of the next thread land on its
+    // own kernel stack.
+    arch::set_kernel_stack(kernel_stack);
+    if root != arch::active_root() {
+        // SAFETY: `root` is the kernel's address space or that of the next
+        // thread's process, which the thread keeps alive; both contain the
+        // shared kernel half, so this code and stack stay mapped.
+        unsafe { arch::activate_root(root) };
+    }
     // SAFETY: interrupts are disabled (caller contract); `save` belongs to the
     // outgoing thread, kept alive as described above; `load` was saved by a
     // previous switch or prepared by `new_thread`.

@@ -1,0 +1,9 @@
+[package]
+name = "oceans-abi"
+description = "The Oceans system call ABI shared by the kernel and userspace (ADR-0014)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -4,7 +4,7 @@ use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, HhdmRequest, MemoryMapRequest,
-    RequestsEndMarker, RequestsStartMarker,
+    ModuleRequest, RequestsEndMarker, RequestsStartMarker,
 };
 use oceans_memory_map::{Region, RegionKind};
 
@@ -39,6 +39,10 @@ static KERNEL_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new(
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static MODULES: ModuleRequest = ModuleRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
@@ -79,6 +83,19 @@ extern "C" fn kernel_entry() -> ! {
             match cmdline.cmdline().to_str() {
                 Ok(text) => info.set_cmdline(text),
                 Err(_) => klog::warn!("ignoring kernel command line: not valid UTF-8"),
+            }
+        }
+
+        if let (Some(modules), Some(offset)) = (MODULES.get_response(), info.direct_map_offset) {
+            for module in modules.modules() {
+                let path = module.path().to_bytes();
+                let physical_base = (module.addr() as u64).wrapping_sub(offset);
+                if !info.push_module(path, physical_base, module.size()) {
+                    klog::warn!(
+                        "ignoring boot module {:?}: too many or bad name",
+                        module.path()
+                    );
+                }
             }
         }
         info

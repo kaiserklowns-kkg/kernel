@@ -21,5 +21,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0011](0011-capabilities.md) | Kernel objects and capabilities | Accepted |
 | [0012](0012-threads-and-scheduling.md) | Kernel threads and preemptive round-robin scheduling | Accepted |
 | [0013](0013-ipc.md) | IPC: endpoints (call/reply) and notifications | Accepted |
+| [0014](0014-processes-and-user-mode.md) | Processes, user mode and the system call ABI | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

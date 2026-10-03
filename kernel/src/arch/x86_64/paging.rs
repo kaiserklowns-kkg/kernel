@@ -49,6 +49,35 @@ impl AddressSpace {
         })
     }
 
+    /// A user address space: empty lower half, kernel half shared with
+    /// `kernel` by copying its top-level entries (which never change after
+    /// boot, ADR-0009).
+    pub fn new_user(kernel: &AddressSpace) -> Result<Self, MapError> {
+        let root = allocate_table()?;
+        for slot in ENTRIES / 2..ENTRIES {
+            write(root, slot, read(kernel.root, slot));
+        }
+        Ok(Self { root })
+    }
+
+    /// Frees this address space's own page tables: every table below the
+    /// lower-half top-level entries, and the root. Leaf frames are not freed
+    /// (they belong to memory objects); the shared kernel half is untouched.
+    ///
+    /// # Safety
+    ///
+    /// The address space must not be active on any CPU, and nothing may use
+    /// it afterwards.
+    pub unsafe fn destroy_user(self) {
+        for slot in 0..ENTRIES / 2 {
+            let entry = read(self.root, slot);
+            if entry & PRESENT != 0 {
+                free_subtree(entry & ADDRESS_MASK, 2);
+            }
+        }
+        free_table(self.root);
+    }
+
     /// Physical address of the PML4.
     pub const fn root(&self) -> u64 {
         self.root
@@ -226,6 +255,43 @@ fn next_table(table: u64, index: usize, user: bool, virt: u64) -> Result<u64, Ma
         next | PRESENT | WRITABLE | if user { USER } else { 0 },
     );
     Ok(next)
+}
+
+/// Frees the table at `table` (level 2 = PDPT … 0 = PT) and all tables below.
+fn free_subtree(table: u64, level: u32) {
+    if level > 0 {
+        for slot in 0..ENTRIES {
+            let entry = read(table, slot);
+            if entry & PRESENT != 0 && entry & HUGE == 0 {
+                free_subtree(entry & ADDRESS_MASK, level - 1);
+            }
+        }
+    }
+    free_table(table);
+}
+
+fn free_table(table: u64) {
+    let frame = oceans_frame_allocator::Frame::from_addr(table).expect("tables are page-aligned");
+    if let Err(err) = frames::free_frames(frame) {
+        panic!("page table {table:#x} rejected on free: {err:?}");
+    }
+}
+
+/// Physical address of the active top-level table.
+pub fn active_root() -> u64 {
+    Cr3::read().0.start_address().as_u64()
+}
+
+/// Loads the address space rooted at `root`.
+///
+/// # Safety
+///
+/// `root` must be a complete address space (kernel half included) that
+/// stays alive while active.
+pub unsafe fn activate_root(root: u64) {
+    let frame = PhysFrame::containing_address(PhysAddr::new(root));
+    // SAFETY: caller contract.
+    unsafe { Cr3::write(frame, Cr3Flags::empty()) };
 }
 
 /// A zeroed frame for a page table.

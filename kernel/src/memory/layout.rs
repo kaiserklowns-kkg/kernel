@@ -14,10 +14,6 @@
 
 use core::ops::Range;
 
-#[expect(
-    dead_code,
-    reason = "user address spaces arrive with processes (Phase 2)"
-)]
 pub const USER: Range<u64> = 0x0000_0000_0000_1000..0x0000_8000_0000_0000;
 pub const DIRECT_MAP: Range<u64> = 0xffff_8000_0000_0000..0xffff_c000_0000_0000;
 pub const KERNEL_HEAP: Range<u64> = 0xffff_c000_0000_0000..0xffff_c080_0000_0000;

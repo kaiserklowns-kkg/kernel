@@ -1,0 +1,10 @@
+[package]
+name = "oceans-rt"
+description = "Minimal Oceans userspace runtime: entry point, syscalls, panic handling"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-abi.workspace = true

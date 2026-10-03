@@ -19,6 +19,34 @@ pub const MAX_MEMORY_REGIONS: usize = 256;
 /// Longest kernel command line kept; longer ones are truncated with a warning.
 pub const MAX_CMDLINE_LEN: usize = 512;
 
+/// Boot modules (program images loaded by the bootloader) kept.
+pub const MAX_MODULES: usize = 16;
+const MAX_MODULE_NAME: usize = 64;
+
+/// A file the bootloader loaded into memory for the kernel.
+#[derive(Clone, Copy)]
+pub struct BootModule {
+    name: [u8; MAX_MODULE_NAME],
+    name_len: usize,
+    /// Physical address and size of the contents.
+    pub physical_base: u64,
+    pub size: u64,
+}
+
+impl BootModule {
+    const EMPTY: Self = Self {
+        name: [0; MAX_MODULE_NAME],
+        name_len: 0,
+        physical_base: 0,
+        size: 0,
+    };
+
+    /// File name (last path component).
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    }
+}
+
 static BOOT_INFO: Once<BootInfo> = Once::new();
 
 /// Boot information, available once the boot layer has run.
@@ -43,6 +71,8 @@ pub struct BootInfo {
     cmdline: [u8; MAX_CMDLINE_LEN],
     cmdline_len: usize,
     cmdline_truncated: bool,
+    modules: [BootModule; MAX_MODULES],
+    module_count: usize,
 }
 
 impl BootInfo {
@@ -60,6 +90,8 @@ impl BootInfo {
             cmdline: [0; MAX_CMDLINE_LEN],
             cmdline_len: 0,
             cmdline_truncated: false,
+            modules: [BootModule::EMPTY; MAX_MODULES],
+            module_count: 0,
         }
     }
 
@@ -78,6 +110,24 @@ impl BootInfo {
             }
             None => self.regions_truncated = true,
         }
+    }
+
+    /// Records a boot module. Names longer than the limit or extra modules
+    /// are reported and skipped, never silently truncated.
+    fn push_module(&mut self, path: &[u8], physical_base: u64, size: u64) -> bool {
+        let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+        if name.len() > MAX_MODULE_NAME || core::str::from_utf8(name).is_err() {
+            return false;
+        }
+        let Some(slot) = self.modules.get_mut(self.module_count) else {
+            return false;
+        };
+        slot.name[..name.len()].copy_from_slice(name);
+        slot.name_len = name.len();
+        slot.physical_base = physical_base;
+        slot.size = size;
+        self.module_count += 1;
+        true
     }
 
     /// Copies `text`, truncating at a character boundary if it is too long.
@@ -107,6 +157,14 @@ impl BootInfo {
 
     pub fn kernel_image(&self) -> Option<KernelImage> {
         self.kernel_image
+    }
+
+    pub fn modules(&self) -> &[BootModule] {
+        &self.modules[..self.module_count]
+    }
+
+    pub fn module(&self, name: &str) -> Option<&BootModule> {
+        self.modules().iter().find(|m| m.name() == name)
     }
 
     pub fn cmdline(&self) -> &str {

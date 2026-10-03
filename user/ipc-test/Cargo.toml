@@ -1,0 +1,15 @@
+[package]
+name = "ipc-test"
+description = "Two-process IPC and isolation test run by the kernel smoke test"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ipc-test"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true

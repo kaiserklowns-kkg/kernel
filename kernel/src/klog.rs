@@ -1,4 +1,4 @@
-﻿//! Kernel logging.
+//! Kernel logging.
 //!
 //! Lines have the form `[LEVEL] subsystem: message` and go to the
 //! architecture console (serial on x86_64). Diagnostics never depend on a
