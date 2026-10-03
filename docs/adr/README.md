@@ -49,5 +49,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0039](0039-copying-with-shared-buffers.md) | Copying with shared buffers | Accepted |
 | [0040](0040-nvme.md) | NVMe | Accepted |
 | [0041](0041-intel-ethernet.md) | Intel Ethernet (82574L / e1000e) | Accepted |
+| [0042](0042-usb-mice-and-pointer-input.md) | USB mice and pointer input | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

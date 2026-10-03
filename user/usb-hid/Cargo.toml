@@ -1,0 +1,18 @@
+[package]
+name = "usb-hid"
+description = "USB pointer class driver (HID mice and tablets): claims pointers from the xhci service and serves their events on the input protocol (ADR-0042)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "usb-hid"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-usb.workspace = true
+oceans-input.workspace = true
+oceans-input-proto.workspace = true

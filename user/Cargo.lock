@@ -552,6 +552,18 @@ name = "oceans-http"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-input"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-input-proto"
+version = "0.1.0"
+dependencies = [
+ "oceans-input",
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-net"
 version = "0.1.0"
 
@@ -597,6 +609,9 @@ dependencies = [
 [[package]]
 name = "oceans-usb"
 version = "0.1.0"
+dependencies = [
+ "oceans-input",
+]
 
 [[package]]
 name = "oceans-virtio"
@@ -961,6 +976,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "usb-hid"
+version = "0.1.0"
+dependencies = [
+ "oceans-input",
+ "oceans-input-proto",
+ "oceans-rt",
+ "oceans-usb",
+]
+
+[[package]]
 name = "usb-storage"
 version = "0.1.0"
 dependencies = [
@@ -977,6 +1002,8 @@ dependencies = [
  "oceans-block-proto",
  "oceans-fs-proto",
  "oceans-http",
+ "oceans-input",
+ "oceans-input-proto",
  "oceans-net-proto",
  "oceans-rt",
  "oceans-tls",

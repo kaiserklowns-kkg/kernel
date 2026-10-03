@@ -4,6 +4,8 @@
 //!   descriptors, parsed defensively (devices are untrusted input).
 //! - [`request`]: standard and HID control requests (setup packets).
 //! - [`hid`]: the HID boot keyboard protocol, as console bytes.
+//! - [`pointer`]: HID mice and tablets: report descriptors, boot mouse
+//!   reports, decoded into input samples (ADR-0042).
 //! - [`hub`]: hub descriptors, port status and requests; route strings.
 //! - [`service`]: the protocol of the driver's `usb` endpoint (`lsusb`,
 //!   class drivers).
@@ -16,6 +18,7 @@
 pub mod descriptor;
 pub mod hid;
 pub mod hub;
+pub mod pointer;
 pub mod request;
 pub mod service;
 pub mod storage;

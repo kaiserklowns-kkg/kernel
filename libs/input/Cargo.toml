@@ -1,0 +1,9 @@
+[package]
+name = "oceans-input"
+description = "Oceans input events: pointer events, their wire format, and turning pointer samples into events, without allocation (ADR-0042)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

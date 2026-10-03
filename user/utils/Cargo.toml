@@ -1,6 +1,6 @@
 [package]
 name = "utils"
-description = "Basic Oceans utilities: ps, mem, uptime, uname (ADR-0020); lspci, disk (ADR-0021); ifconfig, ping (ADR-0023); host, nc (ADR-0024); fetch (ADR-0028, https: ADR-0031); date (ADR-0031); lsusb (ADR-0032)"
+description = "Basic Oceans utilities: ps, mem, uptime, uname (ADR-0020); lspci, disk (ADR-0021); ifconfig, ping (ADR-0023); host, nc (ADR-0024); fetch (ADR-0028, https: ADR-0031); date (ADR-0031); lsusb (ADR-0032); mouse (ADR-0042)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -71,6 +71,11 @@ name = "lsusb"
 test = false
 bench = false
 
+[[bin]]
+name = "mouse"
+test = false
+bench = false
+
 [dependencies]
 oceans-abi.workspace = true
 oceans-rt = { workspace = true, features = ["alloc"] }
@@ -80,3 +85,5 @@ oceans-http.workspace = true
 oceans-fs-proto.workspace = true
 oceans-tls.workspace = true
 oceans-usb.workspace = true
+oceans-input.workspace = true
+oceans-input-proto.workspace = true

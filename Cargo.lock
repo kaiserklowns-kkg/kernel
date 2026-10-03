@@ -503,6 +503,10 @@ name = "oceans-http"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-input"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-kernel"
 version = "0.1.0"
 dependencies = [
@@ -570,6 +574,9 @@ dependencies = [
 [[package]]
 name = "oceans-usb"
 version = "0.1.0"
+dependencies = [
+ "oceans-input",
+]
 
 [[package]]
 name = "oceans-volume"
