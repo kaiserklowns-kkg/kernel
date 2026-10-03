@@ -150,6 +150,8 @@ pub mod reg {
 
     pub mod rctl {
         pub const ENABLE: u32 = 1 << 1;
+        /// Multicast Promiscuous Enable: every multicast frame is received.
+        pub const MULTICAST_PROMISCUOUS: u32 = 1 << 4;
         pub const BROADCAST_ACCEPT: u32 = 1 << 15;
         /// `BSIZE` 00 with `BSEX` 0: 2048-byte buffers.
         pub const BUFFER_2048: u32 = 0;
@@ -178,11 +180,20 @@ pub mod reg {
     }
 }
 
-/// The receive control value: enabled, broadcasts accepted, 2048-byte
-/// buffers, CRC stripped, legacy descriptors, no promiscuous or multicast
-/// modes, no long frames, no loopback.
+/// The receive control value: enabled, broadcasts and all multicast
+/// accepted, 2048-byte buffers, CRC stripped, legacy descriptors, unicast
+/// filtered by the MAC, no long frames, no loopback.
+///
+/// IPv6 (ADR-0043) needs multicast: the all-nodes group and the
+/// solicited-node groups of the interface's addresses, which change with
+/// SLAAC. The stack filters what it does not want, so the hardware
+/// accepts all multicast instead of following those groups in its table.
 pub const fn receive_control() -> u32 {
-    reg::rctl::ENABLE | reg::rctl::BROADCAST_ACCEPT | reg::rctl::BUFFER_2048 | reg::rctl::STRIP_CRC
+    reg::rctl::ENABLE
+        | reg::rctl::MULTICAST_PROMISCUOUS
+        | reg::rctl::BROADCAST_ACCEPT
+        | reg::rctl::BUFFER_2048
+        | reg::rctl::STRIP_CRC
 }
 
 /// The transmit control value: enabled, short frames padded, the

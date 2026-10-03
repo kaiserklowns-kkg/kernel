@@ -550,6 +550,13 @@ version = "0.1.0"
 [[package]]
 name = "oceans-http"
 version = "0.1.0"
+dependencies = [
+ "oceans-inet",
+]
+
+[[package]]
+name = "oceans-inet"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-input"
@@ -566,12 +573,16 @@ dependencies = [
 [[package]]
 name = "oceans-net"
 version = "0.1.0"
+dependencies = [
+ "oceans-inet",
+]
 
 [[package]]
 name = "oceans-net-proto"
 version = "0.1.0"
 dependencies = [
  "oceans-dns",
+ "oceans-inet",
  "oceans-rt",
 ]
 

@@ -1,12 +1,14 @@
-//! `host NAME [SERVER[:PORT]]`: looks up a host name's IPv4 address with
-//! DNS (needs `use:net`). Without SERVER, asks the configured DNS server.
+//! `host NAME [SERVER[:PORT]]`: looks up a host name's IPv4 (A) and IPv6
+//! (AAAA, ADR-0043) addresses with DNS (needs `use:net`). Without SERVER,
+//! asks the configured DNS server. SERVER is an IPv4 address or an IPv6
+//! one (in brackets to give a port: `[fec0::3]:53`).
 
 #![no_std]
 #![no_main]
 
 use core::fmt::Write;
 
-use oceans_net_proto::{Dotted, parse_ipv4, resolve, resolve_via};
+use oceans_net_proto::{lookup, lookup_via, parse_ip, split_host_port};
 use oceans_rt::Start;
 use utils::{EXIT_FAILED, EXIT_USAGE, console, require};
 
@@ -29,12 +31,13 @@ fn main(start: Start) -> i64 {
         return EXIT_USAGE;
     };
     let result = match words.next() {
-        None => resolve(net, name),
+        None => lookup(net, name),
         Some(server) => {
-            let (address, port) = server.split_once(':').unwrap_or((server, "53"));
-            match (parse_ipv4(address), port.parse()) {
-                (Some(address), Ok(port)) => resolve_via(net, name, address, port),
-                _ => {
+            let parsed = split_host_port(server)
+                .and_then(|(address, port)| Some((parse_ip(address)?, port.unwrap_or(53))));
+            match parsed {
+                Some((address, port)) => lookup_via(net, name, address, port, (true, true)),
+                None => {
                     let _ = writeln!(out, "host: bad server {server}");
                     return EXIT_USAGE;
                 }
@@ -42,8 +45,17 @@ fn main(start: Start) -> i64 {
         }
     };
     match result {
-        Ok(address) => {
-            let _ = writeln!(out, "{name} has address {}", Dotted(address));
+        Ok(addresses) => {
+            if let Some(v4) = addresses.v4 {
+                let _ = writeln!(out, "{name} has address {}", oceans_net_proto::Dotted(v4));
+            }
+            if let Some(v6) = addresses.v6 {
+                let _ = writeln!(
+                    out,
+                    "{name} has IPv6 address {}",
+                    oceans_net_proto::Colons(v6)
+                );
+            }
             0
         }
         Err(error) => {

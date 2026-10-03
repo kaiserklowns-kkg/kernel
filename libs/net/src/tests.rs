@@ -226,6 +226,30 @@ fn dhcp_discovers_requests_and_configures() {
     assert_eq!(dhcp_option(&again, 53), Some(vec![DHCP_DISCOVER]));
 }
 
+/// The next IPv4 frame the stack sent (IPv6 ones skipped).
+fn next_ipv4(stack: &mut Stack) -> Option<StdVec<u8>> {
+    while let Some(frame) = stack.transmit() {
+        if be16(&frame, 12) != ipv6::ETHERTYPE_IPV6 {
+            return Some(frame);
+        }
+    }
+    None
+}
+
+#[test]
+fn dhcp_configures_with_ipv6_enabled() {
+    let mut stack = Stack::new(OURS);
+    stack.enable_ipv6([7; 16], 0);
+    stack.poll(0);
+    let discover = sent_dhcp(&next_ipv4(&mut stack).expect("DISCOVER"));
+    let xid = u32::from_be_bytes(discover[4..8].try_into().unwrap());
+    stack.receive(&dhcp_reply(DHCP_OFFER, xid, OURS), 10);
+    let request = sent_dhcp(&next_ipv4(&mut stack).expect("REQUEST"));
+    assert_eq!(dhcp_option(&request, 53), Some(vec![DHCP_REQUEST]));
+    stack.receive(&dhcp_reply(DHCP_ACK, xid, OURS), 20);
+    assert!(stack.dhcp_bound());
+}
+
 #[test]
 fn dhcp_retransmits_with_backoff() {
     let mut stack = Stack::new(OURS);
@@ -340,7 +364,7 @@ fn delivers_udp_and_refuses_closed_ports() {
     assert_eq!(
         stack.recv(socket),
         Some(Datagram {
-            from: GATEWAY,
+            from: IpAddr::V4(GATEWAY),
             port: 4000,
             data: b"echo me".to_vec()
         })

@@ -1,4 +1,4 @@
-//! TCP (RFC 9293), ADR-0024.
+//! TCP (RFC 9293), ADR-0024, over IPv4 and IPv6 (ADR-0043).
 //!
 //! - Active and passive open, with the MSS option.
 //! - Sliding-window send and receive with 16 KiB buffers each.
@@ -29,8 +29,10 @@ const ACK: u8 = 0x10;
 
 /// Bytes buffered per direction per connection.
 pub const TCP_BUFFER: usize = 16 * 1024;
-/// Our maximum segment size: what an Ethernet MTU carries.
+/// Our maximum segment size over IPv4: what an Ethernet MTU carries.
 const OUR_MSS: u16 = (MTU - IP_HEADER - TCP_HEADER) as u16;
+/// The smallest MSS an IPv6 path guarantees (1280-byte minimum MTU).
+pub(crate) const MIN_MSS6: u16 = (ipv6::MIN_MTU - ipv6::HEADER - TCP_HEADER) as u16;
 /// The peer's when it does not say (RFC 9293).
 const DEFAULT_MSS: u16 = 536;
 const INITIAL_RTO_MS: u64 = 1_000;
@@ -110,14 +112,19 @@ struct Incoming<'a> {
 
 pub(crate) struct Tcb {
     pub(crate) state: TcpState,
-    remote: Ipv4,
+    pub(crate) remote: IpAddr,
     remote_port: u16,
+    /// Our address on this connection: the family, and for IPv6 which of
+    /// our addresses (source address selection, or the peer's choice).
+    pub(crate) local: IpAddr,
     pub(crate) local_port: u16,
+    /// The MSS we announce: what the link MTU carries in this family.
+    our_mss: u16,
     pub(crate) iss: u32,
     snd_una: u32,
     snd_nxt: u32,
     snd_wnd: u32,
-    mss: u16,
+    pub(crate) mss: u16,
     /// Unacknowledged and unsent data; byte 0 has sequence `snd_una`.
     send: VecDeque<u8>,
     /// The user closed its side: a FIN follows the data.
@@ -142,12 +149,20 @@ pub(crate) struct Tcb {
 }
 
 impl Tcb {
-    fn new(local_port: u16, remote: Ipv4, remote_port: u16, iss: u32, state: TcpState) -> Self {
+    fn new(
+        (local, local_port): (IpAddr, u16),
+        (remote, remote_port): (IpAddr, u16),
+        our_mss: u16,
+        iss: u32,
+        state: TcpState,
+    ) -> Self {
         Self {
             state,
             remote,
             remote_port,
+            local,
             local_port,
+            our_mss,
             iss,
             snd_una: iss,
             snd_nxt: iss.wrapping_add(1),
@@ -185,7 +200,7 @@ impl Tcb {
             ack: if flags & ACK != 0 { self.rcv_nxt } else { 0 },
             flags,
             window: window as u16,
-            mss: (flags & SYN != 0).then_some(OUR_MSS),
+            mss: (flags & SYN != 0).then_some(self.our_mss),
             data,
         }
     }
@@ -397,7 +412,7 @@ impl Tcb {
             return false; // simultaneous open is not supported
         }
         self.rcv_nxt = segment.seq.wrapping_add(1);
-        self.mss = segment.mss.unwrap_or(DEFAULT_MSS).clamp(64, OUR_MSS);
+        self.mss = segment.mss.unwrap_or(DEFAULT_MSS).clamp(64, self.our_mss);
         self.snd_una = segment.ack;
         self.snd_nxt = segment.ack;
         self.snd_wnd = u32::from(segment.window);
@@ -613,11 +628,20 @@ impl Stack {
         self.isn_secret = mix(secret ^ self.isn_secret);
     }
 
-    fn isn(&self, local_port: u16, remote: Ipv4, remote_port: u16, now: u64) -> u32 {
-        let tuple = (u64::from(u32::from_be_bytes(remote)) << 32)
-            | (u64::from(local_port) << 16)
-            | u64::from(remote_port);
-        (mix(self.isn_secret ^ tuple) as u32).wrapping_add((now as u32).wrapping_mul(250))
+    fn isn(&self, local_port: u16, remote: IpAddr, remote_port: u16, now: u64) -> u32 {
+        let ports = (u64::from(local_port) << 16) | u64::from(remote_port);
+        let hash = match remote {
+            IpAddr::V4(remote) => {
+                mix(self.isn_secret ^ (u64::from(u32::from_be_bytes(remote)) << 32) ^ ports)
+            }
+            IpAddr::V6(remote) => {
+                let (high, low) = remote.split_at(8);
+                let high = u64::from_be_bytes(high.try_into().expect("8 bytes"));
+                let low = u64::from_be_bytes(low.try_into().expect("8 bytes"));
+                mix(mix(self.isn_secret ^ high) ^ low ^ ports)
+            }
+        };
+        (hash as u32).wrapping_add((now as u32).wrapping_mul(250))
     }
 
     pub(crate) fn tcp(&self, id: SocketId) -> Option<&Tcb> {
@@ -659,14 +683,31 @@ impl Stack {
         self.new_tcp_socket(SocketKind::Listen, port, None)
     }
 
-    /// Starts a connection to `dst:port` from an ephemeral port.
-    pub fn tcp_connect(&mut self, dst: Ipv4, port: u16, now: u64) -> Result<SocketId, NetError> {
-        let config = self.config.ok_or(NetError::NotConfigured)?;
-        if !config.on_link(dst) && config.gateway.is_none() {
-            return Err(NetError::NoRoute);
-        }
+    /// Starts a connection to `dst:port` (either family) from an ephemeral
+    /// port.
+    pub fn tcp_connect(
+        &mut self,
+        dst: impl Into<IpAddr>,
+        port: u16,
+        now: u64,
+    ) -> Result<SocketId, NetError> {
+        let dst = dst.into();
+        let (local, our_mss) = match dst {
+            IpAddr::V4(dst) => {
+                let config = self.config.ok_or(NetError::NotConfigured)?;
+                if !config.on_link(dst) && config.gateway.is_none() {
+                    return Err(NetError::NoRoute);
+                }
+                (IpAddr::V4(config.address), OUR_MSS)
+            }
+            IpAddr::V6(dst) => {
+                let (source, mtu) = self.route6(&dst)?;
+                let mss = (mtu - ipv6::HEADER - TCP_HEADER) as u16;
+                (IpAddr::V6(source), mss.max(MIN_MSS6))
+            }
+        };
         let span = EPHEMERAL_PORTS.end() - EPHEMERAL_PORTS.start() + 1;
-        let mut local = None;
+        let mut local_port = None;
         for _ in 0..span {
             let candidate = self.next_ephemeral;
             self.next_ephemeral = if candidate == *EPHEMERAL_PORTS.end() {
@@ -675,16 +716,22 @@ impl Stack {
                 candidate + 1
             };
             if !self.tcp_port_used(candidate) {
-                local = Some(candidate);
+                local_port = Some(candidate);
                 break;
             }
         }
-        let local = local.ok_or(NetError::AddressInUse)?;
-        let iss = self.isn(local, dst, port, now);
-        let mut tcb = Tcb::new(local, dst, port, iss, TcpState::SynSent);
+        let local_port = local_port.ok_or(NetError::AddressInUse)?;
+        let iss = self.isn(local_port, dst, port, now);
+        let mut tcb = Tcb::new(
+            (local, local_port),
+            (dst, port),
+            our_mss,
+            iss,
+            TcpState::SynSent,
+        );
         let syn = tcb.syn();
         tcb.timer = Some(now + tcb.rto);
-        let id = self.new_tcp_socket(SocketKind::Tcp, local, Some(tcb))?;
+        let id = self.new_tcp_socket(SocketKind::Tcp, local_port, Some(tcb))?;
         self.transmit_segments(id, [syn].into_iter().collect(), now);
         Ok(id)
     }
@@ -843,27 +890,33 @@ impl Stack {
         let Some(tcb) = self.tcp(id) else {
             return;
         };
-        let (local, remote, remote_port) = (tcb.local_port, tcb.remote, tcb.remote_port);
+        let local = (tcb.local, tcb.local_port);
+        let remote = (tcb.remote, tcb.remote_port);
         for segment in segments {
-            self.send_tcp(local, remote, remote_port, &segment, now);
+            self.send_tcp(local, remote, &segment, now);
         }
     }
 
+    /// Sends one segment from `local` to `remote` (address, port). IPv4
+    /// segments go from the current configured address.
     fn send_tcp(
         &mut self,
-        local: u16,
-        remote: Ipv4,
-        remote_port: u16,
+        (local, local_port): (IpAddr, u16),
+        (remote, remote_port): (IpAddr, u16),
         segment: &Segment,
         now: u64,
     ) {
-        let Some(config) = self.config else {
-            return;
+        let local = match local {
+            IpAddr::V4(_) => match self.config {
+                Some(config) => IpAddr::V4(config.address),
+                None => return,
+            },
+            v6 => v6,
         };
         let options = if segment.mss.is_some() { 4 } else { 0 };
         let header = TCP_HEADER + options;
         let mut bytes = Vec::with_capacity(header + segment.data.len());
-        bytes.extend_from_slice(&local.to_be_bytes());
+        bytes.extend_from_slice(&local_port.to_be_bytes());
         bytes.extend_from_slice(&remote_port.to_be_bytes());
         bytes.extend_from_slice(&segment.seq.to_be_bytes());
         bytes.extend_from_slice(&segment.ack.to_be_bytes());
@@ -876,12 +929,17 @@ impl Stack {
             bytes.extend_from_slice(&mss.to_be_bytes());
         }
         bytes.extend_from_slice(&segment.data);
-        let mut sum = checksum_add(0, &config.address);
-        sum = checksum_add(sum, &remote);
-        sum += u32::from(PROTOCOL_TCP) + bytes.len() as u32;
+        let sum = pseudo_sum(local, remote, PROTOCOL_TCP, bytes.len());
         let sum = checksum_finish(checksum_add(sum, &bytes));
         bytes[16..18].copy_from_slice(&sum.to_be_bytes());
-        let _ = self.send_ip(remote, PROTOCOL_TCP, bytes, now);
+        // A lost segment is retransmitted; nothing else to do on failure.
+        let _ = match (local, remote) {
+            (IpAddr::V6(local), IpAddr::V6(remote)) => {
+                self.send_ip6(local, remote, PROTOCOL_TCP, bytes, now)
+            }
+            (_, IpAddr::V4(remote)) => self.send_ip(remote, PROTOCOL_TCP, bytes, now),
+            _ => Err(NetError::NoRoute),
+        };
     }
 
     fn mark_ready(&mut self, id: SocketId) {
@@ -891,7 +949,7 @@ impl Stack {
     }
 
     /// Delivers a received segment (IP layer already checked it is ours).
-    pub(crate) fn on_tcp(&mut self, src: Ipv4, dst: Ipv4, bytes: &[u8], now: u64) -> bool {
+    pub(crate) fn on_tcp(&mut self, src: IpAddr, dst: IpAddr, bytes: &[u8], now: u64) -> bool {
         if bytes.len() < TCP_HEADER {
             return false;
         }
@@ -899,9 +957,7 @@ impl Stack {
         if offset < TCP_HEADER || offset > bytes.len() {
             return false;
         }
-        let mut sum = checksum_add(0, &src);
-        sum = checksum_add(sum, &dst);
-        sum += u32::from(PROTOCOL_TCP) + bytes.len() as u32;
+        let sum = pseudo_sum(src, dst, PROTOCOL_TCP, bytes.len());
         if checksum_finish(checksum_add(sum, bytes)) != 0 {
             return false;
         }
@@ -941,7 +997,12 @@ impl Stack {
 
         let connection = (0..self.sockets.len()).find(|&id| {
             self.tcp(id).is_some_and(|t| {
-                t.local_port == dst_port && t.remote == src && t.remote_port == src_port
+                t.local_port == dst_port
+                    && t.remote == src
+                    && t.remote_port == src_port
+                    // IPv6 hosts have several addresses; IPv4 follows the
+                    // configured one.
+                    && (t.local == dst || matches!(t.local, IpAddr::V4(_)))
             })
         });
         if let Some(id) = connection {
@@ -989,9 +1050,19 @@ impl Stack {
                 return false; // full: the peer retries
             }
             let iss = self.isn(dst_port, src, src_port, now);
-            let mut tcb = Tcb::new(dst_port, src, src_port, iss, TcpState::SynReceived);
+            let our_mss = match dst {
+                IpAddr::V4(_) => OUR_MSS,
+                IpAddr::V6(_) => self.mss6(),
+            };
+            let mut tcb = Tcb::new(
+                (dst, dst_port),
+                (src, src_port),
+                our_mss,
+                iss,
+                TcpState::SynReceived,
+            );
             tcb.rcv_nxt = segment.seq.wrapping_add(1);
-            tcb.mss = mss.unwrap_or(DEFAULT_MSS).clamp(64, OUR_MSS);
+            tcb.mss = mss.unwrap_or(DEFAULT_MSS).clamp(64, our_mss);
             tcb.snd_wnd = u32::from(segment.window);
             tcb.parent = Some(listener);
             let syn_ack = tcb.syn();
@@ -1027,7 +1098,7 @@ impl Stack {
                     data: Vec::new(),
                 }
             };
-            self.send_tcp(dst_port, src, src_port, &reset, now);
+            self.send_tcp((dst, dst_port), (src, src_port), &reset, now);
         }
         false
     }

@@ -88,7 +88,10 @@ is new is choosing between two drivers when either card may be present.
       bad checksum means its configuration cannot be trusted;
     - the MAC is read from NVM words 0–2 (falling back to the address the
       device loaded into receive address 0) and programmed there.
-    - The multicast table is cleared.
+    - The multicast table is cleared, and all multicast is received
+      (`RCTL.MPE`): IPv6 (ADR-0043) needs the all-nodes and solicited-node
+      groups, which change with its addresses, and the stack filters the
+      rest.
   - **link:** `CTRL.SLU`, with speed and duplex following
     autonegotiation (nothing forced). If the link is down, the PHY
     restarts autonegotiation through `MDIC`.

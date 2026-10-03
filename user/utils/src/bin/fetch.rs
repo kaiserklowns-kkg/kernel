@@ -1,5 +1,6 @@
 //! `fetch [--ca PATH] URL [PATH]`: downloads an `http://` or `https://` URL
-//! (needs `use:net`). Without PATH the body is printed; with PATH it is
+//! (needs `use:net`); the host may be an IPv6 literal (`http://[fec0::2]/`,
+//! ADR-0043). Without PATH the body is printed; with PATH it is
 //! saved as that file (needs `use:fs` too). Redirects are followed, at most
 //! 5, never from `https` down to `http`. `https` certificates are checked
 //! against Mozilla's roots, plus the certificates in `--ca PATH` (PEM or
@@ -18,7 +19,7 @@ use core::time::Duration;
 
 use oceans_fs_proto::{FsError, Kind, Node, Shared, flags};
 use oceans_http::{Event, Head, HttpError, Parser, Url, get_request, redirect};
-use oceans_net_proto::{Read, TcpStream, resolve};
+use oceans_net_proto::{Read, TcpStream, connect_host};
 use oceans_rt::{Buffer, Out, Start};
 use oceans_tls::rustls::crypto::{GetRandomFailed, SecureRandom};
 use oceans_tls::rustls::pki_types::{ServerName, UnixTime};
@@ -352,13 +353,14 @@ fn get(
     sink: &mut Sink,
     out: &mut Out,
 ) -> Result<(Head, Security), Problem> {
-    let address = resolve(net, url.host).map_err(|e| e.message())?;
-    let stream = TcpStream::connect(net, address, url.port).map_err(|e| e.message())?;
-    stream.wait_connected(CONNECT_MS).map_err(|e| e.message())?;
+    // A name's IPv6 and IPv4 addresses race (ADR-0043); `[v6]` literals
+    // are taken as they are.
+    let stream = connect_host(net, url.host, url.port, CONNECT_MS).map_err(|e| e.message())?;
     let mut connection = match tls {
         None => Connection::Plain(Tcp(stream)),
         Some(config) => {
-            let name = ServerName::try_from(url.host)
+            // Certificates name IP addresses without brackets.
+            let name = ServerName::try_from(url.hostname())
                 .map_err(|_| "not a valid server name")?
                 .to_owned();
             Connection::Tls(Box::new(Client::connect(config, name, Tcp(stream))?))

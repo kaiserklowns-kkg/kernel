@@ -6,7 +6,7 @@ use std::vec::Vec;
 #[test]
 fn control_values() {
     // EN, BAM, SECRC; BSIZE 2048, legacy descriptors, no UPE/MPE/LPE.
-    assert_eq!(receive_control(), 0x0400_8002);
+    assert_eq!(receive_control(), 0x0400_8012);
     // EN, PSP, CT 0x0f, COLD 0x3f, RTLC.
     assert_eq!(transmit_control(), 0x0103_f0fa);
     assert_eq!(TRANSMIT_IPG, 0x0060_2008);

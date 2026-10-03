@@ -1,13 +1,15 @@
 //! `nc HOST PORT [TEXT...]`: opens a TCP connection, sends TEXT and a line
 //! end (then closes its side), and prints everything the peer sends until
-//! it closes (needs `use:net`). HOST may be a name (resolved with DNS).
+//! it closes (needs `use:net`). HOST may be an IPv4 or IPv6 address
+//! (`fec0::2` or `[fec0::2]`, ADR-0043) or a name (resolved with DNS; its
+//! IPv6 and IPv4 addresses race, the first connection wins).
 
 #![no_std]
 #![no_main]
 
 use core::fmt::Write;
 
-use oceans_net_proto::{Read, TcpStream, resolve};
+use oceans_net_proto::{Read, ResolveError, connect_host};
 use oceans_rt::{Buffer, Out, Start};
 use utils::{EXIT_FAILED, EXIT_USAGE, console, require};
 
@@ -32,24 +34,18 @@ fn main(start: Start) -> i64 {
         let _ = writeln!(out, "usage: nc HOST PORT [TEXT...]");
         return EXIT_USAGE;
     };
-    let address = match resolve(net, host) {
-        Ok(address) => address,
+    let fail = |out: &mut Out, problem: &str| {
+        let _ = writeln!(out, "nc: {problem}");
+        EXIT_FAILED
+    };
+    let stream = match connect_host(net, host, port, CONNECT_MS) {
+        Ok(stream) => stream,
+        Err(ResolveError::Net(error)) => return fail(&mut out, error.message()),
         Err(error) => {
             let _ = writeln!(out, "nc: {host}: {}", error.message());
             return EXIT_FAILED;
         }
     };
-    let fail = |out: &mut Out, problem: &str| {
-        let _ = writeln!(out, "nc: {problem}");
-        EXIT_FAILED
-    };
-    let stream = match TcpStream::connect(net, address, port) {
-        Ok(stream) => stream,
-        Err(error) => return fail(&mut out, error.message()),
-    };
-    if let Err(error) = stream.wait_connected(CONNECT_MS) {
-        return fail(&mut out, error.message());
-    }
     let mut text = Buffer::<512>::new();
     for (i, word) in words.enumerate() {
         let _ = write!(text, "{}{word}", if i > 0 { " " } else { "" });
