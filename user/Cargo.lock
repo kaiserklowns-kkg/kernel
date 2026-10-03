@@ -218,6 +218,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "e1000e"
+version = "0.1.0"
+dependencies = [
+ "oceans-e1000e",
+ "oceans-net-proto",
+ "oceans-rt",
+ "oceans-virtio",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -512,6 +522,10 @@ dependencies = [
 
 [[package]]
 name = "oceans-dns"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-e1000e"
 version = "0.1.0"
 
 [[package]]

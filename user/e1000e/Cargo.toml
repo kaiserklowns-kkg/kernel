@@ -1,0 +1,18 @@
+[package]
+name = "e1000e"
+description = "Intel 82574L (e1000e) Ethernet driver: a userspace service holding one device capability, serving the netdev protocol (ADR-0041)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "e1000e"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-net-proto.workspace = true
+oceans-virtio.workspace = true
+oceans-e1000e.workspace = true

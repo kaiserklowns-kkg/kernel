@@ -33,6 +33,7 @@ const USER_PROGRAMS: &[&str] = &[
     "virtio-blk",
     "nvme",
     "virtio-net",
+    "e1000e",
     "xhci",
     "usb-storage",
     "net",
@@ -252,7 +253,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run lsusb out use:usb\r\n",
     b"exit\r\n",
 ];
-/// The second smoke boot, on the disk the first one left.
+/// The second smoke boot, on the disk the first one left, with an Intel
+/// 82574L in place of the virtio NIC (ADR-0041): the same stack, unchanged,
+/// must get its address by DHCP and carry ICMP, UDP, TCP and HTTP over it.
 const REBOOT_SCRIPT: &[&[u8]] = &[
     b"cat /keep/note.txt\r\n",
     b"ls /keep\r\n",
@@ -262,6 +265,14 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"ls /usb\r\n",
     b"cat /usb/note.txt\r\n",
     b"cat /nvme/note.txt\r\n",
+    b"run lspci out devices\r\n",
+    b"run ifconfig out use:net\r\n",
+    b"run ping out use:net -- 10.0.2.2 3\r\n",
+    b"run host out use:net -- oceans.test 10.0.2.2:$DNS\r\n",
+    b"run nc out use:net -- 10.0.2.2 $TCP hello over e1000e\r\n",
+    b"run fetch out use:net -- http://10.0.2.2:$HTTP/hello.txt\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /keep/e1000e.bin\r\n",
+    b"sync\r\n",
     b"exit\r\n",
 ];
 const REBOOT_EXPECT: &[Expect] = &[
@@ -279,7 +290,22 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
     Expect::Contains("Oceans 0.1.0 x86_64 (ABI 11)"),
-    Expect::Contains("net: configured 10.0.2.15/24"),
+    // The NIC is an 82574L: virtio-net's device is absent, so init cannot
+    // start it, and e1000e's endpoint is the stack's `netdev`.
+    Expect::Contains("init: cannot start netdev: "),
+    Expect::Contains("e1000e: MAC 52:54:00:12:34:56, 82574L, MSI-X"),
+    Expect::Contains("e1000e: link up, 1000 Mb/s full duplex"),
+    Expect::Contains("8086:10d3  network  (driver attached)"),
+    Expect::Contains("net: configured 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3 (DHCP)"),
+    Expect::Contains("net-echo: listening on UDP and TCP port 7"),
+    Expect::Line("net0: 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3"),
+    Expect::Line("      mac 52:54:00:12:34:56"),
+    Expect::Contains("reply from 10.0.2.2: seq=3"),
+    Expect::Line("3 sent, 3 received"),
+    Expect::Line("oceans.test has address 10.1.2.3"),
+    Expect::Line("hello from the host: hello over e1000e"),
+    Expect::Line("hello over http"),
+    Expect::Contains("fetch: saved 1048576 bytes"),
 ];
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
@@ -436,7 +462,8 @@ environment:
   OCEANS_QEMU   path to qemu-system-x86_64
   OCEANS_OVMF   path to the x86_64 UEFI firmware code image (OVMF/edk2)
   OCEANS_LIMINE directory containing BOOTX64.EFI (default: build/limine)
-  OCEANS_QEMU_EXTRA extra QEMU arguments, e.g. \"-cpu max\"";
+  OCEANS_QEMU_EXTRA extra QEMU arguments, e.g. \"-cpu max\"
+  OCEANS_NIC    the network card for `run`: virtio (default) or e1000e";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -695,19 +722,63 @@ fn prepare_disk(path: &str, fresh: bool) -> Result {
 /// The MAC QEMU gives the guest's network device.
 const GUEST_MAC: &str = "52:54:00:12:34:56";
 
+/// The guest's network card (ADR-0041): whichever is present, its driver
+/// serves the stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nic {
+    /// Modern-only virtio-net (`1af4:1041`), driven by virtio-net.
+    Virtio,
+    /// An Intel 82574L (`8086:10d3`), driven by e1000e.
+    E1000e,
+}
+
+impl Nic {
+    /// `OCEANS_NIC`, for `run`.
+    fn from_env() -> Result<Self> {
+        match env::var("OCEANS_NIC").as_deref() {
+            Err(_) | Ok("" | "virtio") => Ok(Self::Virtio),
+            Ok("e1000e") => Ok(Self::E1000e),
+            Ok(other) => Err(format!("OCEANS_NIC={other}: expected `virtio` or `e1000e`")),
+        }
+    }
+
+    fn device(self) -> String {
+        match self {
+            Self::Virtio => format!("virtio-net-pci,netdev=net0,disable-legacy=on,mac={GUEST_MAC}"),
+            Self::E1000e => format!("e1000e,netdev=net0,mac={GUEST_MAC}"),
+        }
+    }
+}
+
+/// The disk images a boot attaches.
+#[derive(Clone, Copy)]
+struct Images<'a> {
+    /// The virtio system disk.
+    disk: &'a str,
+    nvme: &'a str,
+    /// The USB stick plugged in at boot.
+    stick: &'a str,
+    /// An image QEMU knows but has not plugged in (the monitor plugs it in
+    /// as `fatstick`).
+    spare_stick: Option<&'a str>,
+}
+
 /// `forward`: host (UDP, TCP) ports forwarded to the guest's port 7;
-/// `monitor`: a host port for QEMU's monitor (to press USB keys);
-/// `spare_stick`: an image QEMU knows but has not plugged in (the monitor
-/// plugs it in as `fatstick`).
+/// `monitor`: a host port for QEMU's monitor (to press USB keys); `nic`:
+/// the network card.
 fn qemu_command(
     headless: bool,
-    disk: &str,
-    nvme: &str,
-    stick: &str,
-    spare_stick: Option<&str>,
+    nic: Nic,
+    images: &Images<'_>,
     forward: Option<(u16, u16)>,
     monitor: Option<u16>,
 ) -> Result<Command> {
+    let Images {
+        disk,
+        nvme,
+        stick,
+        spare_stick,
+    } = *images;
     let qemu = find_qemu()?;
     let firmware = find_firmware(&qemu)?;
 
@@ -744,8 +815,9 @@ fn qemu_command(
     .arg("-drive")
     .arg(format!("if=none,id=nvme0,format=raw,file={nvme}"))
     .args(["-device", "nvme,serial=oceans-nvme,drive=nvme0"])
-    // A modern-only virtio NIC (1af4:1041) on QEMU's user network (NAT,
-    // DHCP at 10.0.2.2), driven by the userspace virtio-net service.
+    // The network card on QEMU's user network (NAT, DHCP at 10.0.2.2):
+    // a modern-only virtio NIC or an Intel 82574L, each driven by its
+    // userspace driver (ADR-0023, ADR-0041).
     .arg("-netdev")
     .arg(match forward {
         Some((udp, tcp)) => {
@@ -754,9 +826,7 @@ fn qemu_command(
         None => "user,id=net0".to_string(),
     })
     .arg("-device")
-    .arg(format!(
-        "virtio-net-pci,netdev=net0,disable-legacy=on,mac={GUEST_MAC}"
-    ))
+    .arg(nic.device())
     // A USB 3 host controller (class 0c0330) with a keyboard, driven by the
     // userspace xhci service (ADR-0032).
     .args([
@@ -857,10 +927,13 @@ fn run(profile: Profile) -> Result {
     prepare_stick(STICK_IMAGE, false)?;
     run_command(&mut qemu_command(
         false,
-        DISK_IMAGE,
-        NVME_IMAGE,
-        STICK_IMAGE,
-        None,
+        Nic::from_env()?,
+        &Images {
+            disk: DISK_IMAGE,
+            nvme: NVME_IMAGE,
+            stick: STICK_IMAGE,
+            spare_stick: None,
+        },
         None,
         None,
     )?)
@@ -1089,11 +1162,11 @@ fn smoke(profile: Profile) -> Result {
     prepare_stick(SMOKE_STICK_IMAGE, true)?;
     prepare_fat_stick()?;
     println!("smoke boot 1 of 2: blank disk");
-    smoke_boot(SHELL_SCRIPT, SHELL_EXPECT)?;
-    println!("smoke boot 2 of 2: the same disk");
+    smoke_boot(SHELL_SCRIPT, SHELL_EXPECT, Nic::Virtio)?;
+    println!("smoke boot 2 of 2: the same disk, an Intel NIC instead of virtio-net");
     // A clean boot image: the first boot's firmware wrote into it (vvfat).
     build_image(profile, Some("oceans.test=smoke"))?;
-    smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT)?;
+    smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT, Nic::E1000e)?;
     check_smoke_disk()?;
     check_smoke_nvme()?;
     check_smoke_stick()?;
@@ -1113,8 +1186,8 @@ const SHELL_PROMPT: &[u8] = b"oceans> ";
 
 /// One headless boot: types `script` into the shell, one command per
 /// prompt, and requires every `expected` line, the online banner and a
-/// successful exit.
-fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
+/// successful exit. The guest's network card is `nic`.
+fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let udp_forward = free_udp_port()?;
     let tcp_forward = free_tcp_port()?;
     let udp_echo = udp_echo_probe(udp_forward);
@@ -1134,10 +1207,13 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let monitor_port = free_tcp_port()?;
     let mut child = qemu_command(
         true,
-        SMOKE_DISK_IMAGE,
-        SMOKE_NVME_IMAGE,
-        SMOKE_STICK_IMAGE,
-        Some(SMOKE_FAT_IMAGE),
+        nic,
+        &Images {
+            disk: SMOKE_DISK_IMAGE,
+            nvme: SMOKE_NVME_IMAGE,
+            stick: SMOKE_STICK_IMAGE,
+            spare_stick: Some(SMOKE_FAT_IMAGE),
+        },
         Some((udp_forward, tcp_forward)),
         Some(monitor_port),
     )?
@@ -1339,6 +1415,15 @@ fn check_smoke_disk() -> Result {
         .map_err(|e| format!("reading the downloaded file: {e:?}"))?;
     if downloaded != big_body() {
         return Err("the file fetched over HTTP does not match what the host served".into());
+    }
+    // Fetched over the Intel NIC on the second boot (ADR-0041).
+    let intel = lookup(&volume, keep, "e1000e.bin")?;
+    let mut downloaded = vec![0u8; volume.size(intel).map_err(|e| format!("{e:?}"))? as usize];
+    volume
+        .read(intel, 0, &mut downloaded)
+        .map_err(|e| format!("reading the file fetched over e1000e: {e:?}"))?;
+    if downloaded != big_body() {
+        return Err("the file fetched over e1000e does not match what the host served".into());
     }
     let secure = lookup(&volume, keep, "tls.bin")?;
     let mut downloaded = vec![0u8; volume.size(secure).map_err(|e| format!("{e:?}"))? as usize];

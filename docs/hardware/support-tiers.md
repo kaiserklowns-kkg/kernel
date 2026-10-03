@@ -26,6 +26,6 @@ value. Exact chipsets are added only after research and a test device.
 | Buses | PCI Express via ACPI MCFG/ECAM (ADR-0021) | — |
 | Storage | virtio-blk (modern, `1af4:1042`), userspace driver (ADR-0021); NVMe (class `010802`), userspace driver (ADR-0040) | NVMe SSDs (validation on real machines pending) |
 | USB | xHCI (QEMU `qemu-xhci`): keyboards, hubs, mass storage (ADR-0032–0034) | xHCI controllers of the target machines |
-| Network | virtio-net (modern, `1af4:1041`), userspace driver (ADR-0023) | Intel and Realtek Ethernet |
+| Network | virtio-net (modern, `1af4:1041`), userspace driver (ADR-0023); Intel 82574L (`8086:10d3`, QEMU `e1000e`), userspace driver (ADR-0041) | Intel 82574L on real hardware; other Intel e1000e-family parts (82583, I217/I218/I219); Realtek Ethernet |
 
 Tier 3 explicitly: legacy BIOS boot, 32-bit x86, ISA, IDE/PATA, floppy.
