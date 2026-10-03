@@ -1,0 +1,9 @@
+[package]
+name = "oceans-random"
+description = "Oceans randomness: a BLAKE2s entropy pool and a ChaCha20 generator with fast key erasure (ADR-0026)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

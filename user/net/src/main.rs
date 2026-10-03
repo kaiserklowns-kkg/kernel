@@ -89,10 +89,9 @@ fn main(start: Start) -> i64 {
         }
     };
     let mut stack = Stack::new(mac);
-    // Keys TCP initial sequence numbers. The TSC is the best entropy a
-    // process has until the kernel offers a source (ADR-0024).
-    // SAFETY: RDTSC has no side effects and is allowed in user mode.
-    stack.set_secret(unsafe { core::arch::x86_64::_rdtsc() });
+    // Keys TCP initial sequence numbers (ADR-0024) with kernel randomness
+    // (ADR-0026).
+    stack.set_secret(oceans_rt::random_u64());
     let mut net = Net {
         log,
         server,

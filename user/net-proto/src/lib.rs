@@ -782,7 +782,8 @@ pub fn resolve_via(net: Handle, name: &str, server: Ipv4, port: u16) -> Result<I
     use oceans_dns::{Answer, build_query, parse_response};
 
     let mut query = [0u8; oceans_dns::MAX_MESSAGE];
-    let id = (oceans_rt::clock_ms() as u16) ^ 0x6f63;
+    // Unpredictable ids make forged answers much harder (ADR-0026).
+    let id = oceans_rt::random_u64() as u16;
     let len = build_query(id, name, &mut query).map_err(|_| ResolveError::BadName)?;
     if len > MAX_DATA {
         return Err(ResolveError::BadName);

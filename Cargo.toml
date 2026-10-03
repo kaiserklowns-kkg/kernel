@@ -1,10 +1,10 @@
 [workspace]
 exclude = ["user"]
 resolver = "3"
-members = ["kernel", "libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/scheduler", "libs/volume", "tools/xtask"]
+members = ["kernel", "libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/random", "libs/scheduler", "libs/volume", "tools/xtask"]
 # The kernel only builds for bare-metal targets; host-side `cargo test`
 # and `cargo build` cover the portable crates and tooling.
-default-members = ["libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/scheduler", "libs/volume", "tools/xtask"]
+default-members = ["libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/frame-allocator", "libs/heap", "libs/memory-map", "libs/pci", "libs/dns", "libs/net", "libs/random", "libs/scheduler", "libs/volume", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,6 +25,7 @@ oceans-heap = { path = "libs/heap" }
 oceans-memory-map = { path = "libs/memory-map" }
 oceans-net = { path = "libs/net" }
 oceans-pci = { path = "libs/pci" }
+oceans-random = { path = "libs/random" }
 oceans-scheduler = { path = "libs/scheduler" }
 oceans-volume = { path = "libs/volume" }
 

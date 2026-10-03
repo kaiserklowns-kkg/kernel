@@ -27,6 +27,7 @@ mod object;
 mod panic;
 mod pci;
 mod process;
+mod random;
 mod sched;
 mod syscall;
 mod time;
@@ -74,6 +75,7 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     memory::reclaim_bootloader_memory(boot);
     sched::init();
     process::init();
+    random::init();
     let acpi = acpi::discover(boot);
     console::init(acpi.as_ref());
     pci::init(acpi.as_ref());
@@ -106,6 +108,7 @@ fn self_test() {
     object::self_test();
     sched::self_test();
     ipc::self_test();
+    random::self_test();
     pci::self_test();
     process::self_test(boot::info());
     process::init_self_test(boot::info());

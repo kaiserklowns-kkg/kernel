@@ -65,6 +65,7 @@ pub fn init(acpi: Option<&Acpi>) {
 
 /// A received byte (interrupt context, interrupts disabled).
 fn on_input(byte: u8) {
+    crate::random::sample();
     let reader = {
         let mut input = INPUT.lock();
         if input.len == CAPACITY {

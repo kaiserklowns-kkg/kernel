@@ -27,6 +27,7 @@ fn slot(vector: u8) -> usize {
 
 /// Interrupt context: a device vector fired.
 pub fn dispatch(vector: u8) {
+    crate::random::sample();
     if !DEVICE_VECTORS.contains(&vector) {
         return;
     }

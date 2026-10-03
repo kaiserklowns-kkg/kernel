@@ -1,4 +1,4 @@
-//! The Oceans system call ABI, version 8 (ADR-0014 to ADR-0023).
+//! The Oceans system call ABI, version 9 (ADR-0014 to ADR-0026).
 //!
 //! Shared by the kernel and userspace so both sides agree by construction.
 //! The ABI is versioned: numbers and meanings below never change within a
@@ -19,9 +19,9 @@
 /// 3 = ADR-0016 (18–22); 4 = ADR-0017 (23–24); 5 = ADR-0019 (25–26: badges,
 /// memory size); 6 = ADR-0020 (27: system information); 7 = ADR-0021
 /// (28–34: devices; errors -15 and -16); 8 = ADR-0023 (35–37: bound
-/// notifications, timers, clock). Versions only add; existing numbers keep
-/// their meaning.
-pub const ABI_VERSION: u64 = 8;
+/// notifications, timers, clock); 9 = ADR-0026 (38: random). Versions only
+/// add; existing numbers keep their meaning.
+pub const ABI_VERSION: u64 = 9;
 
 /// System call numbers.
 pub mod nr {
@@ -171,7 +171,18 @@ pub mod nr {
     pub const TIMER_SET: u64 = 36;
     /// `() -> milliseconds` — monotonic time since boot (10 ms resolution).
     pub const CLOCK: u64 = 37;
+
+    // ABI 9
+
+    /// `(ptr, len) -> len` — fills `len` (at most
+    /// [`RANDOM_MAX`](super::RANDOM_MAX)) bytes with cryptographically
+    /// secure random bytes. Needs no capability: randomness grants no
+    /// authority.
+    pub const RANDOM: u64 = 38;
 }
+
+/// Largest single `RANDOM` request, in bytes.
+pub const RANDOM_MAX: usize = 256;
 
 /// `IPC_RECEIVE_MSG` result kinds.
 pub const EVENT_CALL: u64 = 0;

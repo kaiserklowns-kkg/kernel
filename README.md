@@ -18,7 +18,7 @@ controlled set of modern hardware instead of maximum compatibility.
 | 1 — Boot | Boot in QEMU, `OCEANS KERNEL ONLINE` | **Done** — `cargo xtask smoke` passes |
 | 2 — Kernel core | Memory, processes, scheduler, syscalls, IPC | **Done** — ADRs 0008–0014; exit criterion (isolated processes exchanging IPC) passes in `cargo xtask smoke` |
 | 3 — Userspace | init, service manager, filesystem, shell, utilities | **Done** — ADRs 0015–0020; boots to an interactive shell with ps, mem, uptime, uname |
-| 4 — Hardware | PCI, storage, USB, network, display | **In progress** — ADR-0021: PCI, device capabilities, a userspace virtio-blk driver; ADR-0022: crash-consistent filesystem on disk; ADR-0023: virtio-net, IPv4/UDP/ICMP stack with DHCP, sockets; ADR-0024: TCP, DNS (`nc`, `host`); ADR-0025: boot archive |
+| 4 — Hardware | PCI, storage, USB, network, display | **In progress** — ADR-0021: PCI, device capabilities, a userspace virtio-blk driver; ADR-0022: crash-consistent filesystem on disk; ADR-0023: virtio-net, IPv4/UDP/ICMP stack with DHCP, sockets; ADR-0024: TCP, DNS (`nc`, `host`); ADR-0025: boot archive; ADR-0026: kernel entropy |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 

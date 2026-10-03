@@ -1,4 +1,4 @@
-//! System call dispatch, ABI version 8 (`oceans-abi`, ADR-0014 to ADR-0023).
+//! System call dispatch, ABI version 9 (`oceans-abi`, ADR-0014 to ADR-0026).
 //!
 //! Every argument is untrusted: handles are looked up with the required
 //! rights in the caller's own capability table, and buffers are copied
@@ -85,6 +85,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DEVICE_IRQ => device_irq(&process, a0, a1, a2, a3),
         nr::ENDPOINT_BIND => endpoint_bind(&process, a0, a1),
         nr::TIMER_SET => timer_set(&process, a0, a1, a2),
+        nr::RANDOM => random(&process, a0, a1),
         nr::CLOCK => Ok((crate::time::ticks() * 1000 / u64::from(crate::time::HZ), 0)),
         _ => Err(Error::UnknownSyscall),
     };
@@ -947,4 +948,14 @@ fn timer_set(process: &Process, raw: u64, bits: u64, ms: u64) -> SyscallResult {
     .map_err(object_error)?;
     crate::ipc::notification::set_timer(&notification, bits, ms);
     Ok((0, 0))
+}
+
+// ---- ABI 9 -----------------------------------------------------------------
+
+fn random(process: &Process, ptr: u64, len: u64) -> SyscallResult {
+    let len = len_arg(len, oceans_abi::RANDOM_MAX)?;
+    let mut bytes = [0u8; oceans_abi::RANDOM_MAX];
+    crate::random::fill(&mut bytes[..len]);
+    process.copy_to_user(ptr, &bytes[..len])?;
+    Ok((len as u64, 0))
 }

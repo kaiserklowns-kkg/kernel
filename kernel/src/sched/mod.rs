@@ -456,6 +456,7 @@ fn preempt_or_defer() {
 /// current thread when its slice is used up and someone else can run.
 fn on_timer_tick() {
     let now = time::advance();
+    crate::random::sample();
     // Before taking the scheduler lock: signalling wakes threads.
     crate::ipc::notification::fire_timers(now);
     let preempt = {

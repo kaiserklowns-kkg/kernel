@@ -78,6 +78,7 @@ dependencies = [
  "oceans-heap",
  "oceans-memory-map",
  "oceans-pci",
+ "oceans-random",
  "oceans-scheduler",
  "spin",
  "x86_64",
@@ -93,6 +94,10 @@ version = "0.1.0"
 
 [[package]]
 name = "oceans-pci"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-random"
 version = "0.1.0"
 
 [[package]]

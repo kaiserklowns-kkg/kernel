@@ -135,7 +135,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 8)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 9)"),
     Expect::Contains("net: configured 10.0.2.15/24"),
 ];
 /// Output the script must produce: `Line` must be a whole console line,
@@ -157,7 +157,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 8)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 9)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),

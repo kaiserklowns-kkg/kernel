@@ -33,5 +33,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0023](0023-network.md) | Networking: virtio-net, the IPv4 stack and sockets | Accepted |
 | [0024](0024-tcp-and-dns.md) | TCP and DNS | Accepted |
 | [0025](0025-boot-archive.md) | The boot archive (initrd) | Accepted |
+| [0026](0026-entropy.md) | Kernel entropy and the `RANDOM` system call | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

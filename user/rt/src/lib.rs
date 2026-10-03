@@ -1,4 +1,4 @@
-//! Minimal Oceans userspace runtime (ABI version 8).
+//! Minimal Oceans userspace runtime (ABI version 9).
 //!
 //! Provides the program entry point ([`entry!`]), safe wrappers for the
 //! system calls in `oceans-abi`, a panic handler and a small formatting
@@ -618,6 +618,23 @@ pub fn endpoint_bind(server: Handle, notification: Handle) -> Result<(), Error> 
 /// pending timer; `ms` 0 cancels.
 pub fn timer_set(notification: Handle, bits: u64, ms: u64) -> Result<(), Error> {
     call(nr::TIMER_SET, [notification.0, bits, ms, 0, 0, 0]).map(drop)
+}
+
+/// Fills `out` with cryptographically secure random bytes (ABI 9).
+pub fn random(out: &mut [u8]) -> Result<(), Error> {
+    for chunk in out.chunks_mut(oceans_abi::RANDOM_MAX) {
+        call(
+            nr::RANDOM,
+            [chunk.as_mut_ptr() as u64, chunk.len() as u64, 0, 0, 0, 0],
+        )?;
+    }
+    Ok(())
+}
+
+/// A random 64-bit value (0 if the kernel cannot provide one).
+pub fn random_u64() -> u64 {
+    let mut bytes = [0u8; 8];
+    random(&mut bytes).map_or(0, |()| u64::from_le_bytes(bytes))
 }
 
 /// Milliseconds since boot (monotonic, 10 ms resolution).

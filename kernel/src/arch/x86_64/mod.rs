@@ -134,6 +134,54 @@ pub fn cycles() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
+/// A 64-bit value from the CPU's random-number instructions: RDSEED (a
+/// true random seed) if present, else RDRAND; `None` without either or if
+/// the hardware keeps failing (it may underflow under load).
+pub fn hardware_random() -> Option<u64> {
+    use core::arch::x86_64::{__cpuid, __cpuid_count, _rdrand64_step, _rdseed64_step};
+
+    static SUPPORT: spin::Once<(bool, bool)> = spin::Once::new();
+    let &(rdseed, rdrand) = SUPPORT.call_once(|| {
+        let max_leaf = __cpuid(0).eax;
+        let rdrand = __cpuid(1).ecx & (1 << 30) != 0;
+        let rdseed = max_leaf >= 7 && __cpuid_count(7, 0).ebx & (1 << 18) != 0;
+        (rdseed, rdrand)
+    });
+
+    #[target_feature(enable = "rdseed")]
+    fn seed() -> Option<u64> {
+        let mut value = 0;
+        // RDSEED is present (checked by the caller); it writes `value` and
+        // reports success.
+        (_rdseed64_step(&mut value) == 1).then_some(value)
+    }
+    #[target_feature(enable = "rdrand")]
+    fn random() -> Option<u64> {
+        let mut value = 0;
+        // RDRAND is present (checked by the caller).
+        (_rdrand64_step(&mut value) == 1).then_some(value)
+    }
+
+    if rdseed {
+        for _ in 0..64 {
+            // SAFETY: the CPU supports RDSEED (CPUID leaf 7).
+            if let Some(value) = unsafe { seed() } {
+                return Some(value);
+            }
+            core::hint::spin_loop();
+        }
+    }
+    if rdrand {
+        for _ in 0..10 {
+            // SAFETY: the CPU supports RDRAND (CPUID leaf 1).
+            if let Some(value) = unsafe { random() } {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 /// Faulting address of the most recent page fault (CR2).
 pub fn fault_address() -> u64 {
     let address: u64;
