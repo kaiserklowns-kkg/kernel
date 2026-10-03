@@ -25,6 +25,8 @@ const VECTOR_PAGE_FAULT: u64 = 14;
 pub const VECTOR_TIMER: u8 = 48;
 /// Serial console (COM1) receive interrupt, routed by the I/O APIC.
 pub const VECTOR_SERIAL: u8 = 49;
+/// PS/2 keyboard (ISA IRQ 1), routed by the I/O APIC (ADR-0029).
+pub const VECTOR_KEYBOARD: u8 = 50;
 /// Local APIC spurious interrupt; must not be acknowledged.
 pub const VECTOR_SPURIOUS: u8 = 255;
 /// Vectors for device interrupts (MSI-X), allocated to drivers (ADR-0021).
@@ -44,6 +46,13 @@ static SERIAL_HANDLER: Once<fn()> = Once::new();
 
 pub fn set_serial_handler(handler: fn()) {
     SERIAL_HANDLER.call_once(|| handler);
+}
+
+/// Called on every keyboard interrupt, before EOI, with interrupts disabled.
+static KEYBOARD_HANDLER: Once<fn()> = Once::new();
+
+pub fn set_keyboard_handler(handler: fn()) {
+    KEYBOARD_HANDLER.call_once(|| handler);
 }
 
 /// Called after a device interrupt has been acknowledged, with interrupts
@@ -147,6 +156,10 @@ global_asm!(
     "push 0",
     "push 49",
     "jmp {common}",
+    "oceans_irq_stub_keyboard:",
+    "push 0",
+    "push 50",
+    "jmp {common}",
     ".popsection",
     ".pushsection .rodata.oceans_exceptions, \"a\", @progbits",
     ".balign 8",
@@ -156,6 +169,7 @@ global_asm!(
     ".quad oceans_irq_stub_timer",
     ".quad oceans_irq_stub_spurious",
     ".quad oceans_irq_stub_serial",
+    ".quad oceans_irq_stub_keyboard",
     ".popsection",
     common = sym exception_common,
 );
@@ -200,7 +214,7 @@ unsafe extern "C" {
 
 unsafe extern "C" {
     #[link_name = "oceans_irq_stubs"]
-    static IRQ_STUBS: [u64; 3];
+    static IRQ_STUBS: [u64; 4];
 }
 
 /// Saves registers, calls the dispatcher with a pointer to the frame,
@@ -273,6 +287,15 @@ extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
             // Drain the UART before acknowledging, so a level-triggered line
             // cannot re-fire for data already handled.
             if let Some(handler) = SERIAL_HANDLER.get() {
+                handler();
+            }
+            super::apic::end_of_interrupt();
+            if let Some(hook) = AFTER_DEVICE_INTERRUPT.get() {
+                hook();
+            }
+        }
+        v if v == u64::from(VECTOR_KEYBOARD) => {
+            if let Some(handler) = KEYBOARD_HANDLER.get() {
                 handler();
             }
             super::apic::end_of_interrupt();
@@ -412,9 +435,11 @@ pub fn init() {
             let ist = (vector == VECTOR_DOUBLE_FAULT).then_some(DOUBLE_FAULT_IST_INDEX);
             *gate = Gate::interrupt(handler, selector, ist);
         }
-        // SAFETY: the IRQ stub table above has exactly three entries.
-        let (timer, spurious, serial) = unsafe { (IRQ_STUBS[0], IRQ_STUBS[1], IRQ_STUBS[2]) };
+        // SAFETY: the IRQ stub table above has exactly four entries.
+        let (timer, spurious, serial, keyboard) =
+            unsafe { (IRQ_STUBS[0], IRQ_STUBS[1], IRQ_STUBS[2], IRQ_STUBS[3]) };
         gates[usize::from(VECTOR_SERIAL)] = Gate::interrupt(serial, selector, None);
+        gates[usize::from(VECTOR_KEYBOARD)] = Gate::interrupt(keyboard, selector, None);
         gates[usize::from(VECTOR_TIMER)] = Gate::interrupt(timer, selector, None);
         gates[usize::from(VECTOR_SPURIOUS)] = Gate::interrupt(spurious, selector, None);
         for (index, gate) in gates

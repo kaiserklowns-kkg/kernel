@@ -6,6 +6,7 @@ mod cpu;
 mod gdt;
 mod interrupts;
 mod ioapic;
+mod keyboard;
 mod paging;
 mod pic;
 mod serial;
@@ -215,6 +216,58 @@ fn on_serial_interrupt() {
     }
 }
 
+fn on_keyboard_interrupt() {
+    if let Some(sink) = CONSOLE_SINK.get() {
+        keyboard::drain(*sink);
+    }
+}
+
+/// The I/O APIC at `address`, set up on first use.
+fn io_apic(
+    address: u64,
+    gsi_base: u32,
+) -> Result<&'static spin::Mutex<ioapic::IoApic>, &'static str> {
+    if let Some(io) = IO_APIC.get() {
+        return Ok(io);
+    }
+    match ioapic::IoApic::new(address, gsi_base) {
+        Ok(io) => Ok(IO_APIC.call_once(|| spin::Mutex::new(io))),
+        Err(_) => Err("cannot map the I/O APIC"),
+    }
+}
+
+/// Routes the PS/2 keyboard's interrupt (global system interrupt `gsi`)
+/// and delivers its key presses to `sink` as console bytes (ADR-0029).
+pub fn enable_keyboard(
+    io_apic_address: u64,
+    gsi_base: u32,
+    gsi: u32,
+    active_low: bool,
+    level_triggered: bool,
+    sink: fn(u8),
+) -> Result<(), &'static str> {
+    CONSOLE_SINK.call_once(|| sink);
+    if !keyboard::init() {
+        return Err("no PS/2 controller");
+    }
+    interrupts::set_keyboard_handler(on_keyboard_interrupt);
+    let io = io_apic(io_apic_address, gsi_base)?;
+    let routed = without_interrupts(|| {
+        io.lock().route(
+            gsi,
+            interrupts::VECTOR_KEYBOARD,
+            active_low,
+            level_triggered,
+            apic::id(),
+        )
+    });
+    if routed {
+        Ok(())
+    } else {
+        Err("the I/O APIC does not serve the keyboard's interrupt")
+    }
+}
+
 /// Routes the serial console's interrupt (global system interrupt `gsi` on
 /// the I/O APIC at `io_apic`) to this CPU and delivers every received byte
 /// to `sink`, in interrupt context. Requires the kernel page tables.
@@ -228,10 +281,7 @@ pub fn enable_console_input(
 ) -> Result<(), &'static str> {
     CONSOLE_SINK.call_once(|| sink);
     interrupts::set_serial_handler(on_serial_interrupt);
-    let io = match ioapic::IoApic::new(io_apic, gsi_base) {
-        Ok(io) => IO_APIC.call_once(|| spin::Mutex::new(io)),
-        Err(_) => return Err("cannot map the I/O APIC"),
-    };
+    let io = self::io_apic(io_apic, gsi_base)?;
     let routed = without_interrupts(|| {
         io.lock().route(
             gsi,

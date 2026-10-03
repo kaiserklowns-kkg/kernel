@@ -47,7 +47,7 @@ pub fn write(level: Level, target: &str, args: fmt::Arguments<'_>) {
     }
     let _no_preempt = sched::NoPreempt::new();
     let _guard = CONSOLE.lock();
-    emit(level, target, args);
+    emit(level, target, args, false);
 }
 
 /// Writes raw bytes (user console output) as one unit, never inside a log
@@ -56,6 +56,7 @@ pub fn write_raw(bytes: &[u8]) {
     let _no_preempt = sched::NoPreempt::new();
     let _guard = CONSOLE.lock();
     arch::console_write_bytes(bytes);
+    crate::display::write(bytes);
 }
 
 /// Writes one log line without ever blocking.
@@ -66,11 +67,11 @@ pub fn write_raw(bytes: &[u8]) {
 pub fn emergency(level: Level, target: &str, args: fmt::Arguments<'_>) {
     arch::without_interrupts(|| {
         let _guard = CONSOLE.try_lock();
-        emit(level, target, args);
+        emit(level, target, args, true);
     });
 }
 
-fn emit(level: Level, target: &str, args: fmt::Arguments<'_>) {
+fn emit(level: Level, target: &str, args: fmt::Arguments<'_>, emergency: bool) {
     let target = match target.strip_prefix("oceans_kernel") {
         Some("") => "kernel",
         Some(rest) => rest.trim_start_matches("::"),
@@ -78,14 +79,32 @@ fn emit(level: Level, target: &str, args: fmt::Arguments<'_>) {
     };
     // Console writes are infallible; a formatting error inside `args` only
     // truncates this line.
-    let _ = writeln!(Console, "[{}] {}: {}", level.tag(), target, args);
+    let mut console = Console {
+        screen: level <= SCREEN_LEVEL,
+        emergency,
+    };
+    let _ = writeln!(console, "[{}] {}: {}", level.tag(), target, args);
 }
 
-struct Console;
+/// Most verbose level drawn on the screen: debug lines go to serial only.
+const SCREEN_LEVEL: Level = Level::Info;
+
+struct Console {
+    screen: bool,
+    /// Never wait for the display (a panic may have interrupted it).
+    emergency: bool,
+}
 
 impl Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         arch::console_write(s);
+        if self.screen {
+            if self.emergency {
+                crate::display::try_write(s.as_bytes());
+            } else {
+                crate::display::write(s.as_bytes());
+            }
+        }
         Ok(())
     }
 }

@@ -62,6 +62,20 @@ pub struct KernelImage {
     pub virtual_base: u64,
 }
 
+/// The boot framebuffer (ADR-0029).
+#[derive(Clone, Copy, Debug)]
+pub struct Framebuffer {
+    pub physical: u64,
+    pub width: u64,
+    pub height: u64,
+    /// Bytes per line.
+    pub pitch: u64,
+    pub bpp: u16,
+    pub red_shift: u8,
+    pub green_shift: u8,
+    pub blue_shift: u8,
+}
+
 /// Protocol-neutral facts the kernel needs from the bootloader.
 pub struct BootInfo {
     regions: [Region; MAX_MEMORY_REGIONS],
@@ -76,6 +90,7 @@ pub struct BootInfo {
     module_count: usize,
     /// Physical address of the ACPI RSDP.
     rsdp: Option<u64>,
+    framebuffer: Option<Framebuffer>,
 }
 
 impl BootInfo {
@@ -96,6 +111,7 @@ impl BootInfo {
             modules: [BootModule::EMPTY; MAX_MODULES],
             module_count: 0,
             rsdp: None,
+            framebuffer: None,
         }
     }
 
@@ -164,6 +180,10 @@ impl BootInfo {
     }
 
     /// Physical address of the ACPI Root System Description Pointer.
+    pub fn framebuffer(&self) -> Option<Framebuffer> {
+        self.framebuffer
+    }
+
     pub fn rsdp(&self) -> Option<u64> {
         self.rsdp
     }

@@ -36,5 +36,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0026](0026-entropy.md) | Kernel entropy and the `RANDOM` system call | Accepted |
 | [0027](0027-oceansfs-data-checksums.md) | OceansFS format 2: data block checksums | Accepted |
 | [0028](0028-http-client.md) | HTTP client | Accepted |
+| [0029](0029-framebuffer-console.md) | Framebuffer console and PS/2 keyboard | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

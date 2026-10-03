@@ -18,6 +18,8 @@ use crate::{arch, klog};
 const CAPACITY: usize = 4096;
 /// COM1's ISA interrupt line.
 const COM1_IRQ: u8 = 4;
+/// The PS/2 keyboard's ISA interrupt line.
+const KEYBOARD_IRQ: u8 = 1;
 
 struct Input {
     ring: [u8; CAPACITY],
@@ -60,6 +62,26 @@ pub fn init(acpi: Option<&Acpi>) {
     match result {
         Ok(()) => klog::info!("console input: COM1 (IRQ {COM1_IRQ}, GSI {gsi}) via I/O APIC"),
         Err(problem) => klog::warn!("console input disabled: {problem}"),
+    }
+
+    // The PS/2 keyboard feeds the same input (ADR-0029).
+    let Some((gsi, flags)) = acpi.isa_irq(KEYBOARD_IRQ) else {
+        return;
+    };
+    let Some(io_apic) = acpi.io_apic_for(gsi) else {
+        return;
+    };
+    let result = arch::enable_keyboard(
+        io_apic.address,
+        io_apic.gsi_base,
+        gsi,
+        oceans_acpi::active_low(flags),
+        oceans_acpi::level_triggered(flags),
+        on_input,
+    );
+    match result {
+        Ok(()) => klog::info!("console input: PS/2 keyboard (IRQ {KEYBOARD_IRQ}, GSI {gsi})"),
+        Err(problem) => klog::info!("no keyboard input: {problem}"),
     }
 }
 

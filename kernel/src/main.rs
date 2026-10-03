@@ -20,6 +20,7 @@ mod acpi;
 mod arch;
 mod boot;
 mod console;
+mod display;
 mod ipc;
 mod klog;
 mod memory;
@@ -76,6 +77,7 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     sched::init();
     process::init();
     random::init();
+    display::init(boot);
     let acpi = acpi::discover(boot);
     console::init(acpi.as_ref());
     pci::init(acpi.as_ref());

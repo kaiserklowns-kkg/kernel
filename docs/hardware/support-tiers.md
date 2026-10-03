@@ -22,7 +22,7 @@ value. Exact chipsets are added only after research and a test device.
 | Firmware | OVMF UEFI | UEFI 2.x with ACPI |
 | Interrupts | local APIC + I/O APIC (ACPI MADT); MSI-X for devices (ADR-0021) | x2APIC, MSI |
 | CPU | x86-64 (TCG/KVM) | x86-64-v2+ Intel/AMD; selected AArch64 |
-| Console | 16550 UART (COM1) | — (framebuffer console in Phase 4) |
+| Console | 16550 UART (COM1); UEFI GOP framebuffer text console + PS/2 keyboard (ADR-0029) | USB HID keyboards (xHCI) |
 | Buses | PCI Express via ACPI MCFG/ECAM (ADR-0021) | — |
 | Storage | virtio-blk (modern, `1af4:1042`), userspace driver (ADR-0021) | NVMe |
 | USB | — | xHCI |

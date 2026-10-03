@@ -59,7 +59,8 @@ the command that wrote them finishes; `sync` forces a commit. Devices:
 network gives the guest 10.0.2.15 by DHCP; try `run ifconfig out use:net` and
 `run ping out use:net -- 10.0.2.2`; TCP and DNS (ADR-0024):
 `run host out use:net -- example.com` and `run nc out use:net -- example.com 80`; HTTP (ADR-0028):
-`run fetch out use:net -- http://example.com/`. Quit QEMU with Ctrl+A, X.
+`run fetch out use:net -- http://example.com/`. The QEMU window shows the same console on the framebuffer and takes keyboard
+input (ADR-0029). Quit QEMU with Ctrl+A, X in the terminal, or close the window.
 `cargo xtask smoke` adds `oceans.test=smoke` to the command line: the kernel
 then also runs its self-tests and exits QEMU with the result. Normal boots run
 no tests. Pass `-cpu max` to QEMU to exercise SMEP/SMAP/UMIP and 1 GiB pages.

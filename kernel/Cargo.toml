@@ -25,6 +25,8 @@ oceans-random.workspace = true
 oceans-scheduler.workspace = true
 # Boot protocol bindings; confined to src/boot (ADR-0003).
 limine = "0.5"
+# Pre-rasterized Noto Sans Mono for the framebuffer console (ADR-0029).
+noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 spin = { version = "0.12", default-features = false, features = ["spin_mutex", "once"] }
 # CPU structure definitions and instructions; confined to src/arch (ADR-0004).
 x86_64 = { version = "0.15", default-features = false, features = ["instructions"] }

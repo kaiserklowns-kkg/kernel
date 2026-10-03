@@ -1,14 +1,15 @@
 //! Limine boot protocol adapter (ADR-0003).
 
 use limine::BaseRevision;
+use limine::framebuffer::MemoryModel;
 use limine::memory_map::EntryType;
 use limine::request::{
-    ExecutableAddressRequest, ExecutableCmdlineRequest, HhdmRequest, MemoryMapRequest,
-    ModuleRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
+    ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
+    MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
 };
 use oceans_memory_map::{Region, RegionKind};
 
-use super::{BOOT_INFO, BootInfo, KernelImage};
+use super::{BOOT_INFO, BootInfo, Framebuffer, KernelImage};
 use crate::{arch, klog};
 
 // Limine scans the `.limine_requests` section of the kernel image and fills in
@@ -47,6 +48,10 @@ static MODULES: ModuleRequest = ModuleRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static RSDP: RsdpRequest = RsdpRequest::new();
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
@@ -99,6 +104,24 @@ extern "C" fn kernel_entry() -> ! {
                 _ => address,
             }
         });
+
+        // The first RGB framebuffer; its address is in the direct map.
+        if let (Some(response), Some(offset)) = (FRAMEBUFFER.get_response(), info.direct_map_offset)
+            && let Some(fb) = response
+                .framebuffers()
+                .find(|fb| fb.memory_model() == MemoryModel::RGB)
+        {
+            info.framebuffer = Some(Framebuffer {
+                physical: (fb.addr() as u64).wrapping_sub(offset),
+                width: fb.width(),
+                height: fb.height(),
+                pitch: fb.pitch(),
+                bpp: fb.bpp(),
+                red_shift: fb.red_mask_shift(),
+                green_shift: fb.green_mask_shift(),
+                blue_shift: fb.blue_mask_shift(),
+            });
+        }
 
         if let (Some(modules), Some(offset)) = (MODULES.get_response(), info.direct_map_offset) {
             for module in modules.modules() {
