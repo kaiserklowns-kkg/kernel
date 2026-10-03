@@ -17,6 +17,11 @@
 //!   reports queued, and types their keys into the console (the same
 //!   bytes as the PS/2 keyboard).
 //! - Answers `LIST` on `usb` (for `lsusb`).
+//! - Hands interfaces to class drivers (`CLAIM`, ADR-0034): mass storage,
+//!   whose bulk transfers it moves, and pointers (ADR-0042), whose
+//!   interrupt reports it queues for the class driver (`REPORTS`). It
+//!   recognises a pointer by its boot mouse interface or by parsing the
+//!   interface's report descriptor; it never interprets the reports.
 //!
 //! Its interrupt (MSI-X) is a notification bound to its endpoint, so one
 //! thread serves clients and the controller. Other classes are enumerated
@@ -34,8 +39,9 @@ use oceans_usb::Speed;
 use oceans_usb::descriptor::{self, Bulk, Configuration, Device};
 use oceans_usb::hid::Keyboard;
 use oceans_usb::hub;
+use oceans_usb::pointer::{self, Layout};
 use oceans_usb::request::Setup;
-use oceans_usb::service::{self, Claim, Kind, Path, Record};
+use oceans_usb::service::{self, Claim, Kind, Path, Record, ReportWriter};
 use oceans_usb::storage;
 use oceans_usb::xhci::{
     self, Consumer, Event, HubSlot, InputContext, Params, Producer, Slot, TRB_SIZE, Trb, cap,
@@ -48,15 +54,27 @@ oceans_rt::entry!(main);
 const PAGE: usize = 4096;
 /// TRBs per ring: one page.
 const RING_TRBS: u16 = (PAGE / TRB_SIZE) as u16;
-/// Pages for the controller's own structures and every device's.
-const POOL_PAGES: usize = 140;
+/// Pages for the controller's own structures (4) and every device's
+/// ([`Pages`]: 10).
+const POOL_PAGES: usize = 4 + 10 * MAX_DEVICES;
 const MAX_PORTS: usize = 32;
 const MAX_DEVICES: usize = 16;
-/// Interrupt reports kept queued per keyboard, and per hub.
+/// Interrupt reports kept queued per keyboard or pointer, and per hub.
 const QUEUED_REPORTS: usize = 4;
 const HUB_REPORTS: usize = 2;
-/// Spacing of report buffers in a keyboard's buffer page.
-const REPORT_STRIDE: usize = 64;
+/// Bytes per hub status-change transfer (15 ports need 2).
+const HUB_REPORT_LEN: usize = 8;
+/// Spacing of report buffers in a report page; the longest report.
+const REPORT_STRIDE: usize = pointer::MAX_REPORT;
+/// Pointers polled at once, and the reports kept for each between its
+/// class driver's `REPORTS` calls (queues live in the controller, not in
+/// every device: the stack is 64 KiB).
+const MAX_POINTERS: usize = 4;
+const POINTER_QUEUE: usize = 8;
+/// The longest report descriptor read to identify a pointer.
+const MAX_REPORT_DESCRIPTOR: usize = 1024;
+/// HID interfaces looked at per device.
+const MAX_HID_INTERFACES: usize = 4;
 
 /// Notification bit: controller interrupt or polling tick.
 const IRQ: u64 = 1;
@@ -69,6 +87,10 @@ const SHORT_TAIL_MS: u64 = 50;
 /// Class drivers waiting for an interface.
 const MAX_WATCHERS: usize = 4;
 const TRANSFER_MS: u64 = 1000;
+
+/// A HID interface whose report descriptor describes no pointer: not an
+/// error worth logging.
+const NOT_A_POINTER: &str = "not a pointer";
 
 const EXIT_BAD_START: i64 = 2;
 const EXIT_DEVICE: i64 = 3;
@@ -236,6 +258,26 @@ struct Pages {
     interrupt: Page,
     bulk_in: Page,
     bulk_out: Page,
+    /// A pointer's interrupt ring and its report buffers (ADR-0042).
+    pointer: Page,
+    pointer_reports: Page,
+}
+
+impl Pages {
+    fn all(&self) -> [Page; 10] {
+        [
+            self.output,
+            self.input,
+            self.control,
+            self.buffer,
+            self.reports,
+            self.interrupt,
+            self.bulk_in,
+            self.bulk_out,
+            self.pointer,
+            self.pointer_reports,
+        ]
+    }
 }
 
 /// A configured bulk interface's transfer rings.
@@ -255,6 +297,83 @@ struct ClaimState {
     size: usize,
     notification: Handle,
     bits: u64,
+    /// The device's pointer interface was claimed, not its storage.
+    pointer: bool,
+}
+
+/// A HID interface recognised as a pointer (ADR-0042).
+#[derive(Clone, Copy)]
+struct PointerInterface {
+    hid: descriptor::HidInterface,
+    /// Positions (a tablet), not motion (a mouse).
+    absolute: bool,
+}
+
+/// Reports a pointer sent that its class driver has not fetched yet.
+struct ReportQueue {
+    reports: [(u64, u8, [u8; pointer::MAX_REPORT]); POINTER_QUEUE],
+    head: usize,
+    len: usize,
+    /// Dropped because the queue was full, since the last fetch.
+    lost: u8,
+}
+
+impl ReportQueue {
+    const fn new() -> Self {
+        Self {
+            reports: [(0, 0, [0; pointer::MAX_REPORT]); POINTER_QUEUE],
+            head: 0,
+            len: 0,
+            lost: 0,
+        }
+    }
+
+    /// Keeps a report; a full queue drops its oldest.
+    fn push(&mut self, time_ms: u64, report: &[u8]) {
+        if self.len == POINTER_QUEUE {
+            self.head = (self.head + 1) % POINTER_QUEUE;
+            self.len -= 1;
+            self.lost = self.lost.saturating_add(1);
+        }
+        let entry = &mut self.reports[(self.head + self.len) % POINTER_QUEUE];
+        let len = report.len().min(pointer::MAX_REPORT);
+        entry.0 = time_ms;
+        entry.1 = len as u8;
+        entry.2[..len].copy_from_slice(&report[..len]);
+        self.len += 1;
+    }
+
+    /// Moves reports into a `REPORTS` reply, oldest first, as many as fit.
+    fn drain(&mut self, reply: &mut [u8]) -> usize {
+        let mut writer = ReportWriter::new(reply, self.lost);
+        self.lost = 0;
+        while self.len > 0 {
+            let (time, len, bytes) = &self.reports[self.head];
+            if !writer.push(*time, &bytes[..usize::from(*len)]) {
+                break;
+            }
+            self.head = (self.head + 1) % POINTER_QUEUE;
+            self.len -= 1;
+        }
+        writer.len()
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+        self.lost = 0;
+    }
+}
+
+/// A pointer's interrupt endpoint, polled from the first `REPORTS` until
+/// the device goes.
+struct PointerRing {
+    interrupt: Interrupt,
+    /// Bytes per report transfer: the endpoint's packet size, at most
+    /// [`REPORT_STRIDE`].
+    packet: usize,
+    /// Its queue in [`Controller::pointer_queues`].
+    queue: usize,
 }
 
 /// A class driver waiting for an interface of `class`.
@@ -304,9 +423,14 @@ struct UsbDevice {
     max_packet0: u16,
     driver: Driver,
     configuration: u8,
+    /// `SET_CONFIGURATION` was sent.
+    configured: bool,
     /// A mass storage (BOT) interface, if the device has one.
     storage: Option<(descriptor::Interface, Bulk, Bulk)>,
     bulk: Option<BulkRings>,
+    /// A pointer interface (ADR-0042), if the device has one.
+    pointer: Option<PointerInterface>,
+    pointer_ring: Option<PointerRing>,
     claim: Option<ClaimState>,
 }
 
@@ -316,6 +440,18 @@ impl UsbDevice {
             port: self.root_port,
             route: self.route,
         }
+    }
+
+    /// The slot context's Context Entries when `adding` is configured too:
+    /// the highest DCI in use (xHCI §6.2.2).
+    fn context_entries(&self, adding: u8) -> u8 {
+        let driver = match &self.driver {
+            Driver::Keyboard { interrupt, .. } | Driver::Hub { interrupt, .. } => interrupt.dci,
+            Driver::None => 1,
+        };
+        let bulk = self.bulk.map_or(1, |b| b.in_dci.max(b.out_dci));
+        let pointer = self.pointer_ring.as_ref().map_or(1, |p| p.interrupt.dci);
+        adding.max(driver).max(bulk).max(pointer)
     }
 
     fn slot_context(&self, last_dci: u8) -> Slot {
@@ -369,6 +505,7 @@ struct Controller {
     /// DMA memory bulk transfers pass through.
     bounce: Option<Dma>,
     watchers: [Option<Watcher>; MAX_WATCHERS],
+    pointer_queues: [ReportQueue; MAX_POINTERS],
 }
 
 fn main(start: Start) -> i64 {
@@ -555,6 +692,7 @@ impl Controller {
             next_badge: 1,
             bounce: None,
             watchers: [const { None }; MAX_WATCHERS],
+            pointer_queues: [const { ReportQueue::new() }; MAX_POINTERS],
         })
     }
 
@@ -930,21 +1068,14 @@ impl Controller {
                     interrupt: self.pool.page()?,
                     bulk_in: self.pool.page()?,
                     bulk_out: self.pool.page()?,
+                    pointer: self.pool.page()?,
+                    pointer_reports: self.pool.page()?,
                 };
                 self.pages[free] = Some(pages);
                 pages
             }
         };
-        for page in [
-            pages.output,
-            pages.input,
-            pages.control,
-            pages.buffer,
-            pages.reports,
-            pages.interrupt,
-            pages.bulk_in,
-            pages.bulk_out,
-        ] {
+        for page in pages.all() {
             page.zero();
         }
         let slot = self.command(Trb::enable_slot())?;
@@ -970,8 +1101,11 @@ impl Controller {
             max_packet0: location.speed.default_max_packet0(),
             driver: Driver::None,
             configuration: 0,
+            configured: false,
             storage: None,
             bulk: None,
+            pointer: None,
+            pointer_ring: None,
             claim: None,
         });
         let result = self.enumerate(free, pages);
@@ -1075,10 +1209,18 @@ impl Controller {
 
         let keyboard = descriptor::find_boot_interface(full, descriptor::HID_PROTOCOL_KEYBOARD);
         let hub_endpoint = find_hub_endpoint(full);
+        if let Some(d) = self.devices[index].as_mut() {
+            d.configuration = configuration.value;
+        }
+        let pointer = self.find_pointer(index, full);
         let kind = if keyboard.is_some() {
             Kind::Keyboard
-        } else if descriptor::find_boot_interface(full, descriptor::HID_PROTOCOL_MOUSE).is_some() {
-            Kind::Mouse
+        } else if let Some(pointer) = pointer {
+            if pointer.absolute {
+                Kind::Tablet
+            } else {
+                Kind::Mouse
+            }
         } else if device.class == descriptor::CLASS_HUB && hub_endpoint.is_some() {
             Kind::Hub
         } else if descriptor::Items::new(full).any(|item| {
@@ -1094,7 +1236,7 @@ impl Controller {
             d.name = name;
             d.name_len = name_len;
             d.kind = kind;
-            d.configuration = configuration.value;
+            d.pointer = pointer;
             d.storage = descriptor::find_bulk_interface(
                 full,
                 storage::CLASS,
@@ -1124,11 +1266,18 @@ impl Controller {
         if let Some((interface, endpoint)) = keyboard
             && self.console.is_some()
         {
-            self.control(index, Setup::set_configuration(configuration.value), None)?;
+            self.configure_device(index)?;
             self.control(index, Setup::hid_set_boot_protocol(interface.number), None)?;
             // Optional for keyboards: some stall it.
             let _ = self.control(index, Setup::hid_set_idle(interface.number), None);
-            let interrupt = self.configure_interrupt(index, endpoint, pages, QUEUED_REPORTS)?;
+            let interrupt = self.configure_interrupt(
+                index,
+                endpoint,
+                pages.interrupt,
+                pages.reports,
+                oceans_usb::hid::REPORT_SIZE,
+                QUEUED_REPORTS,
+            )?;
             if let Some(d) = self.devices[index].as_mut() {
                 d.driver = Driver::Keyboard {
                     interrupt,
@@ -1138,26 +1287,47 @@ impl Controller {
         } else if kind == Kind::Hub
             && let Some(endpoint) = hub_endpoint
         {
-            self.configure_hub(index, configuration.value, endpoint, pages)?;
+            self.configure_hub(index, endpoint, pages)?;
         }
         Ok(())
     }
 
-    /// Configures an interrupt IN endpoint and queues `queued` reports on
-    /// it.
+    /// Selects the device's configuration, once.
+    fn configure_device(&mut self, index: usize) -> Result<(), &'static str> {
+        let d = self.devices[index].as_ref().ok_or("gone")?;
+        if d.configured {
+            return Ok(());
+        }
+        let value = d.configuration;
+        self.control(index, Setup::set_configuration(value), None)?;
+        if let Some(d) = self.devices[index].as_mut() {
+            d.configured = true;
+        }
+        Ok(())
+    }
+
+    /// Configures an interrupt IN endpoint on `ring_page` and queues
+    /// `queued` transfers of `report_len` bytes into `reports`.
     fn configure_interrupt(
         &mut self,
         index: usize,
         endpoint: descriptor::Endpoint,
-        mut pages: Pages,
+        ring_page: Page,
+        reports: Page,
+        report_len: usize,
         queued: usize,
     ) -> Result<Interrupt, &'static str> {
+        let mut pages = self.pages[index].ok_or("no pages")?;
         let (slot, speed, context) = {
             let d = self.devices[index].as_ref().ok_or("gone")?;
-            (d.slot, d.speed, d.slot_context(endpoint.dci()))
+            (
+                d.slot,
+                d.speed,
+                d.slot_context(d.context_entries(endpoint.dci())),
+            )
         };
         let dci = endpoint.dci();
-        let mut ring = Ring::new(pages.interrupt);
+        let mut ring = Ring::new(ring_page);
         {
             let mut input = InputContext::new(pages.input.bytes(), self.params.context_size);
             input.add(1 | 1 << dci);
@@ -1173,7 +1343,7 @@ impl Controller {
         }
         self.command(Trb::configure_endpoint(pages.input.phys, slot))?;
         for _ in 0..queued {
-            queue_report(&mut ring, pages.reports);
+            queue_report(&mut ring, reports, report_len);
         }
         self.doorbells
             .write32(4 * usize::from(slot), u32::from(dci));
@@ -1185,7 +1355,6 @@ impl Controller {
     fn configure_hub(
         &mut self,
         index: usize,
-        configuration: u8,
         endpoint: descriptor::Endpoint,
         pages: Pages,
     ) -> Result<(), &'static str> {
@@ -1199,7 +1368,7 @@ impl Controller {
         let descriptor = hub::Descriptor::parse(&bytes[..len], usb3).ok_or("bad hub descriptor")?;
         // Route strings name ports 1–15; the 32-bit change mask holds 31.
         let ports = descriptor.ports.min(15);
-        self.control(index, Setup::set_configuration(configuration), None)?;
+        self.configure_device(index)?;
         if usb3 {
             self.control(index, hub::set_hub_depth(depth), None)?;
         }
@@ -1209,7 +1378,14 @@ impl Controller {
                 think_time: descriptor.think_time,
             });
         }
-        let interrupt = self.configure_interrupt(index, endpoint, pages, HUB_REPORTS)?;
+        let interrupt = self.configure_interrupt(
+            index,
+            endpoint,
+            pages.interrupt,
+            pages.reports,
+            HUB_REPORT_LEN,
+            HUB_REPORTS,
+        )?;
         if let Some(d) = self.devices[index].as_mut() {
             d.driver = Driver::Hub {
                 interrupt,
@@ -1232,7 +1408,8 @@ impl Controller {
     }
 
     /// A completed interrupt transfer: keyboard keys go to the console, a
-    /// hub's changed ports are noted; the TRB is queued again.
+    /// hub's changed ports are noted, a pointer's report is queued for its
+    /// class driver; the TRB is queued again.
     fn interrupt_report(&mut self, slot: u8, endpoint: u8, trb: u64, code: u8, residue: u32) {
         let Some(index) = self
             .devices
@@ -1241,33 +1418,56 @@ impl Controller {
         else {
             return;
         };
-        let Some(mut pages) = self.pages[index] else {
+        let Some(pages) = self.pages[index] else {
             return;
         };
         let console = self.console;
         let Some(device) = self.devices[index].as_mut() else {
             return;
         };
-        let (interrupt, report_len) = match &mut device.driver {
-            Driver::Keyboard { interrupt, .. } | Driver::Hub { interrupt, .. }
-                if interrupt.dci == endpoint =>
-            {
-                (interrupt, 8usize)
-            }
-            _ => return,
-        };
+        let (interrupt, mut reports, report_len) =
+            match (&mut device.driver, &mut device.pointer_ring) {
+                (_, Some(ring)) if ring.interrupt.dci == endpoint => {
+                    (&mut ring.interrupt, pages.pointer_reports, ring.packet)
+                }
+                (Driver::Keyboard { interrupt, .. }, _) if interrupt.dci == endpoint => {
+                    (interrupt, pages.reports, oceans_usb::hid::REPORT_SIZE)
+                }
+                (Driver::Hub { interrupt, .. }, _) if interrupt.dci == endpoint => {
+                    (interrupt, pages.reports, HUB_REPORT_LEN)
+                }
+                _ => return,
+            };
         let Some(at) = interrupt.ring.index_of(trb) else {
             return;
         };
         let offset = at * REPORT_STRIDE % PAGE;
         let ok = code == completion::SUCCESS || code == completion::SHORT_PACKET;
         let len = report_len.saturating_sub(residue as usize);
-        let mut report = [0u8; 8];
-        report[..len].copy_from_slice(&pages.reports.bytes()[offset..offset + len]);
-        queue_report(&mut interrupt.ring, pages.reports);
+        let mut report = [0u8; REPORT_STRIDE];
+        report[..len].copy_from_slice(&reports.bytes()[offset..offset + len]);
+        queue_report(&mut interrupt.ring, reports, report_len);
         let dci = interrupt.dci;
         self.doorbells
             .write32(4 * usize::from(slot), u32::from(dci));
+        if let Some(ring) = device.pointer_ring.as_ref()
+            && ring.interrupt.dci == endpoint
+        {
+            if !ok {
+                let path = device.path();
+                say(
+                    self.log,
+                    format_args!("port {path}: pointer report failed, code {code}"),
+                );
+                return;
+            }
+            let queue = ring.queue;
+            self.pointer_queues[queue].push(oceans_rt::clock_ms(), &report[..len]);
+            if let Some(claim) = device.claim.as_ref().filter(|c| c.pointer) {
+                let _ = oceans_rt::notification_signal(claim.notification, claim.bits);
+            }
+            return;
+        }
         if !ok {
             return;
         }
@@ -1294,17 +1494,86 @@ impl Controller {
         }
     }
 
+    /// The first HID interface of a configuration that is a pointer: a
+    /// boot mouse, or an interface whose report descriptor describes a
+    /// mouse or pointer (ADR-0042). Boot keyboards stay with this driver.
+    fn find_pointer(&mut self, index: usize, configuration: &[u8]) -> Option<PointerInterface> {
+        let mut hids = [descriptor::HidInterface::default(); MAX_HID_INTERFACES];
+        let count = descriptor::find_hid_interfaces(configuration, &mut hids);
+        for hid in hids.into_iter().take(count) {
+            if hid.is_boot(descriptor::HID_PROTOCOL_KEYBOARD) {
+                continue;
+            }
+            if hid.is_boot(descriptor::HID_PROTOCOL_MOUSE) {
+                return Some(PointerInterface {
+                    hid,
+                    absolute: false,
+                });
+            }
+            if hid.report_length == 0 {
+                continue;
+            }
+            match self.report_layout(index, hid) {
+                Ok(layout) => {
+                    return Some(PointerInterface {
+                        hid,
+                        absolute: layout.absolute,
+                    });
+                }
+                Err(problem) => {
+                    let path = self.devices[index].as_ref().map(UsbDevice::path);
+                    if let Some(path) = path
+                        && problem != NOT_A_POINTER
+                    {
+                        say(
+                            self.log,
+                            format_args!(
+                                "port {path}: interface {}: {problem}",
+                                hid.interface.number
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Reads and parses a HID interface's report descriptor; the device
+    /// is configured first (devices need not answer before).
+    fn report_layout(
+        &mut self,
+        index: usize,
+        hid: descriptor::HidInterface,
+    ) -> Result<Layout, &'static str> {
+        self.configure_device(index)?;
+        let length = usize::from(hid.report_length).min(MAX_REPORT_DESCRIPTOR);
+        let mut bytes = [0u8; MAX_REPORT_DESCRIPTOR];
+        let len = self.control(
+            index,
+            Setup::hid_get_report_descriptor(hid.interface.number, length as u16),
+            Some(&mut bytes[..length]),
+        )?;
+        Layout::parse(&bytes[..len]).map_err(|error| match error {
+            pointer::Error::Malformed => "malformed report descriptor",
+            pointer::Error::NotAPointer => NOT_A_POINTER,
+        })
+    }
+
     // ---- Class drivers (ADR-0034) ----------------------------------------
 
     /// Tells a waiting class driver about a newly enumerated interface it
     /// wants.
     fn announce(&mut self, index: usize) {
-        let Some(storage) = self.devices[index].as_ref().and_then(|d| d.storage) else {
+        let Some(device) = self.devices[index].as_ref() else {
             return;
         };
-        let (interface, _, _) = storage;
+        let storage = device
+            .storage
+            .map(|(i, _, _)| (i.class, i.subclass, i.protocol));
+        let pointer = device.pointer.map(|_| service::POINTER);
         for watcher in self.watchers.iter().flatten() {
-            if watcher.class == (interface.class, interface.subclass, interface.protocol) {
+            if Some(watcher.class) == storage || Some(watcher.class) == pointer {
                 let _ = oceans_rt::notification_signal(watcher.notification, watcher.bits);
             }
         }
@@ -1324,26 +1593,37 @@ impl Controller {
         }
         let class = (data[0], data[1], data[2]);
         let bits = u64::from_le_bytes(data[4..12].try_into().expect("8 bytes"));
-        if class
-            != (
+        let pointer = class == service::POINTER;
+        let storage = class
+            == (
                 storage::CLASS,
                 storage::SUBCLASS_SCSI,
                 storage::PROTOCOL_BOT,
-            )
-            || bits == 0
-        {
+            );
+        if !(pointer || storage) || bits == 0 {
             return refuse;
         }
         let Ok(size) = oceans_rt::memory_size(received[0]).map(|s| s as usize) else {
             return refuse;
         };
-        if !(service::MIN_BUFFER..=service::MAX_BUFFER).contains(&size) {
+        let smallest = if pointer {
+            service::MIN_POINTER_BUFFER
+        } else {
+            service::MIN_BUFFER
+        };
+        if !(smallest..=service::MAX_BUFFER).contains(&size) {
             return refuse;
         }
         let notification = received[1];
         let found = self.devices.iter().position(|d| {
-            d.as_ref()
-                .is_some_and(|d| d.storage.is_some() && d.claim.is_none())
+            d.as_ref().is_some_and(|d| {
+                d.claim.is_none()
+                    && if pointer {
+                        d.pointer.is_some()
+                    } else {
+                        d.storage.is_some()
+                    }
+            })
         });
         let Some(index) = found else {
             // Keep the notification: one watcher per class driver.
@@ -1365,11 +1645,17 @@ impl Controller {
             kept[1] = true;
             return (service::NOT_FOUND, [0u8; Claim::SIZE], None);
         };
-        if self.devices[index]
+        let prepared = if pointer {
+            self.configure_device(index)
+        } else if self.devices[index]
             .as_ref()
             .is_some_and(|d| d.bulk.is_none())
-            && let Err(problem) = self.configure_bulk(index)
         {
+            self.configure_bulk(index)
+        } else {
+            Ok(())
+        };
+        if let Err(problem) = prepared {
             let path = self.devices[index].as_ref().map(UsbDevice::path);
             if let Some(path) = path {
                 say(self.log, format_args!("port {path}: {problem}"));
@@ -1384,26 +1670,56 @@ impl Controller {
             let _ = oceans_rt::memory_unmap(base);
             return refuse;
         };
+        // A new claimant starts from an empty report queue.
+        let queue = self.devices[index]
+            .as_ref()
+            .and_then(|d| d.pointer_ring.as_ref())
+            .map(|ring| ring.queue);
+        if pointer && let Some(queue) = queue {
+            self.pointer_queues[queue].clear();
+        }
+        let Some(device) = self.devices[index].as_mut() else {
+            let _ = oceans_rt::memory_unmap(base);
+            let _ = oceans_rt::close(session);
+            return refuse;
+        };
+        let mut claim = Claim {
+            port: device.root_port,
+            route: device.route,
+            vendor: device.descriptor.vendor,
+            product: device.descriptor.product,
+            ..Claim::default()
+        };
+        let interface = match (pointer, device.pointer, device.storage) {
+            (true, Some(found), _) => {
+                claim.interrupt_in = found.hid.endpoint.address;
+                claim.report_length = found.hid.report_length;
+                found.hid.interface
+            }
+            (false, _, Some((interface, bulk_in, bulk_out))) => {
+                claim.bulk_in = bulk_in.endpoint.address;
+                claim.bulk_out = bulk_out.endpoint.address;
+                interface
+            }
+            _ => {
+                let _ = oceans_rt::memory_unmap(base);
+                let _ = oceans_rt::close(session);
+                return refuse;
+            }
+        };
+        claim.interface = interface.number;
+        claim.subclass = interface.subclass;
+        claim.protocol = interface.protocol;
         self.next_badge += 1;
         kept[1] = true;
-        let device = self.devices[index].as_mut().expect("found above");
-        let (interface, bulk_in, bulk_out) = device.storage.expect("found above");
         device.claim = Some(ClaimState {
             badge,
             buffer: base,
             size,
             notification,
             bits,
+            pointer,
         });
-        let claim = Claim {
-            interface: interface.number,
-            bulk_in: bulk_in.endpoint.address,
-            bulk_out: bulk_out.endpoint.address,
-            port: device.root_port,
-            route: device.route,
-            vendor: device.descriptor.vendor,
-            product: device.descriptor.product,
-        };
         say(
             self.log,
             format_args!(
@@ -1419,19 +1735,18 @@ impl Controller {
     /// endpoints.
     fn configure_bulk(&mut self, index: usize) -> Result<(), &'static str> {
         let mut pages = self.pages[index].ok_or("no pages")?;
-        let (slot, configuration, storage, context) = {
+        self.configure_device(index)?;
+        let (slot, storage, context) = {
             let d = self.devices[index].as_ref().ok_or("gone")?;
             let (_, bulk_in, bulk_out) = d.storage.ok_or("no bulk interface")?;
             let last = bulk_in.endpoint.dci().max(bulk_out.endpoint.dci());
             (
                 d.slot,
-                d.configuration,
                 d.storage.ok_or("no bulk interface")?,
-                d.slot_context(last),
+                d.slot_context(d.context_entries(last)),
             )
         };
         let (_, bulk_in, bulk_out) = storage;
-        self.control(index, Setup::set_configuration(configuration), None)?;
         let rings = BulkRings {
             in_dci: bulk_in.endpoint.dci(),
             out_dci: bulk_out.endpoint.dci(),
@@ -1491,6 +1806,9 @@ impl Controller {
         let bounce = self.bounce().map_err(|_| service::IO_ERROR)?;
         let device = self.devices[index].as_mut().ok_or(service::GONE)?;
         let claim = device.claim.as_ref().ok_or(service::GONE)?;
+        if claim.pointer {
+            return Err(service::BAD_REQUEST);
+        }
         let rings = device.bulk.as_mut().ok_or(service::BAD_REQUEST)?;
         let input = address & 0x80 != 0;
         let (dci, ring) = match device.storage {
@@ -1622,6 +1940,9 @@ impl Controller {
     /// controller's.
     fn clear_halt(&mut self, index: usize, address: u8) -> Result<(), u64> {
         let device = self.devices[index].as_ref().ok_or(service::GONE)?;
+        if device.claim.as_ref().is_none_or(|c| c.pointer) {
+            return Err(service::BAD_REQUEST);
+        }
         let (_, bulk_in, bulk_out) = device.storage.ok_or(service::BAD_REQUEST)?;
         let rings = device.bulk.ok_or(service::BAD_REQUEST)?;
         let dci = if address == bulk_in.endpoint.address {
@@ -1645,7 +1966,8 @@ impl Controller {
         Ok(())
     }
 
-    /// `CONTROL`: a class request to the claimed interface only.
+    /// `CONTROL`: a class request to the claimed interface only, or a
+    /// pointer's report descriptor.
     fn session_control(&mut self, index: usize, data: &[u8]) -> Result<usize, u64> {
         if data.len() != 12 {
             return Err(service::BAD_REQUEST);
@@ -1659,12 +1981,19 @@ impl Controller {
         };
         let offset = u32::from_le_bytes(data[8..12].try_into().expect("4 bytes")) as usize;
         let device = self.devices[index].as_ref().ok_or(service::GONE)?;
-        let (interface, _, _) = device.storage.ok_or(service::BAD_REQUEST)?;
         let claim = device.claim.as_ref().ok_or(service::GONE)?;
+        let interface = if claim.pointer {
+            device.pointer.map(|p| p.hid.interface)
+        } else {
+            device.storage.map(|(interface, _, _)| interface)
+        }
+        .ok_or(service::BAD_REQUEST)?;
         // Class requests (type 1) to an interface (recipient 1): ours.
         let class_to_interface = setup.request_type & 0x7f == 0x21;
+        let report_descriptor =
+            claim.pointer && setup.is_report_descriptor_request(interface.number);
         let length = usize::from(setup.length);
-        if !class_to_interface
+        if !(class_to_interface || report_descriptor)
             || setup.index & 0xff != u16::from(interface.number)
             || (length > 0 && !setup.is_in())
             || length > PAGE
@@ -1687,6 +2016,64 @@ impl Controller {
         // SAFETY: in the claimant's buffer (checked).
         unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), claim.buffer.add(offset), len) };
         Ok(len)
+    }
+
+    /// `REPORTS`: the pointer's queued reports. The first call starts
+    /// polling its interrupt endpoint.
+    fn reports(&mut self, index: usize, reply: &mut [u8]) -> Result<usize, u64> {
+        let device = self.devices[index].as_ref().ok_or(service::GONE)?;
+        if !device.claim.as_ref().is_some_and(|c| c.pointer) {
+            return Err(service::BAD_REQUEST);
+        }
+        let found = device.pointer.ok_or(service::BAD_REQUEST)?;
+        let queue = match device.pointer_ring.as_ref() {
+            Some(ring) => ring.queue,
+            None => self.start_pointer(index, found).map_err(|problem| {
+                let path = self.devices[index].as_ref().map(UsbDevice::path);
+                if let Some(path) = path {
+                    say(self.log, format_args!("port {path}: {problem}"));
+                }
+                service::IO_ERROR
+            })?,
+        };
+        let len = reply.len().min(service::MAX_REPORTS_REPLY);
+        Ok(self.pointer_queues[queue].drain(&mut reply[..len]))
+    }
+
+    /// Configures a pointer's interrupt endpoint, gives it a report queue,
+    /// and keeps reports coming.
+    fn start_pointer(
+        &mut self,
+        index: usize,
+        found: PointerInterface,
+    ) -> Result<usize, &'static str> {
+        let pages = self.pages[index].ok_or("no pages")?;
+        let queue = (0..MAX_POINTERS)
+            .find(|&queue| {
+                !self.devices.iter().flatten().any(|d| {
+                    d.pointer_ring
+                        .as_ref()
+                        .is_some_and(|ring| ring.queue == queue)
+                })
+            })
+            .ok_or("too many pointers")?;
+        let packet = usize::from(found.hid.endpoint.packet_size()).min(REPORT_STRIDE);
+        let interrupt = self.configure_interrupt(
+            index,
+            found.hid.endpoint,
+            pages.pointer,
+            pages.pointer_reports,
+            packet,
+            QUEUED_REPORTS,
+        )?;
+        self.pointer_queues[queue].clear();
+        let device = self.devices[index].as_mut().ok_or("gone")?;
+        device.pointer_ring = Some(PointerRing {
+            interrupt,
+            packet,
+            queue,
+        });
+        Ok(queue)
     }
 
     /// Ends a claim: the class driver closed its session or the device
@@ -1782,6 +2169,12 @@ impl Controller {
         let Some(index) = self.session(badge) else {
             return (service::GONE, 0);
         };
+        if label == service::REPORTS {
+            return match self.reports(index, reply) {
+                Ok(len) => (service::OK, len),
+                Err(label) => (label, 0),
+            };
+        }
         let result = match label {
             service::BULK if data.len() == 12 => {
                 let offset = u32::from_le_bytes(data[4..8].try_into().expect("4 bytes")) as usize;
@@ -1822,6 +2215,7 @@ impl Controller {
                                 route: device.route,
                                 speed: device.speed.id(),
                                 kind: device.kind,
+                                claimed: device.claim.is_some(),
                                 vendor: device.descriptor.vendor,
                                 product: device.descriptor.product,
                                 name: device.name,
@@ -1866,13 +2260,13 @@ fn find_hub_endpoint(configuration: &[u8]) -> Option<descriptor::Endpoint> {
     None
 }
 
-/// Queues one 8-byte report transfer; its buffer is chosen by the TRB's
+/// Queues one report transfer of `len` bytes; its buffer is chosen by the TRB's
 /// index, so a completion's TRB address tells where its report is.
-fn queue_report(ring: &mut Ring, reports: Page) {
+fn queue_report(ring: &mut Ring, reports: Page, len: usize) {
     let at = usize::from(ring.producer.index());
     ring.push(Trb::normal(
         reports.phys + (at * REPORT_STRIDE % PAGE) as u64,
-        8,
+        len.min(REPORT_STRIDE) as u32,
     ));
 }
 

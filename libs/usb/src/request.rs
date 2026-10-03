@@ -54,6 +54,27 @@ impl Setup {
         }
     }
 
+    /// A HID interface's report descriptor (HID 1.11 §7.1.1): a standard
+    /// `GET_DESCRIPTOR` addressed to the interface.
+    pub const fn hid_get_report_descriptor(interface: u8, length: u16) -> Self {
+        Self {
+            request_type: DEVICE_TO_HOST | STANDARD | TO_INTERFACE,
+            request: GET_DESCRIPTOR,
+            value: (crate::descriptor::HID_REPORT as u16) << 8,
+            index: interface as u16,
+            length,
+        }
+    }
+
+    /// Whether this is [`Setup::hid_get_report_descriptor`] for
+    /// `interface` (any length).
+    pub fn is_report_descriptor_request(&self, interface: u8) -> bool {
+        self.request_type == DEVICE_TO_HOST | STANDARD | TO_INTERFACE
+            && self.request == GET_DESCRIPTOR
+            && self.value == (crate::descriptor::HID_REPORT as u16) << 8
+            && self.index == u16::from(interface)
+    }
+
     /// HID `SET_IDLE` with duration 0: report only on changes.
     pub const fn hid_set_idle(interface: u8) -> Self {
         Self {
@@ -106,6 +127,15 @@ mod tests {
         assert_eq!(
             Setup::hid_set_idle(0).to_bytes(),
             [0x21, 0x0a, 0, 0, 0, 0, 0, 0]
+        );
+        let report = Setup::hid_get_report_descriptor(1, 74);
+        assert_eq!(report.to_bytes(), [0x81, 6, 0, 0x22, 1, 0, 74, 0]);
+        assert!(report.is_in());
+        assert!(report.is_report_descriptor_request(1));
+        assert!(!report.is_report_descriptor_request(0));
+        assert!(
+            !Setup::get_descriptor(descriptor::HID_REPORT, 0, 1, 74)
+                .is_report_descriptor_request(1)
         );
         assert!(Setup::get_descriptor(1, 0, 0, 8).is_in());
         assert!(!Setup::set_configuration(1).is_in());

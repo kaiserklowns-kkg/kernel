@@ -34,6 +34,7 @@ const USER_PROGRAMS: &[&str] = &[
     "virtio-net",
     "xhci",
     "usb-storage",
+    "usb-hid",
     "net",
     "net-echo",
     "ifconfig",
@@ -43,6 +44,7 @@ const USER_PROGRAMS: &[&str] = &[
     "fetch",
     "date",
     "lsusb",
+    "mouse",
     "ipc-test",
 ];
 /// The virtio disk QEMU attaches (ADR-0021), holding the filesystem
@@ -78,12 +80,14 @@ const ONLINE_BANNER: &str = "OCEANS KERNEL ONLINE";
 /// every `SHELL_EXPECT` line in the console output.
 const SHELL_READY: &str = "shell: ready";
 /// The last boot-time log lines: the USB device behind the hub, the
-/// stick's class driver, and the end of the crasher's restarts. They would
-/// otherwise land in the middle of the first commands' output, and while
-/// the log is busy QEMU (on Windows) drops typed bytes, so typing waits.
-const USB_SETTLED: [&str; 3] = [
+/// stick's and the tablet's class drivers, and the end of the crasher's
+/// restarts. They would otherwise land in the middle of the first
+/// commands' output, and while the log is busy QEMU (on Windows) drops
+/// typed bytes, so typing waits.
+const USB_SETTLED: [&str; 4] = [
     "xhci: port 6.1: ",
     "usb-storage: port 3: ",
+    "usb-hid: port 6.1: ",
     "crasher exited with -142; giving up",
 ];
 /// Delay between typed bytes.
@@ -228,12 +232,27 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"cp /keep/big.bin /usb/outer\r\n",
     b"cat /usb/tree-moved/inner/a.txt\r\n",
     b"sync\r\n",
-    // Hubs (ADR-0033): a mouse plugged into the hub appears, is listed,
-    // and is removed again; then the hub goes, taking its tablet along.
+    // Hubs (ADR-0033) and pointers (ADR-0042): a mouse plugged into the
+    // hub appears, is listed and claimed; motion, buttons and the wheel
+    // injected through QEMU's monitor reach `mouse` as events. QEMU sends
+    // monitor input to the pointer the guest began polling last: the new
+    // mouse, and once it is gone the tablet (absolute, buttons only from
+    // the monitor). Then the hub goes, taking its tablet along.
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.2,id=hotplug",
     b"run lsusb out use:usb\r\n",
+    b"mouse\r\n",
+    b"run mouse out use:input -- 4 20\r\n",
+    b"@when mouse: waiting for 4 events",
+    b"@monitor mouse_move 10 -5",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move 0 0 1",
     b"@monitor device_del hotplug",
     b"run lsusb out use:usb\r\n",
+    b"run mouse out use:input -- 3 20\r\n",
+    b"@when mouse: waiting for 3 events",
+    b"@monitor mouse_button 2",
+    b"@monitor mouse_button 0",
     b"@monitor device_del hub",
     b"run lsusb out use:usb\r\n",
     b"exit\r\n",
@@ -365,8 +384,21 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("usb-storage: port 3: disk removed"),
     Expect::Contains("xhci: port 3: device removed"),
     Expect::Contains("disk: I/O error"),
-    Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) no driver"),
-    Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (no driver)"),
+    Expect::Contains("xhci: port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s), tablet"),
+    Expect::Contains("usb-hid: port 6.1: tablet, "),
+    Expect::Contains(", 0..32767 x 0..32767, pointer 1"),
+    Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) tablet (pointer input)"),
+    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 2"),
+    Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (pointer input)"),
+    Expect::Contains("mouse: requests `use:input`"),
+    Expect::Contains("pointer 2: motion dx=10 dy=-5"),
+    Expect::Contains("pointer 2: button 1 (left) down"),
+    Expect::Contains("pointer 2: button 1 (left) up"),
+    Expect::Contains("pointer 2: wheel vertical=1 horizontal=0"),
+    Expect::Contains("usb-hid: port 6.2: pointer 2 removed"),
+    Expect::Contains("pointer 1: absolute x=0 y=0 (of 32767 x 32767)"),
+    Expect::Contains("pointer 1: button 2 (right) down"),
+    Expect::Contains("pointer 1: button 2 (right) up"),
     Expect::Contains("xhci: port 6.2: device removed"),
     Expect::Contains("xhci: port 6.1: device removed"),
     Expect::Contains("xhci: port 6: device removed"),
@@ -1105,7 +1137,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let (mut shell_ready, mut prompt_waiting) = (false, false);
     let mut usb_settled = [false; USB_SETTLED.len()];
     let mut ready = false;
-    let mut commands = script.iter();
+    let mut commands = script.iter().peekable();
+    // Monitor commands waiting for a console line (`@when`).
+    let mut pending: Option<(String, Vec<&[u8]>)> = None;
     let mut unmet: Vec<Expect> = expected.to_vec();
     let (mut udp_answered, mut tcp_answered) = (false, false);
     loop {
@@ -1119,6 +1153,16 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                     *settled |= line.contains(marker);
                 }
                 unmet.retain(|expect| !expect.matches(&line));
+                if pending
+                    .as_ref()
+                    .is_some_and(|(marker, _)| line.contains(marker.as_str()))
+                    && let Some((_, queued)) = pending.take()
+                {
+                    for command in queued {
+                        monitor_command(monitor_port, command)?;
+                        thread::sleep(MONITOR_EVENT_GAP);
+                    }
+                }
                 if !ready && shell_ready && usb_settled.iter().all(|&s| s) {
                     ready = true;
                     // The prompt came before the USB devices settled: act
@@ -1168,6 +1212,25 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                             .and_then(|()| serial_input.flush())
                             .map_err(|e| format!("cannot type into the serial console: {e}"))?;
                         thread::sleep(TYPING_DELAY);
+                    }
+                    // `@when TEXT` after a command: the `@monitor` commands
+                    // that follow go to QEMU's monitor once the console
+                    // prints a line containing TEXT, while the command runs.
+                    if let Some(marker) = commands
+                        .peek()
+                        .and_then(|next| next.strip_prefix(b"@when "))
+                    {
+                        let marker = String::from_utf8_lossy(marker).into_owned();
+                        commands.next();
+                        let mut queued = Vec::new();
+                        while let Some(line) = commands
+                            .peek()
+                            .and_then(|next| next.strip_prefix(b"@monitor "))
+                        {
+                            queued.push(line);
+                            commands.next();
+                        }
+                        pending = Some((marker, queued));
                     }
                 }
             }
@@ -1448,6 +1511,9 @@ fn big_body() -> Vec<u8> {
 /// How long the guest gets to notice a monitor command (a USB device
 /// plugged in or out).
 const MONITOR_SETTLE: Duration = Duration::from_secs(2);
+/// Between input events given to the monitor (`@when`): long enough for
+/// the guest to poll each into a report of its own.
+const MONITOR_EVENT_GAP: Duration = Duration::from_millis(300);
 
 /// Presses `text` (lowercase letters, digits, space, CR) on the guest's
 /// USB keyboard through QEMU's monitor (`sendkey`).

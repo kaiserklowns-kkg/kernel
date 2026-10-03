@@ -9,6 +9,10 @@ pub const INTERFACE: u8 = 4;
 pub const ENDPOINT: u8 = 5;
 /// SuperSpeed endpoint companion (USB 3.2 §9.6.7).
 pub const SS_ENDPOINT_COMPANION: u8 = 0x30;
+/// The HID descriptor, inside a configuration (HID 1.11 §6.2.1), and the
+/// report descriptor it announces (§6.2.2).
+pub const HID: u8 = 0x21;
+pub const HID_REPORT: u8 = 0x22;
 
 /// Interface classes.
 pub const CLASS_HID: u8 = 3;
@@ -105,7 +109,7 @@ impl Configuration {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Interface {
     pub number: u8,
     pub alternate: u8,
@@ -115,7 +119,7 @@ pub struct Interface {
     pub protocol: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Endpoint {
     /// Bit 7: IN (device to host); bits 0–3: the endpoint number.
     pub address: u8,
@@ -162,6 +166,11 @@ pub enum Item {
     /// Follows a SuperSpeed endpoint: packets per burst, less one.
     Companion {
         max_burst: u8,
+    },
+    /// A HID descriptor: the length of the interface's report descriptor
+    /// (0 if it lists none first).
+    Hid {
+        report_length: u16,
     },
     /// Anything else: its type and bytes.
     Other(u8, usize),
@@ -220,6 +229,13 @@ impl Iterator for Items<'_> {
             SS_ENDPOINT_COMPANION if len >= 6 => Item::Companion {
                 max_burst: item[2].min(15),
             },
+            HID if len >= 9 => Item::Hid {
+                report_length: if item[6] == HID_REPORT {
+                    u16::from_le_bytes([item[7], item[8]])
+                } else {
+                    0
+                },
+            },
             kind => Item::Other(kind, len),
         })
     }
@@ -247,10 +263,66 @@ pub fn find_boot_interface(configuration: &[u8], protocol: u8) -> Option<(Interf
                     return Some((interface, endpoint));
                 }
             }
-            Item::Companion { .. } | Item::Other(..) => {}
+            Item::Companion { .. } | Item::Hid { .. } | Item::Other(..) => {}
         }
     }
     None
+}
+
+/// A HID interface (alternate setting 0) with its interrupt IN endpoint
+/// and the length of its report descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct HidInterface {
+    pub interface: Interface,
+    pub endpoint: Endpoint,
+    pub report_length: u16,
+}
+
+impl HidInterface {
+    pub fn is_boot(&self, protocol: u8) -> bool {
+        self.interface.subclass == HID_SUBCLASS_BOOT && self.interface.protocol == protocol
+    }
+}
+
+/// The HID interfaces of a configuration, in order, into `out`; returns
+/// how many were found (at most `out.len()`). Interfaces without an
+/// interrupt IN endpoint are skipped.
+pub fn find_hid_interfaces(configuration: &[u8], out: &mut [HidInterface]) -> usize {
+    let mut count = 0;
+    let mut current: Option<(Interface, u16)> = None;
+    for item in Items::new(configuration) {
+        match item {
+            Item::Interface(interface) => {
+                current = (interface.class == CLASS_HID && interface.alternate == 0)
+                    .then_some((interface, 0));
+            }
+            Item::Hid { report_length } => {
+                if let Some((_, length)) = current.as_mut() {
+                    *length = report_length;
+                }
+            }
+            Item::Endpoint(endpoint) => {
+                if let Some((interface, report_length)) = current
+                    && endpoint.is_in()
+                    && endpoint.transfer_type() == INTERRUPT
+                    && endpoint.packet_size() > 0
+                {
+                    if count == out.len() {
+                        break;
+                    }
+                    out[count] = HidInterface {
+                        interface,
+                        endpoint,
+                        report_length,
+                    };
+                    count += 1;
+                    current = None;
+                }
+            }
+            Item::Companion { .. } | Item::Other(..) => {}
+        }
+    }
+    count
 }
 
 /// A bulk endpoint and its SuperSpeed burst size (0 below SuperSpeed).
@@ -387,7 +459,7 @@ mod tests {
             [it.next(), it.next(), it.next(), it.next()]
         };
         assert!(matches!(items[0], Some(Item::Interface(_))));
-        assert_eq!(items[1], Some(Item::Other(0x21, 9)));
+        assert_eq!(items[1], Some(Item::Hid { report_length: 63 }));
         assert!(matches!(items[2], Some(Item::Endpoint(_))));
         assert_eq!(items[3], None);
     }
@@ -436,6 +508,53 @@ mod tests {
         assert_eq!(bulk_in.endpoint.packet_size(), 1024);
         assert!(find_bulk_interface(&configuration, 8, 6, 0x62).is_none());
         assert!(find_bulk_interface(&configuration[..28], 8, 6, 0x50).is_none());
+    }
+
+    #[test]
+    fn finds_hid_interfaces() {
+        // A combo receiver: a boot keyboard, a boot mouse, and a HID
+        // interface with no IN endpoint; then QEMU's usb-tablet alone.
+        let combo = [
+            9, 2, 75, 0, 3, 1, 0, 0xa0, 50, //
+            9, 4, 0, 0, 1, 3, 1, 1, 0, //
+            9, 0x21, 0x11, 0x01, 0, 1, 0x22, 63, 0, //
+            7, 5, 0x81, 3, 8, 0, 7, //
+            9, 4, 1, 0, 1, 3, 1, 2, 0, //
+            9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0x34, 0x01, //
+            7, 5, 0x82, 3, 4, 0, 10, //
+            9, 4, 2, 0, 1, 3, 0, 0, 0, //
+            7, 5, 0x03, 3, 8, 0, 10,
+        ];
+        let mut found = [HidInterface {
+            interface: Interface::default(),
+            endpoint: Endpoint::default(),
+            report_length: 0,
+        }; 4];
+        assert_eq!(find_hid_interfaces(&combo, &mut found), 2);
+        assert!(found[0].is_boot(HID_PROTOCOL_KEYBOARD));
+        assert_eq!(found[0].report_length, 63);
+        assert!(found[1].is_boot(HID_PROTOCOL_MOUSE));
+        assert_eq!(found[1].interface.number, 1);
+        assert_eq!(found[1].endpoint.address, 0x82);
+        assert_eq!(found[1].report_length, 0x134);
+        // Room for one: the first.
+        assert_eq!(find_hid_interfaces(&combo, &mut found[..1]), 1);
+        assert_eq!(found[0].interface.number, 0);
+
+        let tablet = [
+            9, 2, 34, 0, 1, 1, 0, 0xa0, 50, //
+            9, 4, 0, 0, 1, 3, 0, 0, 0, //
+            9, 0x21, 0x01, 0x00, 0, 1, 0x22, 74, 0, //
+            7, 5, 0x81, 3, 8, 0, 4,
+        ];
+        assert_eq!(find_hid_interfaces(&tablet, &mut found), 1);
+        assert!(!found[0].is_boot(HID_PROTOCOL_MOUSE));
+        assert_eq!(found[0].report_length, 74);
+        // A HID descriptor naming another descriptor type first.
+        let mut odd = tablet;
+        odd[24] = 0x23;
+        assert_eq!(find_hid_interfaces(&odd, &mut found), 1);
+        assert_eq!(found[0].report_length, 0);
     }
 
     #[test]

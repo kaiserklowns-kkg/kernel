@@ -1,0 +1,11 @@
+[package]
+name = "oceans-input-proto"
+description = "The Oceans input protocol and client API: subscribe to an input service and read its events (ADR-0042)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-input.workspace = true

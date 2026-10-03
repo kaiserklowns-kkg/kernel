@@ -1,9 +1,10 @@
 [package]
 name = "oceans-usb"
-description = "USB for Oceans: descriptors, control requests, the HID boot keyboard, and xHCI data structures (TRBs, rings, contexts), without allocation (ADR-0032)"
+description = "USB for Oceans: descriptors, control requests, the HID boot keyboard, HID pointers (ADR-0042), and xHCI data structures (TRBs, rings, contexts), without allocation (ADR-0032)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+oceans-input.workspace = true

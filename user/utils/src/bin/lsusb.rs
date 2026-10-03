@@ -52,7 +52,7 @@ fn main(start: Start) -> i64 {
                 record.vendor,
                 record.product,
                 record.name(),
-                record.kind.describe()
+                record.role()
             );
         }
         if count < service::MAX_RECORDS {
