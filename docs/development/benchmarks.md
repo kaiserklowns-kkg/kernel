@@ -1,6 +1,6 @@
 ﻿# Benchmarks
 
-Master spec Â§51: measure, do not assume. Each entry records what was
+Master spec §51: measure, do not assume. Each entry records what was
 measured, how, on what, and the result. Numbers from QEMU TCG (pure
 emulation) are regression baselines only, not performance claims.
 
