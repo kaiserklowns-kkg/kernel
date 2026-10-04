@@ -11,6 +11,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain
         run: rustup show
+      # Go services run on Oceans as wasip1 modules (ADR-0050).
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       # The reference FAT tools check what libs/fat writes (ADR-0037).
       - name: Install dosfstools and mtools
         run: sudo apt-get update && sudo apt-get install -y dosfstools mtools
@@ -25,6 +29,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf dosfstools
       - name: Install toolchain
         run: rustup show
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       - name: Fetch Limine
         run: cargo xtask limine
       - name: Boot smoke test

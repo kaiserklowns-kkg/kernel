@@ -57,5 +57,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0047](0047-permissions-and-consent.md) | Permissions and consent | Accepted |
 | [0048](0048-delegating-core-authority.md) | Delegating Oceans Core authority | Accepted |
 | [0049](0049-app-services.md) | App services | Accepted |
+| [0050](0050-go-on-oceans.md) | Go on Oceans (WebAssembly in a Rust host) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

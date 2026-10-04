@@ -514,10 +514,133 @@ mod heap {
         blocks: [const { None }; MAX_BLOCKS],
     })));
 
+    /// Allocations larger than the heap's largest block (4 MiB, e.g. an
+    /// interpreter's linear memory, ADR-0050) are memory objects of their
+    /// own, each at the start of a 1 GiB window of their own region, so
+    /// that growing one maps more objects right after it: in place, with
+    /// no copy.
+    const HUGE_START: u64 = 0x0000_5000_0000_0000;
+    const HUGE_WINDOW: u64 = 1 << 30;
+    const HUGE_BLOCKS: usize = 64;
+    /// Objects one huge block may be made of (it grows in pieces).
+    const HUGE_PIECES: usize = 32;
+    /// Pieces are rounded up to this, so small growth steps add little.
+    const HUGE_GRANULE: u64 = 1 << 20;
+
+    struct Huge {
+        /// Bytes mapped (all pieces).
+        mapped: u64,
+        pieces: [(Handle, u64); HUGE_PIECES],
+        count: usize,
+    }
+
+    struct HugeBlocks([Option<Huge>; HUGE_BLOCKS]);
+
+    impl HugeBlocks {
+        fn base(index: usize) -> u64 {
+            HUGE_START + index as u64 * HUGE_WINDOW
+        }
+
+        fn index_of(address: u64) -> Option<usize> {
+            let offset = address.checked_sub(HUGE_START)?;
+            (offset % HUGE_WINDOW == 0)
+                .then_some((offset / HUGE_WINDOW) as usize)
+                .filter(|&i| i < HUGE_BLOCKS)
+        }
+
+        fn allocate(&mut self, size: u64) -> Option<NonNull<u8>> {
+            let index = self.0.iter().position(Option::is_none)?;
+            let mut huge = Huge {
+                mapped: 0,
+                pieces: [(Handle(0), 0); HUGE_PIECES],
+                count: 0,
+            };
+            if !Self::extend(&mut huge, Self::base(index), size) {
+                Self::release(&huge, Self::base(index));
+                return None;
+            }
+            self.0[index] = Some(huge);
+            NonNull::new(Self::base(index) as *mut u8)
+        }
+
+        /// Maps another piece after the mapped ones, to reach `size`.
+        fn extend(huge: &mut Huge, base: u64, size: u64) -> bool {
+            if size <= huge.mapped {
+                return true;
+            }
+            if size > HUGE_WINDOW || huge.count == HUGE_PIECES {
+                return false;
+            }
+            let piece = (size - huge.mapped).next_multiple_of(HUGE_GRANULE);
+            let piece = piece.min(HUGE_WINDOW - huge.mapped);
+            let Ok(memory) = memory_create(piece) else {
+                return false;
+            };
+            if memory_map(memory, base + huge.mapped, prot::READ | prot::WRITE).is_err() {
+                let _ = close(memory);
+                return false;
+            }
+            huge.pieces[huge.count] = (memory, base + huge.mapped);
+            huge.count += 1;
+            huge.mapped += piece;
+            huge.mapped >= size
+        }
+
+        fn release(huge: &Huge, _base: u64) {
+            for &(memory, address) in &huge.pieces[..huge.count] {
+                let _ = memory_unmap(address as *mut u8);
+                let _ = close(memory);
+            }
+        }
+
+        fn free(&mut self, address: u64) -> bool {
+            match Self::index_of(address).and_then(|i| self.0[i].take()) {
+                Some(huge) => {
+                    Self::release(&huge, address);
+                    true
+                }
+                None => false,
+            }
+        }
+
+        /// Grows a huge block in place; `false` if it cannot.
+        fn grow(&mut self, address: u64, size: u64) -> bool {
+            match Self::index_of(address).and_then(|i| self.0[i].as_mut()) {
+                Some(huge) => Self::extend(huge, address, size),
+                None => false,
+            }
+        }
+    }
+
+    struct HugeCell(UnsafeCell<HugeBlocks>);
+
+    // SAFETY: only one thread per process exists (as for the heap).
+    unsafe impl Sync for HugeCell {}
+
+    static HUGE: HugeCell = HugeCell(UnsafeCell::new(HugeBlocks([const { None }; HUGE_BLOCKS])));
+
+    fn is_huge(layout: Layout) -> bool {
+        layout.size() > PAGE_SIZE << oceans_heap::MAX_ORDER
+            || layout.align() > PAGE_SIZE << oceans_heap::MAX_ORDER
+    }
+
+    /// The huge blocks; single-threaded like the heap.
+    fn huge() -> &'static mut HugeBlocks {
+        // SAFETY: one thread per process (see the `Sync` impl), and no
+        // reference outlives a single allocator call.
+        unsafe { &mut *HUGE.0.get() }
+    }
+
     // SAFETY: `oceans-heap` returns blocks that fit and are aligned for the
-    // layout, never handed out twice; access is single-threaded.
+    // layout, never handed out twice; huge blocks are fresh mappings, aligned
+    // to their window (1 GiB); access is single-threaded.
     unsafe impl GlobalAlloc for ProcessHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if is_huge(layout) {
+                return huge()
+                    .allocate(layout.size() as u64)
+                    .map_or(ptr::null_mut(), NonNull::as_ptr);
+            }
             // SAFETY: single-threaded (see `Sync` impl).
             let heap = unsafe { &mut *self.0.get() };
             heap.allocate(layout)
@@ -525,11 +648,36 @@ mod heap {
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if is_huge(layout) {
+                huge().free(ptr as u64);
+                return;
+            }
             // SAFETY: single-threaded; `ptr` came from `alloc` with `layout`.
             unsafe {
                 if let Some(ptr) = NonNull::new(ptr) {
                     (*self.0.get()).deallocate(ptr, layout);
                 }
+            }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // A huge block grows in place when it can.
+            if is_huge(layout)
+                && new_size >= layout.size()
+                && huge().grow(ptr as u64, new_size as u64)
+            {
+                return ptr;
+            }
+            // SAFETY: as `GlobalAlloc::realloc`'s default: allocate, copy,
+            // free (the caller guarantees `ptr`, `layout` and `new_size`).
+            unsafe {
+                let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+                let new = self.alloc(new_layout);
+                if !new.is_null() {
+                    ptr::copy_nonoverlapping(ptr, new, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+                new
             }
         }
     }
@@ -692,6 +840,60 @@ pub fn map_text(memory: Handle) -> Option<&'static str> {
     let bytes = unsafe { core::slice::from_raw_parts(base, size) };
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..len]).ok()
+}
+
+/// Runs `f` on a stack of `size` bytes of its own (a new memory object),
+/// then returns to the process stack, which is 64 KiB. For deep code: an
+/// interpreter, a parser of nested input (ADR-0050).
+///
+/// The stack has no guard page below it: code that might exceed `size`
+/// must bound its own depth (wasmi does). A panic in `f` ends the process,
+/// as any panic does (there is no unwinding).
+pub fn with_stack<F: FnOnce() -> R, R>(size: usize, f: F) -> Result<R, Error> {
+    struct Context<F, R> {
+        f: Option<F>,
+        result: Option<R>,
+    }
+    extern "C" fn trampoline<F: FnOnce() -> R, R>(context: *mut u8) {
+        // SAFETY: `context` points to the `Context` below, alive for the
+        // whole call, and nothing else touches it meanwhile.
+        let context = unsafe { &mut *context.cast::<Context<F, R>>() };
+        if let Some(f) = context.f.take() {
+            context.result = Some(f());
+        }
+    }
+
+    let size = size.max(16 * 1024).next_multiple_of(4096);
+    let memory = memory_create(size as u64)?;
+    let base = memory_map(memory, 0, prot::READ | prot::WRITE);
+    let _ = close(memory);
+    let base = base?;
+    // 16-byte aligned: after `call` pushes the return address, the callee
+    // sees the alignment the System V ABI promises.
+    let top = (base as usize + size) & !15;
+    let mut context = Context {
+        f: Some(f),
+        result: None,
+    };
+    // SAFETY: `top` is the end of `size` writable bytes mapped just above;
+    // the old stack pointer is kept in r12 (callee-saved, so the
+    // trampoline preserves it) and restored before the block ends; every
+    // register the C ABI lets the trampoline change is declared clobbered.
+    unsafe {
+        core::arch::asm!(
+            "mov r12, rsp",
+            "mov rsp, {top}",
+            "call {trampoline}",
+            "mov rsp, r12",
+            top = in(reg) top,
+            trampoline = in(reg) trampoline::<F, R> as extern "C" fn(*mut u8),
+            in("rdi") (&raw mut context).cast::<u8>(),
+            out("r12") _,
+            clobber_abi("C"),
+        );
+    }
+    let _ = memory_unmap(base);
+    context.result.ok_or(Error::InvalidArgument)
 }
 
 /// A new read-only memory object holding `text` (to hand to another

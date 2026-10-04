@@ -37,6 +37,7 @@ const USER_PROGRAMS: &[&str] = &[
     "xhci",
     "usb-storage",
     "core",
+    "gohost",
     "usb-hid",
     "net",
     "net-echo",
@@ -79,6 +80,9 @@ const DEV_SEED: &str = include_str!("../../keys/oceans-dev.seed");
 const DEV_PUBLISHER: &str = "Oceans Examples";
 /// A key no image trusts (the smoke test's refused package).
 const UNTRUSTED_SEED: [u8; 32] = [0x55; 32];
+/// Go programs (ADR-0050), built for wasip1 and run by `gohost`: the
+/// package under `go/` and the module file name in the boot archive.
+const GO_PROGRAMS: &[(&str, &str)] = &[("./cmd/gohello", "gohello.wasm")];
 /// Signed example packages, built with every image (and served to the
 /// smoke test's guest over HTTP).
 const PACKAGES_DIR: &str = "build/packages";
@@ -496,6 +500,11 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("  note.txt"),
     Expect::Line("  big.bin"),
     Expect::Contains("core: ready, 0 apps installed, 1 trusted publisher keys"),
+    // Go on Oceans (ADR-0050).
+    Expect::Contains("gohello: Go 1."),
+    Expect::Contains("gohello: goroutines computed 30"),
+    Expect::Contains("gohello: echo replied \"HELLO FROM GO\""),
+    Expect::Contains("gohello: System API calls verified"),
     Expect::Contains("app: /keep/untrusted.opk: signed with a key this system does not trust"),
     Expect::Contains(
         "app: /keep/tampered.opk: the signature does not match: the package was changed",
@@ -751,7 +760,8 @@ fn check() -> Result {
     ]))?;
     run_command(cargo().args(["test", "--workspace", "--exclude", KERNEL_PACKAGE]))?;
     run_command(user_cargo().args(["fmt", "--all", "--check"]))?;
-    run_command(user_cargo().args(["clippy", "--release", "--", "-D", "warnings"]))
+    run_command(user_cargo().args(["clippy", "--release", "--", "-D", "warnings"]))?;
+    check_go()
 }
 
 /// Cargo in the `user/` workspace, whose `.cargo/config.toml` selects the
@@ -858,6 +868,9 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     let manifest_bytes = fs::read(&manifest_path)
         .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
     files.push(("services.conf".to_string(), manifest_bytes));
+    for (name, bytes) in build_go()? {
+        files.push((name, bytes));
+    }
     // Oceans Core's trusted publisher keys (ADR-0046): the root of trust
     // for apps comes with the boot image.
     files.push(("trust.keys".to_string(), trust_list()?.into_bytes()));
@@ -1261,6 +1274,68 @@ fn fsck_fat(image: &Path) -> Option<(bool, String)> {
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
     ))
+}
+
+/// `go` for this repository: its own build and module caches (under
+/// `build/`), so no machine-wide Go setting can break the build.
+fn go() -> Command {
+    let mut cmd = Command::new(env::var_os("OCEANS_GO").unwrap_or_else(|| "go".into()));
+    let cache = root().join("build").join("go");
+    cmd.current_dir(root().join("go"))
+        .env("GOCACHE", cache.join("cache"))
+        .env("GOMODCACHE", cache.join("mod"))
+        .env("GOPATH", cache.join("path"))
+        .env("GOFLAGS", "-mod=mod")
+        .env("GOTOOLCHAIN", "local");
+    cmd
+}
+
+/// The Go programs (ADR-0050), built for WebAssembly: `(archive name,
+/// module)`.
+fn build_go() -> Result<Vec<(String, Vec<u8>)>> {
+    let out = root().join("build").join("go");
+    fs::create_dir_all(&out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+    let mut modules = Vec::new();
+    for &(package, name) in GO_PROGRAMS {
+        let path = out.join(name);
+        run_command(
+            go().env("GOOS", "wasip1")
+                .env("GOARCH", "wasm")
+                .args(["build", "-trimpath", "-o"])
+                .arg(&path)
+                .arg(package),
+        )
+        .map_err(|e| {
+            format!("{e} (Go 1.26 or later is needed: https://go.dev/dl, or set OCEANS_GO)")
+        })?;
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        modules.push((name.to_string(), bytes));
+    }
+    Ok(modules)
+}
+
+/// `gofmt`, `go vet` (host and wasip1) and `go test` for `go/`.
+fn check_go() -> Result {
+    let listed = Command::new(
+        env::var_os("OCEANS_GO")
+            .map(|go| Path::new(&go).with_file_name("gofmt"))
+            .unwrap_or_else(|| "gofmt".into()),
+    )
+    .current_dir(root().join("go"))
+    .args(["-l", "."])
+    .output()
+    .map_err(|e| format!("cannot run gofmt: {e}"))?;
+    let files = String::from_utf8_lossy(&listed.stdout);
+    if !files.trim().is_empty() {
+        return Err(format!("Go files need gofmt:\n{files}"));
+    }
+    run_command(go().args(["vet", "./..."]))?;
+    run_command(
+        go().env("GOOS", "wasip1")
+            .env("GOARCH", "wasm")
+            .args(["vet", "./..."]),
+    )?;
+    run_command(go().args(["test", "./..."]))
 }
 
 fn dev_seed() -> Result<[u8; 32]> {
