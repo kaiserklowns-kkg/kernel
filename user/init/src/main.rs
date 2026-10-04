@@ -89,6 +89,9 @@ enum Grant {
     /// manifest's `CCSSPP`.
     DeviceClass(u32, &'static str),
     ConsoleInput,
+    /// The screen (ADR-0057): its geometry, the console's text, and taking
+    /// the framebuffer over.
+    Display,
     Provide(&'static str),
     /// An endpoint: the manifest's `NAME` or `NAME as ALIAS` (named
     /// `ALIAS` in the service's directory); see [`use_parts`]. One string,
@@ -180,6 +183,8 @@ struct Init {
     sysinfo: Handle,
     /// The PCI device bus.
     bus: Handle,
+    /// The screen (handle 5, when there is one, ADR-0057).
+    display: Option<Handle>,
     /// The boot archive, mapped for init's lifetime.
     archive: Archive<'static>,
     /// Archive files unpacked into memory objects so far.
@@ -226,6 +231,7 @@ fn main(start: Start) -> i64 {
         console,
         sysinfo,
         bus,
+        display: start.handles.get(5).copied(),
         archive,
         images: [("", Handle(0)); MAX_IMAGES],
         image_count: 0,
@@ -346,6 +352,7 @@ fn parse(
                     ("grant", "sysinfo") => Grant::SystemInfo,
                     ("grant", "devices") => Grant::Devices,
                     ("grant", "console-input") => Grant::ConsoleInput,
+                    ("grant", "display") => Grant::Display,
                     ("grant", other) => {
                         if let Some(module) = other.strip_prefix("module:")
                             && !module.is_empty()
@@ -370,7 +377,7 @@ fn parse(
                             }
                         } else {
                             return error(
-                                "unknown grant (known: log, console, console-input, sysinfo, devices, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
+                                "unknown grant (known: log, console, console-input, sysinfo, devices, display, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
                             );
                         }
                     }
@@ -511,6 +518,14 @@ impl Init {
                         oceans_rt::duplicate(self.bus, DEVICES_RIGHTS)?,
                         "devices",
                         "devices",
+                    ),
+                    Grant::Display => (
+                        oceans_rt::duplicate(
+                            self.display.ok_or(Error::NotFound)?,
+                            rights::READ | rights::MANAGE | rights::TRANSFER,
+                        )?,
+                        "display",
+                        "display",
                     ),
                     // Exclusive: a restarted driver reopens it once the old
                     // instance's capability has been closed at its exit.

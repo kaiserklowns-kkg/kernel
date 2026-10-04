@@ -11,6 +11,7 @@ use core::fmt;
 
 pub use oceans_abi::EXIT_KILLED;
 pub use oceans_abi::Error;
+pub use oceans_abi::display::Info as DisplayInfo;
 pub use oceans_abi::{MessageDesc, prot, rights};
 use oceans_abi::{nr, start::MAX_INITIAL_HANDLES};
 
@@ -377,6 +378,38 @@ pub fn notification_signal(notification: Handle, bits: u64) -> Result<(), Error>
 /// `MANAGE`; killing an exited process does nothing.
 pub fn process_kill(process: Handle) -> Result<(), Error> {
     call(nr::PROCESS_KILL, [process.0, 0, 0, 0, 0, 0]).map(drop)
+}
+
+/// The screen's geometry (ABI 13, ADR-0057; needs `READ` on the display).
+pub fn display_info(display: Handle) -> Result<DisplayInfo, Error> {
+    let mut bytes = [0u8; DisplayInfo::SIZE];
+    call(
+        nr::DISPLAY_INFO,
+        [display.0, bytes.as_mut_ptr() as u64, 0, 0, 0, 0],
+    )?;
+    DisplayInfo::decode(&bytes).ok_or(Error::InvalidArgument)
+}
+
+/// Takes the framebuffer over: a device memory object and its size (needs
+/// `MANAGE`). The kernel console stops drawing until this process ends.
+pub fn display_claim(display: Handle) -> Result<(Handle, u64), Error> {
+    call(nr::DISPLAY_CLAIM, [display.0, 0, 0, 0, 0, 0]).map(|(h, size)| (Handle(h), size))
+}
+
+/// The console's text grid (header, then cells); returns the length.
+pub fn display_text(display: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    call(
+        nr::DISPLAY_TEXT,
+        [
+            display.0,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+        ],
+    )
+    .map(|(len, _)| len as usize)
 }
 
 /// Blocks until any bit is set; returns and clears them (needs `WAIT`).

@@ -37,6 +37,7 @@ const USER_PROGRAMS: &[&str] = &[
     "xhci",
     "usb-storage",
     "core",
+    "display",
     "gohost",
     "usb-hid",
     "net",
@@ -286,6 +287,24 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"ai ask how much memory is free?\r\n",
     b"ai model https://models.oceans.test:$MODELS/v1 oceans-test --dns 10.0.2.2:$DNS --ca /keep/models-ca.pem\r\n",
     b"ai ask how much memory is free?\r\n",
+    // The desktop (ADR-0057): with a mouse plugged in, Hello is clicked in
+    // the launcher; it needs a decision, so the desktop's own permission
+    // dialog asks, and Allow is clicked. The screen is captured twice for
+    // the host to check. Positions are fixed (the layout is anchored at
+    // the top left): Hello is the fourth app.
+    b"app reset app.oceans.hello network\r\n",
+    b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
+    b"@monitor screendump build/smoke-desktop.ppm",
+    b"@monitor mouse_move -3000 -3000",
+    b"@monitor mouse_move 146 234",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor screendump build/smoke-dialog.ppm",
+    b"@monitor mouse_move 630 108",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor device_del deskmouse",
+    b"app info app.oceans.hello\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -429,7 +448,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // Its settings, in its own storage (ADR-0053), survived the reboot.
     Expect::Contains("ai: ready; 7 tools; model settings restored"),
     Expect::Line("  app.oceans.hello  1.0.0  Hello"),
-    Expect::Line("hello: run 8 (counted in my storage)"),
+    Expect::Line("hello: run 9 (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
     Expect::Contains("core: started service app.oceans.heartbeat"),
     Expect::Contains("heartbeat: run 3, beating"),
@@ -442,7 +461,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 12)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 13)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -480,7 +499,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 12)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 13)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -555,6 +574,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("gohello: echo replied \"HELLO FROM GO\""),
     Expect::Contains("gohello: System API calls verified"),
     Expect::Contains("ai: ready; 7 tools; no model configured yet"),
+    Expect::Contains("framebuffer taken over; desktop ready with "),
+    Expect::Contains("app: network for app.oceans.hello will be asked again"),
+    Expect::Contains("desktop: permission dialog for app.oceans.hello: network"),
+    Expect::Contains("desktop: network allowed for app.oceans.hello in the dialog"),
+    Expect::Contains("allowed app.oceans.hello network (in a permission dialog)"),
+    Expect::Contains("desktop: started app.oceans.hello"),
     Expect::Contains("Oceans AI wants to: read the file notes.txt in your folder"),
     Expect::Contains("Oceans AI: Your notes say: remember the milk"),
     Expect::Contains("files_read {\"path\":\"notes.txt\"} approved by the user: remember the milk"),
@@ -689,14 +714,14 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("usb-hid: port 6.1: tablet, "),
     Expect::Contains(", 0..32767 x 0..32767, pointer 1"),
     Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) tablet (pointer input)"),
-    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 2"),
+    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 3"),
     Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (pointer input)"),
     Expect::Contains("mouse: requests `use:input`"),
-    Expect::Contains("pointer 2: motion dx=10 dy=-5"),
-    Expect::Contains("pointer 2: button 1 (left) down"),
-    Expect::Contains("pointer 2: button 1 (left) up"),
-    Expect::Contains("pointer 2: wheel vertical=1 horizontal=0"),
-    Expect::Contains("usb-hid: port 6.2: pointer 2 removed"),
+    Expect::Contains("pointer 3: motion dx=10 dy=-5"),
+    Expect::Contains("pointer 3: button 1 (left) down"),
+    Expect::Contains("pointer 3: button 1 (left) up"),
+    Expect::Contains("pointer 3: wheel vertical=1 horizontal=0"),
+    Expect::Contains("usb-hid: port 6.2: pointer 3 removed"),
     Expect::Contains("pointer 1: absolute x=0 y=0 (of 32767 x 32767)"),
     Expect::Contains("pointer 1: button 2 (right) down"),
     Expect::Contains("pointer 1: button 2 (right) up"),
@@ -1608,6 +1633,76 @@ fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
     fs::write(&path, vec![0u8; size]).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// A PPM (P6) screen capture: width, height, RGB bytes.
+fn read_ppm(path: &Path) -> std::result::Result<(usize, usize, Vec<u8>), String> {
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while fields.len() < 4 {
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        let start = at;
+        while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        fields.push(String::from_utf8_lossy(&bytes[start..at]).into_owned());
+    }
+    let number = |i: usize| {
+        fields[i]
+            .parse::<usize>()
+            .map_err(|_| format!("{}: bad PPM header", path.display()))
+    };
+    if fields[0] != "P6" || number(3)? != 255 {
+        return Err(format!("{}: not an 8-bit P6 image", path.display()));
+    }
+    let (width, height) = (number(1)?, number(2)?);
+    let pixels = bytes[at + 1..].to_vec();
+    if pixels.len() < width * height * 3 {
+        return Err(format!("{}: truncated", path.display()));
+    }
+    Ok((width, height, pixels))
+}
+
+/// The desktop (ADR-0057) as QEMU showed it: the bar, the launcher and
+/// the Terminal in their colours, then the permission dialog over the
+/// dimmed desktop.
+fn check_smoke_screens() -> Result {
+    let pixel = |image: &(usize, usize, Vec<u8>), x: usize, y: usize| {
+        let at = (y * image.0 + x) * 3;
+        u32::from(image.2[at]) << 16 | u32::from(image.2[at + 1]) << 8 | u32::from(image.2[at + 2])
+    };
+    const SURFACE: u32 = 0x12_1a_2b;
+    const TERMINAL: u32 = 0x07_0b_14;
+    const DIALOG: u32 = 0x1b_26_3f;
+    let desktop = read_ppm(&root().join("build/smoke-desktop.ppm"))?;
+    let (w, h) = (desktop.0, desktop.1);
+    for (what, x, y, want) in [
+        ("the bar", 5, 5, SURFACE),
+        ("the launcher", 20, h - 20, SURFACE),
+        ("the Terminal", w - 20, h - 20, TERMINAL),
+    ] {
+        let got = pixel(&desktop, x, y);
+        if got != want {
+            return Err(format!(
+                "desktop capture: {what} at {x},{y} is {got:06x}, not {want:06x}"
+            ));
+        }
+    }
+    let dialog = read_ppm(&root().join("build/smoke-dialog.ppm"))?;
+    if pixel(&dialog, 308, 220) != DIALOG {
+        return Err(format!(
+            "dialog capture: no permission dialog at 308,220 ({:06x})",
+            pixel(&dialog, 308, 220)
+        ));
+    }
+    if pixel(&dialog, 5, 5) == SURFACE {
+        return Err("dialog capture: the desktop behind the dialog is not dimmed".into());
+    }
+    println!("the desktop and its permission dialog are on the screen captures");
+    Ok(())
+}
+
 /// The files the guest stored on the NVMe disk, read from its image as an
 /// Oceans volume (ADR-0040).
 fn check_smoke_nvme() -> Result {
@@ -1696,6 +1791,7 @@ fn smoke(profile: Profile) -> Result {
     smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT, Nic::E1000e)?;
     check_smoke_disk()?;
     check_smoke_nvme()?;
+    check_smoke_screens()?;
     check_smoke_stick()?;
     check_smoke_fat()?;
     println!("smoke test passed: kernel came online, files survived a reboot");

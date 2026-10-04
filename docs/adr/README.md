@@ -63,5 +63,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0053](0053-directory-grants.md) | Directory grants from init, and the AI's settings | Accepted |
 | [0054](0054-ai-gateway-dns-and-https.md) | The AI model gateway: DNS and https | Accepted |
 | [0055](0055-sensitive-reads.md) | Sensitive reads by AI agents | Accepted |
+| [0056](0056-ui-architecture.md) | UI architecture: a native desktop, and SvelteKit apps through a bridge | Accepted |
+| [0057](0057-display-and-desktop.md) | The display service and the desktop (ABI 13) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

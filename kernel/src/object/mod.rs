@@ -49,6 +49,9 @@ pub enum KernelObject {
     /// `MANAGE` to enable it, map BARs, allocate DMA memory and bind
     /// interrupts.
     Device(Arc<Device>),
+    /// The screen (ADR-0057): `READ` its geometry and the console's text,
+    /// `MANAGE` to take the framebuffer over.
+    Display,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +67,7 @@ pub enum ObjectKind {
     SystemInfo,
     DeviceBus,
     Device,
+    Display,
 }
 
 impl KernelObject {
@@ -80,6 +84,7 @@ impl KernelObject {
             Self::SystemInfo => ObjectKind::SystemInfo,
             Self::DeviceBus => ObjectKind::DeviceBus,
             Self::Device(_) => ObjectKind::Device,
+            Self::Display => ObjectKind::Display,
         }
     }
 }
@@ -148,6 +153,10 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
         // has one driver.
         ObjectKind::Device => Rights::READ.union(Rights::MANAGE).union(Rights::TRANSFER),
         ObjectKind::Process => Rights::WAIT
+            .union(Rights::MANAGE)
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+        ObjectKind::Display => Rights::READ
             .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),

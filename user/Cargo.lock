@@ -234,6 +234,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "display"
+version = "0.1.0"
+dependencies = [
+ "noto-sans-mono-bitmap",
+ "oceans-core-proto",
+ "oceans-input-proto",
+ "oceans-package",
+ "oceans-rt",
+]
+
+[[package]]
 name = "e1000e"
 version = "0.1.0"
 dependencies = [
@@ -491,6 +502,12 @@ dependencies = [
  "oceans-net-proto",
  "oceans-rt",
 ]
+
+[[package]]
+name = "noto-sans-mono-bitmap"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f102c477fd4ec864c149803bf606ecc23bc9329602ec0f99073a728abf454abc"
 
 [[package]]
 name = "num-bigint-dig"

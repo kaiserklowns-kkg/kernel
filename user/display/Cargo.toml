@@ -1,0 +1,19 @@
+[package]
+name = "display"
+description = "The Oceans display service: takes the framebuffer over, composes the desktop, routes the pointer, and shows permission dialogs (ADR-0057)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "display"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-core-proto.workspace = true
+oceans-package.workspace = true
+oceans-input-proto.workspace = true
+noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "bold", "size_16", "size_20", "unicode-basic-latin"] }

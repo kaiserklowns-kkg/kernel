@@ -278,6 +278,7 @@ impl Shell {
              \x20 app stop | remove ID       stop or uninstall an app\r\n\
              \x20 app enable | disable ID    a service: start at boot (and now), or not\r\n\
              \x20 app grant | revoke ID PERM allow or withdraw a permission\r\n\
+             \x20 app reset ID PERM          forget the decision: ask again next time\r\n\
              \x20 app rollback ID | audit    previous version; what was decided\r\n\
              \x20 ai ask QUESTION            ask Oceans AI (it asks before changing anything)\r\n\
              \x20 ai model URL MODEL         its model server (OpenAI-compatible, http or\r\n\

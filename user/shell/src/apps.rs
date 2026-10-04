@@ -47,6 +47,7 @@ impl Shell {
             }
             ["grant", id, permission] => self.app_decide(core, id, permission, true),
             ["revoke", id, permission] => self.app_decide(core, id, permission, false),
+            ["reset", id, permission] => self.app_reset(core, id, permission),
             ["rollback", id] => {
                 let mut reply = [0u8; 64];
                 match core.about(op::ROLLBACK, &[], id, &mut reply) {
@@ -362,6 +363,25 @@ impl Shell {
             )),
             Err((CoreError::Status(Status::BadRequest), _)) => self.print(format_args!(
                 "app: {id} does not ask for {permission}, or it needs no decision\r\n"
+            )),
+            Err((error, _)) => self.app_error(id, error, &[]),
+        }
+    }
+
+    /// `app reset ID PERMISSION`: forget the decision; the next run asks.
+    fn app_reset(&self, core: Core, id: &str, permission: &str) {
+        let Some(index) = Permission::ALL.iter().position(|p| p.name() == permission) else {
+            return self.print(format_args!("app: {permission}: unknown permission\r\n"));
+        };
+        let request = [
+            index as u8,
+            oceans_core_proto::decision::FORGET,
+            source::COMMAND,
+        ];
+        let mut reply = [0u8; 8];
+        match core.about(op::DECIDE, &request, id, &mut reply) {
+            Ok(_) => self.print(format_args!(
+                "app: {permission} for {id} will be asked again\r\n"
             )),
             Err((error, _)) => self.app_error(id, error, &[]),
         }

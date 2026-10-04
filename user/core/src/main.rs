@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use oceans_core_proto::{
-    Decision, MAX_DATA, Status, access, field, op, outcome, run_flags, source,
+    Decision, MAX_DATA, Status, access, decision, field, op, outcome, run_flags, source,
 };
 use oceans_fs_proto::{FsError, Kind, Node, flags};
 use oceans_package::{Package, PackageError, Permission, Runtime, TrustedKey, Version};
@@ -935,10 +935,19 @@ impl Core {
         if !app.asks_for(permission) || permission.automatic() {
             return Err(Status::BadRequest.into());
         }
-        let allow = *allow != 0;
+        let decided = match *allow {
+            decision::DENY => Some(false),
+            decision::ALLOW => Some(true),
+            decision::FORGET => None,
+            _ => return Err(Status::BadRequest.into()),
+        };
+        let allow = decided == Some(true);
         // A decision that cannot be stored is not applied.
         let key = (id.clone(), permission);
-        let before = self.decisions.insert(key.clone(), allow);
+        let before = match decided {
+            Some(allowed) => self.decisions.insert(key.clone(), allowed),
+            None => self.decisions.remove(&key),
+        };
         if let Err(refusal) = self.save_decisions() {
             match before {
                 Some(old) => self.decisions.insert(key, old),
@@ -946,14 +955,18 @@ impl Core {
             };
             return Err(refusal);
         }
-        let how = if *by == source::PROMPT {
-            "at its prompt"
-        } else {
-            "by command"
+        let how = match *by {
+            source::PROMPT => "at its prompt",
+            source::DIALOG => "in a permission dialog",
+            _ => "by command",
         };
         self.record(format_args!(
             "{} {id} {} ({how})",
-            if allow { "allowed" } else { "denied" },
+            match decided {
+                Some(true) => "allowed",
+                Some(false) => "denied",
+                None => "reset (ask again)",
+            },
             permission.name()
         ));
         // A capability cannot be taken back: the process holding it goes.

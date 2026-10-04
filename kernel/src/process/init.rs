@@ -79,7 +79,7 @@ pub fn start(boot: &BootInfo, test_mode: bool) -> Option<Arc<Process>> {
     };
     copy.write(0, bytes).expect("sized for the archive");
 
-    let initial = vec![
+    let mut initial = vec![
         Capability::new(KernelObject::Log, default_rights(ObjectKind::Log)),
         // Read-only: init unpacks what it needs from it.
         Capability::new(KernelObject::Memory(copy), Rights::READ | Rights::MAP),
@@ -93,6 +93,13 @@ pub fn start(boot: &BootInfo, test_mode: bool) -> Option<Arc<Process>> {
             default_rights(ObjectKind::DeviceBus),
         ),
     ];
+    // Handle 5, when there is a screen: the display (ADR-0057).
+    if crate::display::info().is_some() {
+        initial.push(Capability::new(
+            KernelObject::Display,
+            default_rights(ObjectKind::Display),
+        ));
+    }
     match spawn("init", image, initial, u64::from(test_mode)) {
         Ok(process) => {
             klog::info!(

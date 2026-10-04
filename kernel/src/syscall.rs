@@ -75,6 +75,9 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::CONSOLE_WRITE => console_write(&process, a0, a1, a2),
         nr::CONSOLE_INPUT => console_input(&process, a0, a1, a2),
         nr::PROCESS_KILL => process_kill(&process, a0),
+        nr::DISPLAY_INFO => display_info(&process, a0, a1),
+        nr::DISPLAY_CLAIM => display_claim(&process, a0),
+        nr::DISPLAY_TEXT => display_text(&process, a0, a1, a2),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
         nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
@@ -612,6 +615,52 @@ fn process_wait(process: &Process, raw: u64) -> SyscallResult {
     // `None`: this process is being killed; the result is never seen.
     let code = child.wait_exit().unwrap_or(process::EXIT_KILLED);
     Ok((0, code as u64))
+}
+
+// ---- ABI 13: the display (ADR-0057) ----------------------------------------
+
+fn check_display(process: &Process, raw: u64, rights: Rights) -> Result<(), Error> {
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let capability = table.get(handle(raw), Rights::NONE).map_err(cap_error)?;
+        match capability.object() {
+            KernelObject::Display => capability.check(rights).map_err(cap_error),
+            _ => Err(Error::WrongType),
+        }
+    })
+}
+
+fn display_info(process: &Process, raw: u64, ptr: u64) -> SyscallResult {
+    check_display(process, raw, Rights::READ)?;
+    let info = crate::display::info().ok_or(Error::NotFound)?;
+    let mut bytes = [0u8; oceans_abi::display::Info::SIZE];
+    info.encode(&mut bytes);
+    process.copy_to_user(ptr, &bytes)?;
+    Ok((0, 0))
+}
+
+fn display_claim(process: &Process, raw: u64) -> SyscallResult {
+    check_display(process, raw, Rights::MANAGE)?;
+    let me = sched::current()
+        .process()
+        .cloned()
+        .ok_or(Error::InvalidArgument)?;
+    let memory = crate::display::claim(&me).ok_or(Error::Busy)?;
+    let size = memory.size();
+    let raw = insert(
+        process,
+        Capability::new(KernelObject::Memory(memory), DRIVER_MEMORY_RIGHTS),
+    )?;
+    Ok((raw, size))
+}
+
+fn display_text(process: &Process, raw: u64, ptr: u64, capacity: u64) -> SyscallResult {
+    check_display(process, raw, Rights::READ)?;
+    let capacity = len_arg(capacity, oceans_abi::display::MAX_TEXT)?;
+    let mut buffer = alloc::vec![0u8; capacity];
+    let len = crate::display::text(&mut buffer).ok_or(Error::NotFound)?;
+    process.copy_to_user(ptr, &buffer[..len])?;
+    Ok((len as u64, 0))
 }
 
 /// `PROCESS_KILL` (ADR-0044): ends `raw`'s process; needs `MANAGE`.

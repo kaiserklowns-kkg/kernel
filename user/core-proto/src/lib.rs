@@ -41,8 +41,9 @@ pub mod op {
     /// data = `[keep data u8][id]`: stops and uninstalls the app.
     pub const REMOVE: u64 = 7;
     /// data = `[permission u8][allow u8][source u8][id]`: records the
-    /// user's decision ([`super::source`]). Denying a permission a running
-    /// app holds stops it → `[stopped u8]`.
+    /// user's decision ([`super::source`]): `allow` 1 allows, 0 denies, 2
+    /// forgets (the next run asks again, ADR-0057). Denying or forgetting a
+    /// permission a running app holds stops it → `[stopped u8]`.
     pub const DECIDE: u64 = 8;
     /// data = id: goes back to the previous version → its version.
     pub const ROLLBACK: u64 = 9;
@@ -149,6 +150,16 @@ pub mod source {
     pub const PROMPT: u8 = 0;
     /// The user typed a command (`app grant`, `app revoke`).
     pub const COMMAND: u8 = 1;
+    /// The user answered a permission dialog of the desktop (ADR-0057).
+    pub const DIALOG: u8 = 2;
+}
+
+/// `DECIDE` values of `allow`.
+pub mod decision {
+    pub const DENY: u8 = 0;
+    pub const ALLOW: u8 = 1;
+    /// Forget the decision: ask again at the next run.
+    pub const FORGET: u8 = 2;
 }
 
 /// A permission's state for one app.

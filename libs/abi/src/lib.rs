@@ -23,7 +23,7 @@
 /// (39: wall time); 11 = ADR-0032 (40: console input; class selectors for
 /// `DEVICE_OPEN`). Versions only
 /// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 12;
+pub const ABI_VERSION: u64 = 13;
 
 /// System call numbers.
 pub mod nr {
@@ -203,6 +203,80 @@ pub mod nr {
     /// [`EXIT_KILLED`](super::EXIT_KILLED) before running user code again.
     /// Killing an exited process does nothing. Needs `MANAGE`.
     pub const PROCESS_KILL: u64 = 41;
+
+    // ABI 13 (ADR-0057)
+
+    /// `(display, ptr) -> ()` — writes the screen's
+    /// [`display::Info`](super::display::Info). Needs `READ`.
+    pub const DISPLAY_INFO: u64 = 42;
+    /// `(display) -> (memory, size)` — the framebuffer, as device memory;
+    /// the console stops drawing until the calling process is gone. `Busy`
+    /// if a live process holds it. Needs `MANAGE`.
+    pub const DISPLAY_CLAIM: u64 = 43;
+    /// `(display, ptr, capacity) -> len` — the console's text: a
+    /// [`display::TEXT_HEADER`](super::display::TEXT_HEADER)-byte header,
+    /// then the cells. Needs `READ`.
+    pub const DISPLAY_TEXT: u64 = 44;
+}
+
+/// The display (ADR-0057).
+pub mod display {
+    /// Bytes of the `DISPLAY_TEXT` header: columns, rows, cursor column,
+    /// cursor row (u16 each), generation (u64).
+    pub const TEXT_HEADER: usize = 16;
+    /// Largest `DISPLAY_TEXT` buffer.
+    pub const MAX_TEXT: usize = 64 * 1024;
+
+    /// The screen.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Info {
+        pub width: u32,
+        pub height: u32,
+        /// Bytes per line.
+        pub pitch: u32,
+        pub bpp: u32,
+        pub red_shift: u8,
+        pub green_shift: u8,
+        pub blue_shift: u8,
+        /// The console's text grid.
+        pub cols: u32,
+        pub rows: u32,
+    }
+
+    impl Info {
+        pub const SIZE: usize = 28;
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            for (i, value) in [self.width, self.height, self.pitch, self.bpp]
+                .into_iter()
+                .enumerate()
+            {
+                out[4 * i..4 * i + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            out[16] = self.red_shift;
+            out[17] = self.green_shift;
+            out[18] = self.blue_shift;
+            out[19] = 0;
+            out[20..24].copy_from_slice(&self.cols.to_le_bytes());
+            out[24..28].copy_from_slice(&self.rows.to_le_bytes());
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            let word = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+            Some(Self {
+                width: word(0),
+                height: word(4),
+                pitch: word(8),
+                bpp: word(12),
+                red_shift: bytes[16],
+                green_shift: bytes[17],
+                blue_shift: bytes[18],
+                cols: word(20),
+                rows: word(24),
+            })
+        }
+    }
 }
 
 /// The exit code of a process ended by `PROCESS_KILL` (ADR-0044). Exit

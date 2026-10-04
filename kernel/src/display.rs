@@ -12,16 +12,24 @@
 //!   cursor. Other sequences are consumed silently.
 //! - Scrolling moves a quarter of the screen at a time, so long output
 //!   costs a fraction of line-by-line scrolling on an uncached framebuffer.
+//! - **Handing the screen over** (ADR-0057): a display service claims the
+//!   framebuffer (`DISPLAY_CLAIM`); the console then stops drawing but keeps
+//!   its text, which the service can read (`DISPLAY_TEXT`) to show it in a
+//!   window. When the claiming process is gone, the console takes the screen
+//!   back and redraws itself, so a broken desktop never leaves a blank one.
 
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 use spin::Mutex;
 
-use crate::boot::BootInfo;
+use crate::boot::{BootInfo, Framebuffer};
 use crate::klog;
 use crate::memory::paging;
+use crate::object::MemoryObject;
+use crate::process::Process;
 
 const WEIGHT: FontWeight = FontWeight::Regular;
 const HEIGHT: RasterHeight = RasterHeight::Size16;
@@ -41,6 +49,14 @@ enum Escape {
 }
 
 struct Display {
+    framebuffer: Framebuffer,
+    /// Whether the console draws (false while a display service holds the
+    /// screen).
+    visible: bool,
+    claimer: Option<Weak<Process>>,
+    /// Bumped by every write: lets `DISPLAY_TEXT` readers skip unchanged
+    /// text.
+    generation: u64,
     base: usize,
     pitch: usize,
     shifts: (u32, u32, u32),
@@ -64,6 +80,9 @@ impl Display {
     }
 
     fn put(&self, x: usize, y: usize, value: u32) {
+        if !self.visible {
+            return;
+        }
         let at = self.base + y * self.pitch + x * 4;
         // SAFETY: `x < cols * cell_width <= width` and `y < rows * 16 <=
         // height`, so the 4 bytes lie inside the mapped framebuffer.
@@ -131,14 +150,17 @@ impl Display {
         let by = (self.rows / 4).max(1);
         let keep = self.rows - by;
         let row_bytes = CELL_HEIGHT * self.pitch;
-        // SAFETY: both ranges lie inside the mapped framebuffer (rows *
-        // CELL_HEIGHT lines of `pitch` bytes); `copy` handles the overlap.
-        unsafe {
-            core::ptr::copy(
-                (self.base + by * row_bytes) as *const u8,
-                self.base as *mut u8,
-                keep * row_bytes,
-            );
+        if self.visible {
+            // SAFETY: both ranges lie inside the mapped framebuffer (rows *
+            // CELL_HEIGHT lines of `pitch` bytes); `copy` handles the
+            // overlap.
+            unsafe {
+                core::ptr::copy(
+                    (self.base + by * row_bytes) as *const u8,
+                    self.base as *mut u8,
+                    keep * row_bytes,
+                );
+            }
         }
         self.cells.copy_within(by * self.cols.., 0);
         self.clear_rows(keep..self.rows);
@@ -246,6 +268,10 @@ pub fn init(boot: &BootInfo) {
         return;
     }
     let mut display = Display {
+        framebuffer: fb,
+        visible: true,
+        claimer: None,
+        generation: 0,
         base,
         pitch: fb.pitch as usize,
         shifts: (
@@ -277,6 +303,8 @@ pub fn init(boot: &BootInfo) {
 pub fn write(bytes: &[u8]) {
     let mut guard = DISPLAY.lock();
     if let Some(display) = guard.as_mut() {
+        display.take_back_if_abandoned();
+        display.generation += 1;
         display.cursor(false);
         for &byte in bytes {
             display.write_byte(byte);
@@ -294,4 +322,89 @@ pub fn try_write(bytes: &[u8]) {
             display.write_byte(byte);
         }
     }
+}
+
+impl Display {
+    /// The console draws again if the process holding the screen is gone.
+    fn take_back_if_abandoned(&mut self) {
+        let alive = self
+            .claimer
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|process| process.exit_status().is_none());
+        if self.visible || alive {
+            return;
+        }
+        self.claimer = None;
+        self.visible = true;
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                self.draw(col, row, self.cells[row * self.cols + col], false);
+            }
+        }
+        self.cursor(true);
+        self.generation += 1;
+    }
+}
+
+/// What `DISPLAY_INFO` reports (ADR-0057), if there is a usable screen.
+pub fn info() -> Option<oceans_abi::display::Info> {
+    let guard = DISPLAY.lock();
+    let display = guard.as_ref()?;
+    let fb = &display.framebuffer;
+    Some(oceans_abi::display::Info {
+        width: fb.width as u32,
+        height: fb.height as u32,
+        pitch: fb.pitch as u32,
+        bpp: u32::from(fb.bpp),
+        red_shift: fb.red_shift,
+        green_shift: fb.green_shift,
+        blue_shift: fb.blue_shift,
+        cols: display.cols as u32,
+        rows: display.rows as u32,
+    })
+}
+
+/// Hands the framebuffer to `process` (ADR-0057): the console stops
+/// drawing until that process is gone. `None` if there is no screen or a
+/// live process already holds it.
+pub fn claim(process: &Arc<Process>) -> Option<Arc<MemoryObject>> {
+    let mut guard = DISPLAY.lock();
+    let display = guard.as_mut()?;
+    display.take_back_if_abandoned();
+    if !display.visible {
+        return None;
+    }
+    let fb = &display.framebuffer;
+    let start = fb.physical - fb.physical % 4096;
+    let end = (fb.physical + fb.pitch * fb.height).next_multiple_of(4096);
+    let memory = MemoryObject::new_device(start, end - start, [0..0, 0..0]);
+    display.visible = false;
+    display.claimer = Some(Arc::downgrade(process));
+    Some(memory)
+}
+
+/// The console's text for a display service (`DISPLAY_TEXT`): a header
+/// (`oceans_abi::display::TEXT_HEADER` bytes: columns, rows, cursor column
+/// and row as u16, the generation as u64), then the cells, row by row.
+/// Returns the bytes written, or `None` without a screen.
+pub fn text(out: &mut [u8]) -> Option<usize> {
+    let mut guard = DISPLAY.lock();
+    let display = guard.as_mut()?;
+    display.take_back_if_abandoned();
+    let header = oceans_abi::display::TEXT_HEADER;
+    let mut head = [0u8; oceans_abi::display::TEXT_HEADER];
+    for (i, value) in [display.cols, display.rows, display.col, display.row]
+        .into_iter()
+        .enumerate()
+    {
+        head[2 * i..2 * i + 2].copy_from_slice(&(value as u16).to_le_bytes());
+    }
+    head[8..].copy_from_slice(&display.generation.to_le_bytes());
+    let len = (header + display.cells.len()).min(out.len());
+    out[..header.min(len)].copy_from_slice(&head[..header.min(len)]);
+    if len > header {
+        out[header..len].copy_from_slice(&display.cells[..len - header]);
+    }
+    Some(len)
 }

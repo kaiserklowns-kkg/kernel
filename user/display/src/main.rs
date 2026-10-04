@@ -1,0 +1,487 @@
+//! The Oceans display service (ADR-0057): the on-device desktop.
+//!
+//! It takes the screen over from the kernel console (`DISPLAY_CLAIM`),
+//! draws the desktop into a back buffer and presents only the pixels that
+//! changed:
+//! - the Oceans Bar: the clock and the system's state;
+//! - the launcher: the installed apps, from Oceans Core; a click starts one;
+//! - the Terminal: the console's text (`DISPLAY_TEXT`), where the shell
+//!   keeps working (the keyboard still types into it);
+//! - notifications;
+//! - **permission dialogs**: when an app needs a decision, the desktop
+//!   asks, in the system's words, and sends the answer to Core
+//!   (`source::DIALOG`). Permission UI is system-rendered, never a web view
+//!   (ADR-0056).
+//!
+//! The pointer comes from the input service (ADR-0042). If this service
+//! ends, the kernel console takes the screen back.
+//!
+//! Grants: `log`, `display`, `use = core` (the user's agent, like the
+//! shell), `use = input`, `sysinfo`.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+mod canvas;
+mod desktop;
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::Write;
+
+use oceans_core_proto::{
+    Core, CoreError, Decision, Status, decision, field, op, parts, run_flags, source,
+};
+use oceans_input_proto::{Kind, Subscription};
+use oceans_package::Permission;
+use oceans_rt::{Buffer, Directory, Handle, Start, prot};
+
+use canvas::Canvas;
+use desktop::{App, Desktop, Dialog, Hit, Terminal, Toast};
+
+oceans_rt::entry!(main);
+
+const EXIT_BAD_START: i64 = 2;
+const EXIT_NO_SCREEN: i64 = 3;
+
+/// Notification bits.
+const INPUT: u64 = 1 << 0;
+const TICK: u64 = 1 << 1;
+/// How often the clock, the console mirror and the app list are checked.
+const TICK_MS: u64 = 100;
+const APPS_EVERY_MS: u64 = 2000;
+const TOAST_MS: u64 = 4000;
+
+fn say(log: Handle, args: core::fmt::Arguments<'_>) {
+    let mut line = Buffer::<200>::new();
+    let _ = line.write_fmt(args);
+    let _ = oceans_rt::debug_write(log, line.as_str());
+}
+
+struct Service {
+    log: Handle,
+    display: Handle,
+    core: Option<Core>,
+    sysinfo: Option<Handle>,
+    desktop: Desktop,
+    /// Permissions still to ask about for the app being started.
+    pending: Vec<(u8, String)>,
+    /// Bytes of a `DISPLAY_TEXT` answer: the header and every cell.
+    text_capacity: usize,
+}
+
+fn main(start: Start) -> i64 {
+    let Some(directory) = Directory::from_start(&start) else {
+        return EXIT_BAD_START;
+    };
+    let (Some(log), Some(display)) = (
+        directory.find("log", "log"),
+        directory.find("display", "display"),
+    ) else {
+        return EXIT_BAD_START;
+    };
+    let info = match oceans_rt::display_info(display) {
+        Ok(info) if info.bpp == 32 && info.width >= 900 && info.height >= 420 => info,
+        Ok(info) => {
+            say(
+                log,
+                format_args!(
+                    "display: {}x{}x{} is not supported; staying with the console",
+                    info.width, info.height, info.bpp
+                ),
+            );
+            return EXIT_NO_SCREEN;
+        }
+        Err(error) => {
+            say(log, format_args!("display: no screen ({error:?})"));
+            return EXIT_NO_SCREEN;
+        }
+    };
+    let (memory, _) = match oceans_rt::display_claim(display) {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            say(
+                log,
+                format_args!("display: cannot take the screen over: {error:?}"),
+            );
+            return EXIT_NO_SCREEN;
+        }
+    };
+    let Ok(screen) = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE) else {
+        say(log, format_args!("display: cannot map the framebuffer"));
+        return EXIT_NO_SCREEN;
+    };
+    let _ = oceans_rt::close(memory);
+    let mut canvas = Canvas::new(
+        screen,
+        info.width,
+        info.height,
+        info.pitch,
+        (info.red_shift, info.green_shift, info.blue_shift),
+    );
+
+    let Ok(notification) = oceans_rt::notification_create() else {
+        return EXIT_BAD_START;
+    };
+    let subscription = directory
+        .find("use", "input")
+        .and_then(|input| Subscription::new(input, notification, INPUT).ok());
+    if subscription.is_none() {
+        say(
+            log,
+            format_args!("display: no pointer input; the desktop is view-only"),
+        );
+    }
+    let mut service = Service {
+        log,
+        display,
+        core: directory.find("use", "core").map(Core),
+        sysinfo: directory.find("sysinfo", "sysinfo"),
+        desktop: Desktop {
+            pointer: (canvas.width / 2, canvas.height / 2),
+            ..Desktop::default()
+        },
+        pending: Vec::new(),
+        text_capacity: 16 + info.cols as usize * info.rows as usize,
+    };
+    service.refresh_apps();
+    service.refresh_clock();
+    service.refresh_terminal();
+    service.desktop.draw(&mut canvas, oceans_rt::clock_ms());
+    canvas.present();
+    say(
+        log,
+        format_args!(
+            "display: {}x{} framebuffer taken over; desktop ready with {} apps",
+            info.width,
+            info.height,
+            service.desktop.apps.len()
+        ),
+    );
+
+    let mut last_apps = oceans_rt::clock_ms();
+    let _ = oceans_rt::timer_set(notification, TICK, TICK_MS);
+    loop {
+        let Ok(bits) = oceans_rt::notification_wait(notification) else {
+            return EXIT_BAD_START;
+        };
+        let mut dirty = false;
+        if bits & INPUT != 0
+            && let Some(subscription) = &subscription
+        {
+            while let Ok(batch) = subscription.read() {
+                if batch.is_empty() {
+                    break;
+                }
+                for event in batch.events() {
+                    dirty |= service.pointer(event.kind, &canvas);
+                }
+            }
+        }
+        if bits & TICK != 0 {
+            let _ = oceans_rt::timer_set(notification, TICK, TICK_MS);
+            let now = oceans_rt::clock_ms();
+            dirty |= service.refresh_clock();
+            dirty |= service.refresh_terminal();
+            if now.saturating_sub(last_apps) >= APPS_EVERY_MS {
+                last_apps = now;
+                dirty |= service.refresh_apps();
+            }
+            if service
+                .desktop
+                .toast
+                .as_ref()
+                .is_some_and(|t| t.until_ms <= now)
+            {
+                service.desktop.toast = None;
+                dirty = true;
+            }
+        }
+        if dirty {
+            service.desktop.draw(&mut canvas, oceans_rt::clock_ms());
+            canvas.present();
+        }
+    }
+}
+
+impl Service {
+    fn toast(&mut self, text: String, error: bool) {
+        self.desktop.toast = Some(Toast {
+            text,
+            error,
+            until_ms: oceans_rt::clock_ms() + TOAST_MS,
+        });
+    }
+
+    /// A pointer event; `true` if the screen must change.
+    fn pointer(&mut self, kind: Kind, canvas: &Canvas) -> bool {
+        let (w, h) = (canvas.width, canvas.height);
+        let (x, y) = self.desktop.pointer;
+        match kind {
+            Kind::Motion { dx, dy } => {
+                self.desktop.pointer = ((x + dx).clamp(0, w - 1), (y + dy).clamp(0, h - 1));
+            }
+            Kind::Absolute { x, y, x_max, y_max } if x_max > 0 && y_max > 0 => {
+                let scale = |v: u32, max: u32, size: i32| {
+                    (u64::from(v) * (size as u64 - 1) / u64::from(max)) as i32
+                };
+                self.desktop.pointer = (scale(x, x_max, w), scale(y, y_max, h));
+            }
+            Kind::Button {
+                button: 1,
+                pressed: true,
+            } => {
+                let (x, y) = self.desktop.pointer;
+                return self.click(x, y);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn click(&mut self, x: i32, y: i32) -> bool {
+        match self.desktop.hit(x, y) {
+            Hit::App(index) => {
+                let id = self.desktop.apps[index].id.clone();
+                self.launch(&id);
+                true
+            }
+            Hit::Allow => {
+                self.answer(true);
+                true
+            }
+            Hit::Deny => {
+                self.answer(false);
+                true
+            }
+            Hit::Nothing => false,
+        }
+    }
+
+    /// Starts an app in the background; asks first if it needs decisions.
+    fn launch(&mut self, id: &str) {
+        let Some(core) = self.core else {
+            return self.toast("This desktop cannot start apps".to_string(), true);
+        };
+        let mut data = Vec::with_capacity(2 + id.len());
+        data.push(run_flags::DETACH);
+        data.push(id.len() as u8);
+        data.extend_from_slice(id.as_bytes());
+        let mut reply = [0u8; 64];
+        match core.call(op::RUN, &data, &[], &mut reply) {
+            Ok(_) => {
+                say(self.log, format_args!("desktop: started {id}"));
+                let name = self.name_of(id);
+                self.toast(alloc::format!("Started {name}"), false);
+                self.refresh_apps();
+            }
+            Err((CoreError::Status(Status::NeedsConsent), _)) => self.ask(core, id),
+            Err((error, _)) => {
+                say(self.log, format_args!("desktop: {id}: {}", error.message()));
+                self.toast(
+                    alloc::format!("{}: {}", self.name_of(id), error.message()),
+                    true,
+                );
+            }
+        }
+    }
+
+    fn name_of(&self, id: &str) -> String {
+        self.desktop
+            .apps
+            .iter()
+            .find(|a| a.id == id)
+            .map_or_else(|| id.to_string(), |a| a.name.clone())
+    }
+
+    /// Queues the undecided permissions of `id` and shows the first.
+    fn ask(&mut self, core: Core, id: &str) {
+        self.pending.clear();
+        let mut reply = [0u8; 256];
+        for index in 0u8..16 {
+            let Ok(got) = core.about(op::PERMISSION, &[index], id, &mut reply) else {
+                break;
+            };
+            if got.len >= 2 && Decision::from_byte(reply[1]) == Some(Decision::Undecided) {
+                let reason = core::str::from_utf8(&reply[2..got.len])
+                    .unwrap_or("")
+                    .to_string();
+                self.pending.push((reply[0], reason));
+            }
+        }
+        self.pending.reverse();
+        self.next_question(core, id);
+    }
+
+    fn next_question(&mut self, core: Core, id: &str) {
+        let Some((permission, reason)) = self.pending.pop() else {
+            self.desktop.dialog = None;
+            // Every question answered: start it with what was allowed.
+            return self.launch(id);
+        };
+        let Some(&catalog) = Permission::ALL.get(usize::from(permission)) else {
+            return self.next_question(core, id);
+        };
+        let field = |which| {
+            let mut reply = [0u8; 128];
+            core.about(op::INFO, &[which], id, &mut reply)
+                .ok()
+                .map(|got| String::from(core::str::from_utf8(&reply[..got.len]).unwrap_or("?")))
+                .unwrap_or_default()
+        };
+        let app = alloc::format!(
+            "{} ({id} {}, from {})",
+            field(field::NAME),
+            field(field::VERSION),
+            field(field::PUBLISHER)
+        );
+        say(
+            self.log,
+            format_args!("desktop: permission dialog for {id}: {}", catalog.name()),
+        );
+        self.desktop.dialog = Some(Dialog {
+            id: id.to_string(),
+            app,
+            permission,
+            description: catalog.description(),
+            reason,
+        });
+    }
+
+    fn answer(&mut self, allow: bool) {
+        let (Some(core), Some(dialog)) = (self.core, self.desktop.dialog.take()) else {
+            return;
+        };
+        let name = Permission::ALL
+            .get(usize::from(dialog.permission))
+            .map_or("?", |p| p.name());
+        let request = [
+            dialog.permission,
+            if allow {
+                decision::ALLOW
+            } else {
+                decision::DENY
+            },
+            source::DIALOG,
+        ];
+        let mut reply = [0u8; 8];
+        match core.about(op::DECIDE, &request, &dialog.id, &mut reply) {
+            Ok(_) => say(
+                self.log,
+                format_args!(
+                    "desktop: {name} {} for {} in the dialog",
+                    if allow { "allowed" } else { "denied" },
+                    dialog.id
+                ),
+            ),
+            Err((error, _)) => {
+                self.pending.clear();
+                return self.toast(
+                    alloc::format!("Could not record the decision: {}", error.message()),
+                    true,
+                );
+            }
+        }
+        self.next_question(core, &dialog.id);
+    }
+
+    /// The app list; `true` if it changed.
+    fn refresh_apps(&mut self) -> bool {
+        let Some(core) = self.core else {
+            return false;
+        };
+        let mut apps = Vec::new();
+        let mut reply = [0u8; 256];
+        for index in 0u32..64 {
+            match core.call(op::LIST, &index.to_le_bytes(), &[], &mut reply) {
+                Ok(got) if got.len >= 1 => {
+                    let mut fields = parts(&reply[1..got.len]);
+                    let id = fields.next().unwrap_or("?").to_string();
+                    let version = fields.next().unwrap_or("?").to_string();
+                    let name = fields.next().unwrap_or("?").to_string();
+                    apps.push(App {
+                        id,
+                        name,
+                        version,
+                        running: reply[0] != 0,
+                    });
+                }
+                _ => break,
+            }
+        }
+        let changed = apps.len() != self.desktop.apps.len()
+            || apps
+                .iter()
+                .zip(&self.desktop.apps)
+                .any(|(a, b)| a.id != b.id || a.version != b.version || a.running != b.running);
+        if apps.len() != self.desktop.apps.len() {
+            say(
+                self.log,
+                format_args!("desktop: {} apps in the launcher", apps.len()),
+            );
+        }
+        if changed {
+            self.desktop.apps = apps;
+        }
+        changed
+    }
+
+    /// The clock and the status line; `true` if they changed.
+    fn refresh_clock(&mut self) -> bool {
+        let clock = match oceans_rt::unix_time_ms() {
+            Some(ms) => {
+                let minutes = ms / 60_000;
+                alloc::format!("{:02}:{:02} UTC", minutes / 60 % 24, minutes % 60)
+            }
+            None => String::from("--:--"),
+        };
+        let mut status = String::new();
+        if let Some(sysinfo) = self.sysinfo {
+            let mut record = [0u8; 32];
+            if let Ok(32) = oceans_rt::system_info(sysinfo, 1, &mut record) {
+                let word = |i: usize| u64::from_le_bytes(record[i..i + 8].try_into().unwrap());
+                let (total, free) = (word(8), word(16));
+                if let Some(percent) = (total.saturating_sub(free) * 100).checked_div(total) {
+                    let _ = write!(status, "Memory {percent}% used");
+                }
+            }
+        }
+        let changed = clock != self.desktop.clock || status != self.desktop.status;
+        self.desktop.clock = clock;
+        self.desktop.status = status;
+        changed
+    }
+
+    /// The console's text; `true` if it changed.
+    fn refresh_terminal(&mut self) -> bool {
+        let mut buffer = alloc::vec![0u8; self.text_capacity];
+        let Ok(len) = oceans_rt::display_text(self.display, &mut buffer) else {
+            return false;
+        };
+        if len < 16 {
+            return false;
+        }
+        let half = |i: usize| usize::from(u16::from_le_bytes([buffer[i], buffer[i + 1]]));
+        let generation = u64::from_le_bytes(buffer[8..16].try_into().unwrap());
+        if generation == self.desktop.terminal.generation && !self.desktop.terminal.cells.is_empty()
+        {
+            return false;
+        }
+        let (cols, rows) = (half(0), half(2));
+        let cells = buffer[16..len].to_vec();
+        if cells.len() < cols * rows {
+            return false;
+        }
+        self.desktop.terminal = Terminal {
+            cols,
+            rows,
+            col: half(4),
+            row: half(6),
+            generation,
+            cells,
+        };
+        true
+    }
+}
