@@ -83,7 +83,19 @@ const DEV_PUBLISHER: &str = "Oceans Examples";
 const UNTRUSTED_SEED: [u8; 32] = [0x55; 32];
 /// Go programs (ADR-0050), built for wasip1 and run by `gohost`: the
 /// package under `go/` and the module file name in the boot archive.
-const GO_PROGRAMS: &[(&str, &str)] = &[("./cmd/gohello", "gohello.wasm"), ("./cmd/ai", "ai.wasm")];
+const GO_PROGRAMS: &[(&str, &str)] = &[
+    ("./cmd/gohello", "gohello.wasm"),
+    ("./cmd/ai", "ai.wasm"),
+    ("./cmd/bridge", "bridge.wasm"),
+];
+/// The web experience (ADR-0058): a SvelteKit app in `ui/`, built by Bun
+/// into static files that the bridge embeds from `BRIDGE_WEB` (so the UI
+/// is built before the Go programs).
+const UI_DIR: &str = "ui";
+const BRIDGE_WEB: &str = "go/cmd/bridge/web";
+/// The port the bridge listens on in the guest, and the host port `run`
+/// forwards to it (`OCEANS_BRIDGE_PORT`, default the same).
+const BRIDGE_PORT: u16 = 8080;
 /// Go apps (ADR-0052): built the same way into `build/go`, but shipped as
 /// packages, not in the boot archive.
 const GO_APPS: &[(&str, &str)] = &[("./apps/greeter", "greeter.wasm")];
@@ -278,6 +290,15 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"ai ask what is in my notes?\r\n",
     b"y\r\n",
     b"ai activity\r\n",
+    // The web experience (ADR-0058): the bridge serves nothing but the
+    // login until the shell pairs it; the host then uses the System API
+    // with the code `ui pair` printed, and loses it with `ui unpair`.
+    b"ui status\r\n",
+    b"ui pair\r\n",
+    b"@bridge paired",
+    b"ui unpair\r\n",
+    b"@bridge unpaired",
+    b"ui unpair\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -421,7 +442,9 @@ const REBOOT_EXPECT: &[Expect] = &[
     // Its settings, in its own storage (ADR-0053), survived the reboot.
     Expect::Contains("ai: ready; 7 tools; model settings restored"),
     Expect::Line("  app.oceans.hello  1.0.0  Hello"),
-    Expect::Line("hello: run 8 (counted in my storage)"),
+    // Two of the runs were the web experience's (ADR-0058): one started
+    // from the browser, one by Oceans AI with the browser's approval.
+    Expect::Line("hello: run 10 (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
     Expect::Contains("core: started service app.oceans.heartbeat"),
     Expect::Contains("heartbeat: run 3, beating"),
@@ -547,6 +570,20 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("gohello: echo replied \"HELLO FROM GO\""),
     Expect::Contains("gohello: System API calls verified"),
     Expect::Contains("ai: ready; 7 tools; no model configured yet"),
+    // The web experience (ADR-0058).
+    Expect::Contains("bridge: serving the Oceans web experience on TCP port 8080 ("),
+    Expect::Line("ui: not paired; listening on port 8080"),
+    Expect::Contains("ui: paired. In a browser, open http://10.0.2.15:8080/"),
+    Expect::Contains("bridge: paired: a browser presenting the new code may"),
+    Expect::Contains("bridge: a pairing code was refused"),
+    Expect::Contains("bridge: started app.oceans.hello for the paired browser"),
+    Expect::Contains("bridge: stopped app.oceans.hello for the paired browser"),
+    Expect::Contains(
+        "bridge: AI action approved by the user in the paired browser: start the app Hello",
+    ),
+    Expect::Line("ui: unpaired; the browser's access is closed"),
+    Expect::Contains("bridge: unpaired: the browser's capability is closed"),
+    Expect::Line("ui: no browser is paired"),
     Expect::Contains("Oceans AI wants to: read the file notes.txt in your folder"),
     Expect::Contains("Oceans AI: Your notes say: remember the milk"),
     Expect::Contains("files_read {\"path\":\"notes.txt\"} approved by the user: remember the milk"),
@@ -731,7 +768,9 @@ environment:
   OCEANS_OVMF   path to the x86_64 UEFI firmware code image (OVMF/edk2)
   OCEANS_LIMINE directory containing BOOTX64.EFI (default: build/limine)
   OCEANS_QEMU_EXTRA extra QEMU arguments, e.g. \"-cpu max\"
-  OCEANS_NIC    the network card for `run`: virtio (default) or e1000e";
+  OCEANS_NIC    the network card for `run`: virtio (default) or e1000e
+  OCEANS_BUN    path to bun, which builds the web experience (ui/)
+  OCEANS_BRIDGE_PORT the host port `run` forwards to the web experience (8080)";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -834,6 +873,7 @@ fn check() -> Result {
     run_command(cargo().args(["test", "--workspace", "--exclude", KERNEL_PACKAGE]))?;
     run_command(user_cargo().args(["fmt", "--all", "--check"]))?;
     run_command(user_cargo().args(["clippy", "--release", "--", "-D", "warnings"]))?;
+    check_ui()?;
     check_go()
 }
 
@@ -941,6 +981,7 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     let manifest_bytes = fs::read(&manifest_path)
         .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
     files.push(("services.conf".to_string(), manifest_bytes));
+    build_ui()?;
     for (name, bytes) in build_go(GO_PROGRAMS)? {
         files.push((name, bytes));
     }
@@ -1040,13 +1081,15 @@ struct Images<'a> {
 }
 
 /// `forward`: host (UDP, TCP) ports forwarded to the guest's port 7;
-/// `monitor`: a host port for QEMU's monitor (to press USB keys); `nic`:
-/// the network card.
+/// `bridge`: a host port forwarded to the bridge's (ADR-0058); `monitor`:
+/// a host port for QEMU's monitor (to press USB keys); `nic`: the network
+/// card.
 fn qemu_command(
     headless: bool,
     nic: Nic,
     images: &Images<'_>,
     forward: Option<(u16, u16)>,
+    bridge: Option<u16>,
     monitor: Option<u16>,
 ) -> Result<Command> {
     let Images {
@@ -1097,11 +1140,17 @@ fn qemu_command(
     // userspace driver (ADR-0023, ADR-0041). Both address families are
     // named: naming only one turns the other off.
     .arg("-netdev")
-    .arg(match forward {
-        Some((udp, tcp)) => format!(
-            "user,id=net0,ipv4=on,ipv6=on,hostfwd=udp:127.0.0.1:{udp}-:7,hostfwd=tcp:127.0.0.1:{tcp}-:7"
-        ),
-        None => "user,id=net0,ipv4=on,ipv6=on".to_string(),
+    .arg({
+        let mut netdev = "user,id=net0,ipv4=on,ipv6=on".to_string();
+        if let Some((udp, tcp)) = forward {
+            netdev.push_str(&format!(
+                ",hostfwd=udp:127.0.0.1:{udp}-:7,hostfwd=tcp:127.0.0.1:{tcp}-:7"
+            ));
+        }
+        if let Some(port) = bridge {
+            netdev.push_str(&format!(",hostfwd=tcp:127.0.0.1:{port}-:{BRIDGE_PORT}"));
+        }
+        netdev
     })
     .arg("-device")
     .arg(nic.device())
@@ -1203,6 +1252,14 @@ fn run(profile: Profile) -> Result {
     prepare_disk(DISK_IMAGE, false)?;
     prepare_blank(NVME_IMAGE, NVME_SIZE, false)?;
     prepare_stick(STICK_IMAGE, false)?;
+    // The web experience (ADR-0058), from this machine's browser.
+    let bridge = match env::var("OCEANS_BRIDGE_PORT") {
+        Ok(port) => port
+            .parse::<u16>()
+            .map_err(|_| format!("OCEANS_BRIDGE_PORT={port}: expected a port number"))?,
+        Err(_) => BRIDGE_PORT,
+    };
+    println!("the web experience: http://127.0.0.1:{bridge}/ (type `ui pair` in the shell)");
     run_command(&mut qemu_command(
         false,
         Nic::from_env()?,
@@ -1213,6 +1270,7 @@ fn run(profile: Profile) -> Result {
             spare_stick: None,
         },
         None,
+        Some(bridge),
         None,
     )?)
 }
@@ -1409,6 +1467,92 @@ fn check_go() -> Result {
             .args(["vet", "./..."]),
     )?;
     run_command(go().args(["test", "./..."]))
+}
+
+/// Bun (`OCEANS_BUN`, default `bun`) in `ui/`.
+fn bun() -> Command {
+    let mut cmd = Command::new(env::var_os("OCEANS_BUN").unwrap_or_else(|| "bun".into()));
+    cmd.current_dir(root().join(UI_DIR));
+    cmd
+}
+
+/// Runs Bun, explaining a missing Bun: it is a build requirement.
+fn run_bun(args: &[&str]) -> Result {
+    run_command(bun().args(args)).map_err(|e| {
+        format!("{e} (Bun 1.3 or later is needed to build the web experience: https://bun.sh, or set OCEANS_BUN)")
+    })
+}
+
+/// Installs the pinned dependencies (bun.lock, never updated here).
+fn bun_install() -> Result {
+    run_bun(&["install", "--frozen-lockfile"])
+}
+
+/// Builds the web experience (ADR-0058) into `ui/build` and copies it to
+/// where the bridge embeds it: every file but the Brotli copies (the
+/// bridge serves gzip).
+fn build_ui() -> Result {
+    bun_install()?;
+    run_bun(&["run", "build"])?;
+    let web = root().join(BRIDGE_WEB);
+    if web.exists() {
+        for entry in
+            fs::read_dir(&web).map_err(|e| format!("cannot read {}: {e}", web.display()))?
+        {
+            let path = entry
+                .map_err(|e| format!("cannot read {}: {e}", web.display()))?
+                .path();
+            if path.file_name().is_some_and(|name| name == ".gitkeep") {
+                continue;
+            }
+            let removed = if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            removed.map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+        }
+    }
+    let (files, bytes) = copy_tree(&root().join(UI_DIR).join("build"), &web, &|path: &Path| {
+        path.extension().is_none_or(|ext| ext != "br")
+    })?;
+    println!(
+        "web experience built: {files} files, {} KiB, into {BRIDGE_WEB}",
+        bytes / 1024
+    );
+    Ok(())
+}
+
+/// Copies the files under `from` that `keep` accepts into `to`; returns
+/// how many and their size.
+fn copy_tree(from: &Path, to: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<(usize, u64)> {
+    fs::create_dir_all(to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+    let (mut files, mut bytes) = (0, 0);
+    for entry in fs::read_dir(from).map_err(|e| format!("cannot read {}: {e}", from.display()))? {
+        let path = entry
+            .map_err(|e| format!("cannot read {}: {e}", from.display()))?
+            .path();
+        let target = to.join(path.file_name().expect("a directory entry has a name"));
+        if path.is_dir() {
+            let (f, b) = copy_tree(&path, &target, keep)?;
+            files += f;
+            bytes += b;
+        } else if keep(&path) {
+            copy(&path, &target)?;
+            files += 1;
+            bytes += fs::metadata(&path).map_or(0, |m| m.len());
+        }
+    }
+    Ok((files, bytes))
+}
+
+/// The web experience's checks: licenses (MIT, Apache-2.0 and BSD only),
+/// unit tests (`bun test`) and types (`svelte-check`).
+fn check_ui() -> Result {
+    bun_install()?;
+    run_bun(&["run", "licenses"])?;
+    run_bun(&["run", "test"])?;
+    run_bun(&["run", "check"])
 }
 
 fn dev_seed() -> Result<[u8; 32]> {
@@ -1631,6 +1775,8 @@ enum Console {
 }
 
 const SHELL_PROMPT: &[u8] = b"oceans> ";
+/// What `ui pair` prints before the code (ADR-0058).
+const PAIRING_CODE: &str = "ui: pairing code: ";
 const CONSENT_PROMPT: &[u8] = b"Allow? [y/N] ";
 
 /// One headless boot: types `script` into the shell, one command per
@@ -1663,6 +1809,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             .into_bytes()
     };
     let monitor_port = free_tcp_port()?;
+    let bridge_port = free_tcp_port()?;
+    // The pairing code `ui pair` printed (ADR-0058), for `@bridge`.
+    let mut pairing_code: Option<String> = None;
     let mut child = qemu_command(
         true,
         nic,
@@ -1673,6 +1822,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             spare_stick: Some(SMOKE_FAT_IMAGE),
         },
         Some((udp_forward, tcp_forward)),
+        Some(bridge_port),
         Some(monitor_port),
     )?
     .stdin(Stdio::piped())
@@ -1727,6 +1877,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             Ok(Console::Line(line)) => {
                 println!("  | {line}");
                 online |= line.contains(ONLINE_BANNER);
+                if let Some((_, code)) = line.split_once(PAIRING_CODE) {
+                    pairing_code = Some(code.trim().to_string());
+                }
                 shell_ready |= line.contains(SHELL_READY);
                 for (settled, marker) in usb_settled.iter_mut().zip(USB_SETTLED) {
                     *settled |= line.contains(marker);
@@ -1767,10 +1920,24 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                     // `@monitor COMMAND`: given to QEMU's monitor. It prints
                     // no prompt, so the next command follows once the guest
                     // has had time to react.
+                    // `@bridge STEP`: the host checks the web experience
+                    // (ADR-0058) over HTTP, then the next command follows.
                     let mut command = *command;
-                    while let Some(line) = command.strip_prefix(b"@monitor ") {
-                        monitor_command(monitor_port, line)?;
-                        thread::sleep(MONITOR_SETTLE);
+                    loop {
+                        if let Some(line) = command.strip_prefix(b"@monitor ") {
+                            monitor_command(monitor_port, line)?;
+                            thread::sleep(MONITOR_SETTLE);
+                        } else if let Some(step) = command.strip_prefix(b"@bridge ") {
+                            if let Err(error) =
+                                check_bridge(step, bridge_port, pairing_code.as_deref())
+                            {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return Err(error);
+                            }
+                        } else {
+                            break;
+                        }
                         match commands.next() {
                             Some(next) => command = next,
                             None => break,
@@ -2422,4 +2589,278 @@ fn http_server(bind: &str) -> Result<u16> {
         }
     });
     Ok(port)
+}
+
+/// A response from the bridge, as the smoke test reads it.
+struct HttpReply {
+    status: u16,
+    /// Header lines, lower-cased names.
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl HttpReply {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// How long one request to the bridge may take (it runs interpreted Go).
+const BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// One HTTP/1.1 request to the guest's bridge through QEMU's forwarding:
+/// `headers` are extra lines (`Name: value`); a body is sent as JSON.
+fn bridge_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: Option<&str>,
+) -> Result<HttpReply> {
+    let started = Instant::now();
+    let fail = |e: std::io::Error| format!("{method} {path} to the bridge: {e}");
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(fail)?;
+    stream
+        .set_read_timeout(Some(BRIDGE_REQUEST_TIMEOUT))
+        .map_err(fail)?;
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    for header in headers {
+        request.push_str(header);
+        request.push_str("\r\n");
+    }
+    if let Some(body) = body {
+        request.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+    } else {
+        request.push_str("\r\n");
+    }
+    stream.write_all(request.as_bytes()).map_err(fail)?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(fail)?;
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| format!("{method} {path}: no complete response from the bridge"))?;
+    let head = String::from_utf8_lossy(&raw[..end]).into_owned();
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| format!("{method} {path}: malformed status line from the bridge"))?;
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    let reply = HttpReply {
+        status,
+        headers,
+        body: raw[end + 4..].to_vec(),
+    };
+    println!(
+        "  bridge: {method} {path} -> {status}, {} bytes in {} ms",
+        reply.body.len(),
+        started.elapsed().as_millis()
+    );
+    Ok(reply)
+}
+
+/// Requires `status` and each of `contains` in the body.
+fn expect_reply(reply: &HttpReply, what: &str, status: u16, contains: &[&str]) -> Result {
+    let text = reply.text();
+    if reply.status != status {
+        return Err(format!(
+            "bridge: {what}: status {} (wanted {status}): {text}",
+            reply.status
+        ));
+    }
+    if let Some(missing) = contains.iter().find(|part| !text.contains(*part)) {
+        return Err(format!("bridge: {what}: no `{missing}` in {text}"));
+    }
+    Ok(())
+}
+
+/// The host's checks of the web experience (ADR-0058), `@bridge STEP`:
+/// `paired` after `ui pair` (the page, refusals without the code, the
+/// System API with it, apps started and stopped, an AI action approved
+/// from the browser), `unpaired` after `ui unpair` (the code is dead).
+fn check_bridge(step: &[u8], port: u16, code: Option<&str>) -> Result {
+    let code = code.ok_or("bridge: `ui pair` printed no pairing code")?;
+    let bearer = format!("Authorization: Bearer {code}");
+    let auth = [bearer.as_str()];
+    let get = |path: &str, headers: &[&str]| bridge_request(port, "GET", path, headers, None);
+    let post = |path: &str, headers: &[&str], body: &str| {
+        bridge_request(port, "POST", path, headers, Some(body))
+    };
+    match step {
+        b"paired" => {
+            // The page, with its policy; the app's routes get it too.
+            let page = get("/", &[])?;
+            expect_reply(&page, "the page", 200, &["<title>Oceans</title>"])?;
+            let policy = page.header("content-security-policy").unwrap_or("");
+            if !policy.starts_with("default-src 'self'")
+                || !policy.contains("frame-ancestors 'none'")
+            {
+                return Err(format!("bridge: the page's policy is {policy:?}"));
+            }
+            expect_reply(
+                &get("/apps", &[])?,
+                "a route",
+                200,
+                &["<title>Oceans</title>"],
+            )?;
+            // The app's script, compressed as a browser asks for it.
+            let html = page.text();
+            let script = html
+                .split('"')
+                .find(|part| part.starts_with("/_app/immutable/") && part.ends_with(".js"))
+                .ok_or("bridge: the page names no script")?
+                .to_string();
+            let js = get(&script, &["Accept-Encoding: gzip"])?;
+            if js.status != 200 || js.header("content-encoding") != Some("gzip") {
+                return Err(format!("bridge: {script}: {} without gzip", js.status));
+            }
+            // Nothing without the code.
+            expect_reply(&get("/api/system", &[])?, "no code", 401, &["ui pair"])?;
+            let wrong = format!("Authorization: Bearer {}", "0".repeat(code.len()));
+            expect_reply(&get("/api/system", &[&wrong])?, "a wrong code", 401, &[])?;
+            let refused = post(
+                "/api/session",
+                &[],
+                r#"{"token":"00000000000000000000000000000000"}"#,
+            )?;
+            expect_reply(&refused, "a wrong login", 401, &[])?;
+            // The System API with it.
+            let system = get("/api/system", &auth)?;
+            expect_reply(
+                &system,
+                "system",
+                200,
+                &[
+                    "\"totalMiB\":",
+                    "\"freeMiB\":",
+                    "\"processes\":[",
+                    "\"name\":\"init\"",
+                ],
+            )?;
+            if system.header("access-control-allow-origin").is_some() {
+                return Err("bridge: an API answered with a CORS header".into());
+            }
+            expect_reply(
+                &get("/api/apps", &auth)?,
+                "apps",
+                200,
+                &["\"id\":\"app.oceans.hello\""],
+            )?;
+            expect_reply(
+                &get("/api/apps/app.oceans.hello/permissions", &auth)?,
+                "permissions",
+                200,
+                &["\"name\":\"console\""],
+            )?;
+            // Apps start and stop through the paired capability.
+            let hello = "/api/apps/app.oceans.hello";
+            let started = post(&format!("{hello}/start"), &auth, r#"{"args":"wait"}"#)?;
+            expect_reply(&started, "start", 200, &["running"])?;
+            let listed = get("/api/apps", &auth)?.text();
+            let running = listed
+                .split("\"id\":\"app.oceans.hello\"")
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .is_some_and(|fields| fields.contains("\"running\":true"));
+            if !running {
+                return Err(format!(
+                    "bridge: hello is not running after the start: {listed}"
+                ));
+            }
+            let stopped = post(&format!("{hello}/stop"), &auth, "{}")?;
+            expect_reply(&stopped, "stop", 200, &["stopped"])?;
+            let again = post(&format!("{hello}/stop"), &auth, "{}")?;
+            expect_reply(&again, "stop again", 409, &["not running"])?;
+            // Changes from another site's page are refused.
+            let foreign = [bearer.as_str(), "Origin: http://evil.example"];
+            let crossed = post(&format!("{hello}/start"), &foreign, "{}")?;
+            expect_reply(&crossed, "cross-origin", 403, &[])?;
+            // The login: an HttpOnly cookie that works like the code.
+            let login = post("/api/session", &[], &format!(r#"{{"token":"{code}"}}"#))?;
+            expect_reply(&login, "login", 204, &[])?;
+            let cookie = login
+                .header("set-cookie")
+                .filter(|c| c.contains("HttpOnly") && c.contains("SameSite=Strict"))
+                .and_then(|c| c.split(';').next())
+                .ok_or("bridge: the login set no HttpOnly cookie")?
+                .to_string();
+            let with_cookie = format!("Cookie: {cookie}");
+            expect_reply(&get("/api/audit", &[&with_cookie])?, "audit", 200, &["["])?;
+            // Oceans AI from the browser: a read-only answer, then an
+            // action the browser's user approves.
+            let answer = post(
+                "/api/ai/ask",
+                &auth,
+                r#"{"question":"how much memory is free?"}"#,
+            )?;
+            expect_reply(&answer, "ask", 200, &["\"state\":\"done\"", "Memory: "])?;
+            let asked = post(
+                "/api/ai/ask",
+                &auth,
+                r#"{"question":"start the hello app"}"#,
+            )?;
+            expect_reply(
+                &asked,
+                "ask to start",
+                200,
+                &[
+                    "\"state\":\"needs-approval\"",
+                    "start the app Hello (app.oceans.hello)",
+                ],
+            )?;
+            let session = asked
+                .text()
+                .split("\"session\":")
+                .nth(1)
+                .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|digits| digits.parse::<u32>().ok())
+                .ok_or("bridge: no session in the AI's answer")?;
+            let approved = post(
+                "/api/ai/continue",
+                &auth,
+                &format!(r#"{{"session":{session},"approve":true}}"#),
+            )?;
+            expect_reply(
+                &approved,
+                "approve",
+                200,
+                &["Done: started Hello (app.oceans.hello)"],
+            )?;
+            expect_reply(
+                &get("/api/ai/activity", &auth)?,
+                "activity",
+                200,
+                &["approved by the user"],
+            )?;
+            let cleanup = post(&format!("{hello}/stop"), &auth, "{}")?;
+            expect_reply(&cleanup, "stop after the AI", 200, &[])?;
+            Ok(())
+        }
+        b"unpaired" => {
+            expect_reply(&get("/api/system", &auth)?, "the revoked code", 401, &[])?;
+            let state = get("/api/session", &[])?;
+            expect_reply(&state, "the session", 200, &["\"paired\":false"])?;
+            Ok(())
+        }
+        other => Err(format!(
+            "unknown bridge step `{}`",
+            String::from_utf8_lossy(other)
+        )),
+    }
 }

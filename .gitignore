@@ -1,3 +1,7 @@
 /target
 /build
 /user/target
+# The web experience, built by Bun and copied here for the bridge to embed
+# (ADR-0058).
+/go/cmd/bridge/web/*
+!/go/cmd/bridge/web/.gitkeep
