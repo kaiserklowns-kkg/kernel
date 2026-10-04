@@ -99,7 +99,10 @@ const BRIDGE_WEB: &str = "go/cmd/bridge/web";
 const BRIDGE_PORT: u16 = 8080;
 /// Go apps (ADR-0052): built the same way into `build/go`, but shipped as
 /// packages, not in the boot archive.
-const GO_APPS: &[(&str, &str)] = &[("./apps/greeter", "greeter.wasm")];
+const GO_APPS: &[(&str, &str)] = &[
+    ("./apps/greeter", "greeter.wasm"),
+    ("./apps/tiles", "tiles.wasm"),
+];
 /// Signed example packages, built with every image (and served to the
 /// smoke test's guest over HTTP).
 const PACKAGES_DIR: &str = "build/packages";
@@ -114,6 +117,9 @@ const NOTES_PROGRAM: &str = "notes-app";
 const NOTES_MANIFEST: &str = include_str!("../../../user/apps/notes/manifest");
 /// The example Go app (go/apps/greeter, ADR-0052): a `wasm` program.
 const GREETER_PROGRAM: &str = "greeter.wasm";
+/// The example windowed Go app (ADR-0060).
+const TILES_PROGRAM: &str = "tiles.wasm";
+const TILES_MANIFEST: &str = include_str!("../../../go/apps/tiles/manifest");
 const GREETER_MANIFEST: &str = include_str!("../../../go/apps/greeter/manifest");
 /// A second stick, plugged in during the first smoke boot: FAT16 in an MBR
 /// partition, made by mkfs.fat and mtools (libs/fat/testdata, ADR-0036).
@@ -309,6 +315,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // the top left): Hello is the fourth app.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/tiles-1.0.0.opk /keep/tiles.opk\r\n",
+    b"app install /keep/tiles.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     b"@monitor screendump build/smoke-desktop.ppm",
@@ -339,6 +347,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor device_del deskmouse",
     b"app info app.oceans.hello\r\n",
     b"cat /apps/app.oceans.notes/data/notes.txt\r\n",
+    // A Go app's window (ADR-0060): Tiles, started in the background,
+    // shows its first colour; a key typed into it (it has the focus) moves
+    // it to the next. Its window is the second opened: 32 pixels further.
+    b"app start app.oceans.tiles\r\n",
+    b"@screen 509 236 2e7d6b Tiles' first colour",
+    b"@monitor sendkey x",
+    b"@screen 509 236 c75b39 Tiles' next colour, after a key",
+    b"app stop app.oceans.tiles\r\n",
     // The web experience (ADR-0058): the bridge serves nothing but the
     // login until the shell pairs it; the host then uses the System API
     // with the code `ui pair` printed, and loses it with `ui unpair`.
@@ -483,9 +499,9 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("kept on a usb stick"),
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
-    // Hello, Heartbeat, Greeter, Greeter Service (ADR-0052) and Notes
-    // (ADR-0059).
-    Expect::Contains("core: ready, 5 apps installed"),
+    // Hello, Heartbeat, Greeter, Greeter Service (ADR-0052), Notes
+    // (ADR-0059) and Tiles (ADR-0060).
+    Expect::Contains("core: ready, 6 apps installed"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
     Expect::Line("greeter: 3 arguments: \"after\" \"a\" \"reboot\""),
@@ -633,6 +649,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("display: windows for app.oceans.notes (Notes)"),
     Expect::Contains("core: app.oceans.notes exited with code 0"),
     Expect::Line("note"),
+    // A Go app's window (ADR-0060).
+    Expect::Contains("display: windows for app.oceans.tiles (Tiles)"),
+    Expect::Contains("core: audit: stopped app.oceans.tiles"),
     // The web experience (ADR-0058).
     Expect::Contains("bridge: serving the Oceans web experience on TCP port 8080 ("),
     Expect::Line("ui: not paired; listening on port 8080"),
@@ -1894,11 +1913,24 @@ fn build_packages(user: &Path, go_apps: &[(String, Vec<u8>)]) -> Result {
         )
         .map_err(|e| format!("cannot build a package: {e:?}"))
     };
+    let tiles = go_apps
+        .iter()
+        .find(|(name, _)| name == TILES_PROGRAM)
+        .ok_or("the tiles Go app was not built")?;
+    let tiles = oceans_package::build(
+        &[
+            ("manifest", TILES_MANIFEST.as_bytes()),
+            (TILES_PROGRAM, &tiles.1),
+        ],
+        &seed,
+    )
+    .map_err(|e| format!("cannot build a package: {e:?}"))?;
     let dir = root().join(PACKAGES_DIR);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (name, bytes) in [
         ("heartbeat-1.0.0.opk", heartbeat),
         ("notes-1.0.0.opk", notes),
+        ("tiles-1.0.0.opk", tiles),
         ("hello-1.0.0.opk", v1),
         ("hello-2.0.0.opk", sign(&v2, &seed)?),
         ("untrusted.opk", sign(HELLO_MANIFEST, &UNTRUSTED_SEED)?),
@@ -2292,6 +2324,12 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                         if let Some(line) = command.strip_prefix(b"@monitor ") {
                             monitor_command(monitor_port, line)?;
                             thread::sleep(MONITOR_SETTLE);
+                        } else if let Some(probe) = command.strip_prefix(b"@screen ") {
+                            if let Err(error) = expect_pixel(monitor_port, probe) {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return Err(error);
+                            }
                         } else if let Some(text) = command.strip_prefix(b"@keys ") {
                             // `@keys TEXT`: pressed on the USB keyboard for
                             // a window (ADR-0059); no prompt follows.
@@ -2805,6 +2843,52 @@ fn press_usb_keys(port: u16, text: &[u8]) -> Result {
         thread::sleep(Duration::from_millis(150));
     }
     Ok(())
+}
+
+/// `@screen X Y RRGGBB WHAT`: captures the screen until pixel `X`, `Y` has
+/// colour `RRGGBB` (an app may take a while to draw), or fails after a
+/// minute.
+fn expect_pixel(port: u16, probe: &[u8]) -> Result {
+    let probe = String::from_utf8_lossy(probe);
+    let mut words = probe.splitn(4, ' ');
+    let (Some(x), Some(y), Some(rgb), Some(what)) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return Err(format!("bad @screen step: {probe}"));
+    };
+    let (Ok(x), Ok(y), Ok(want)) = (
+        x.parse::<usize>(),
+        y.parse::<usize>(),
+        u32::from_str_radix(rgb, 16),
+    ) else {
+        return Err(format!("bad @screen step: {probe}"));
+    };
+    let path = root().join("build/smoke-probe.ppm");
+    let until = Instant::now() + Duration::from_secs(60);
+    let mut got = None;
+    while Instant::now() < until {
+        let _ = fs::remove_file(&path);
+        monitor_command(port, b"screendump build/smoke-probe.ppm")?;
+        thread::sleep(Duration::from_millis(400));
+        if let Ok(image) = read_ppm(&path)
+            && x < image.0
+            && y < image.1
+        {
+            let at = (y * image.0 + x) * 3;
+            let pixel = u32::from(image.2[at]) << 16
+                | u32::from(image.2[at + 1]) << 8
+                | u32::from(image.2[at + 2]);
+            if pixel == want {
+                println!("screen: {what} at {x},{y}");
+                return Ok(());
+            }
+            got = Some(pixel);
+        }
+    }
+    Err(format!(
+        "screen: no {what}: {x},{y} is {}, not {want:06x}",
+        got.map_or("unreadable".to_string(), |p| format!("{p:06x}"))
+    ))
 }
 
 /// Gives QEMU's (human) monitor one command line.

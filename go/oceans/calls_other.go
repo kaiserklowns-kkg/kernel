@@ -43,3 +43,5 @@ func ReadText(memory Handle) (string, error) { return "", ErrUnsupported }
 func MemorySize(memory Handle) (uint64, error) { return 0, ErrUnsupported }
 
 func MemoryRead(memory Handle, offset uint64, buf []byte) (int, error) { return 0, ErrUnsupported }
+
+func MemoryWrite(memory Handle, offset uint64, buf []byte) error { return ErrUnsupported }

@@ -282,3 +282,30 @@ fn queues_are_bounded() {
     }
     assert_eq!(m.take_events(APP, 1000).len(), MAX_QUEUED);
 }
+
+/// The same bytes as go/oceans/window's `TestWireFormatMatchesRust`.
+#[test]
+fn wire_format_is_fixed() {
+    let event = Event {
+        window: 7,
+        kind: kind::BUTTON,
+        key: 0,
+        button: 1,
+        pressed: true,
+        x: -3,
+        y: 300,
+    };
+    assert_eq!(
+        event.encode(),
+        [7, 0, 0, 0, 3, 0, 1, 1, 0xfd, 0xff, 0x2c, 0x01]
+    );
+    let (data, len) = OpenRequest {
+        bits: 1,
+        width: 480,
+        height: 240,
+        title: "Notes",
+    }
+    .encode()
+    .unwrap();
+    assert_eq!(&data[..len], b"\x01\0\0\0\0\0\0\0\xe0\x01\xf0\0Notes");
+}

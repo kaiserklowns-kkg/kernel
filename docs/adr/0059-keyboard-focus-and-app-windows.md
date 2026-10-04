@@ -124,7 +124,7 @@ Both have to keep the desktop trustworthy:
   - always through serial;
   - with the whole console back if the desktop stops.
 - **Not yet:**
-  - a Go binding for windows;
+  - a Go binding for windows (since done: ADR-0060);
   - resizing;
   - keys beyond bytes (arrows, function keys, key releases);
   - pointer capture outside a window.

@@ -173,3 +173,11 @@ func MemoryRead(memory Handle, offset uint64, buf []byte) (int, error) {
 	n, err := result(hostMemoryRead(uint64(memory), offset, ptr(buf), uint32(len(buf))))
 	return int(n), err
 }
+
+// MemoryWrite copies buf into memory object `memory` from `offset` (the
+// handle needs write and map rights): all of it, or nothing if it does not
+// fit (ADR-0060).
+func MemoryWrite(memory Handle, offset uint64, buf []byte) error {
+	_, err := result(hostMemoryWrite(uint64(memory), offset, ptr(buf), uint32(len(buf))))
+	return err
+}

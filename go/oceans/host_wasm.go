@@ -66,6 +66,9 @@ func hostMemorySize(memory uint64) int64
 //go:wasmimport oceans memory_read
 func hostMemoryRead(memory uint64, offset uint64, buf unsafe.Pointer, cap uint32) int64
 
+//go:wasmimport oceans memory_write
+func hostMemoryWrite(memory uint64, offset uint64, buf unsafe.Pointer, n uint32) int64
+
 func ptr(b []byte) unsafe.Pointer {
 	if len(b) == 0 {
 		return nil

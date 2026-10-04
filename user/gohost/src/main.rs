@@ -7,7 +7,8 @@
 //!   receive, reply, mint), notifications and timers, published text
 //!   (making it, and reading it: `read_text`, ADR-0052), system
 //!   information, and reading memory objects the process holds (a boot
-//!   module, or one handed over IPC; ADR-0054). Each checks every pointer
+//!   module, or one handed over IPC; ADR-0054) and writing them (a
+//!   window's pixels, ADR-0060). Each checks every pointer
 //!   range against the
 //!   module's memory and passes the call to the kernel for the process's
 //!   own capabilities. This is the binding `go/oceans` wraps.
@@ -553,6 +554,13 @@ fn define_oceans(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
             memory_read(&mut caller, Handle(memory), offset, buf, cap)
         },
     )?;
+    linker.func_wrap(
+        M,
+        "memory_write",
+        |caller: Caller<'_, Host>, memory: u64, offset: u64, buf: u32, len: u32| -> i64 {
+            memory_write(&caller, Handle(memory), offset, buf, len)
+        },
+    )?;
     Ok(())
 }
 
@@ -617,6 +625,45 @@ fn memory_read(
     let copied = write(caller, buf, bytes);
     let _ = oceans_rt::memory_unmap(base);
     if copied { len as i64 } else { BAD_ADDRESS }
+}
+
+/// Copies `len` bytes of the module's memory at `buf` into memory object
+/// `memory` from `offset` (needs `WRITE` and `MAP`: a window's pixels,
+/// ADR-0060). Returns the bytes written; all fit or nothing is.
+fn memory_write(caller: &Caller<'_, Host>, object: Handle, offset: u64, buf: u32, len: u32) -> i64 {
+    let size = match oceans_rt::memory_size(object) {
+        Ok(size) => size,
+        Err(error) => return code(error),
+    };
+    if offset
+        .checked_add(u64::from(len))
+        .is_none_or(|end| end > size)
+    {
+        return Error::InvalidArgument.code();
+    }
+    if len == 0 {
+        return 0;
+    }
+    // Straight from the module's memory: a frame is hundreds of KiB.
+    let Some(bytes) = memory(caller).and_then(|module| {
+        let start = buf as usize;
+        module
+            .data(caller)
+            .get(start..start.checked_add(len as usize)?)
+    }) else {
+        return BAD_ADDRESS;
+    };
+    let base = match oceans_rt::memory_map(object, 0, prot::READ | prot::WRITE) {
+        Ok(base) => base,
+        Err(error) => return code(error),
+    };
+    // SAFETY: the whole object (`size` bytes, `offset + len <= size`) is
+    // mapped writable at `base` until the unmap below.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(offset as usize), bytes.len());
+    }
+    let _ = oceans_rt::memory_unmap(base);
+    i64::from(len)
 }
 
 fn define_wasi(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {

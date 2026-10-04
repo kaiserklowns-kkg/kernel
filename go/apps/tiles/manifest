@@ -1,0 +1,15 @@
+# The example windowed Go app's package manifest (ADR-0060). `cargo xtask`
+# builds go/apps/tiles for wasip1 and packages it as `tiles.wasm`, signed
+# with the development key (tools/keys), into build/packages/. Oceans Core
+# runs it in the Go host (gohost).
+id = app.oceans.tiles
+name = Tiles
+version = 1.0.0
+publisher = Oceans Examples
+description = The example windowed Go app: a colour that changes with every key
+architecture = x86_64
+api = 1
+runtime = wasm
+entry = tiles.wasm
+permission = window
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/go/apps/tiles
