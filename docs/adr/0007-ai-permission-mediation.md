@@ -1,6 +1,6 @@
 # ADR-0007: AI agents as unprivileged, mediated principals
 
-- Status: Accepted — implemented by [ADR-0051](0051-ai-runtime.md) (tools with sensitivity classes, per-session delegated capabilities, approvals rendered from the tool, activity log); sensitive reads with scoped grants are still to come
+- Status: Accepted — implemented by [ADR-0051](0051-ai-runtime.md) (tools with sensitivity classes, per-session delegated capabilities, approvals rendered from the tool, activity log) and [ADR-0055](0055-sensitive-reads.md) (sensitive reads, scoped to a delegated folder)
 - Date: 2026-10-03
 
 ## Context

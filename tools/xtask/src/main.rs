@@ -255,6 +255,10 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"ai ask stop the hello app\r\n",
     b"n\r\n",
     b"app stop app.oceans.hello\r\n",
+    // A sensitive read (ADR-0055): only in the folder delegated, asked.
+    b"write /home/notes.txt remember the milk\r\n",
+    b"ai ask what is in my notes?\r\n",
+    b"y\r\n",
     b"ai activity\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
@@ -391,6 +395,8 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
     Expect::Contains("core: ready, 2 apps installed"),
+    // Its settings, in its own storage (ADR-0053), survived the reboot.
+    Expect::Contains("ai: ready; 7 tools; model settings restored"),
     Expect::Line("  app.oceans.hello  1.0.0  Hello"),
     Expect::Line("hello: run 8 (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
@@ -517,7 +523,10 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("gohello: goroutines computed 30"),
     Expect::Contains("gohello: echo replied \"HELLO FROM GO\""),
     Expect::Contains("gohello: System API calls verified"),
-    Expect::Contains("ai: ready; 5 tools; no model configured yet"),
+    Expect::Contains("ai: ready; 7 tools; no model configured yet"),
+    Expect::Contains("Oceans AI wants to: read the file notes.txt in your folder"),
+    Expect::Contains("Oceans AI: Your notes say: remember the milk"),
+    Expect::Contains("files_read {\"path\":\"notes.txt\"} approved by the user: remember the milk"),
     Expect::Contains("ai: model: no model is configured (ai model URL MODEL)"),
     Expect::Contains("ai: using oceans-test at http://10.0.2.2:"),
     Expect::Contains("Oceans AI: Memory: "),
@@ -1891,6 +1900,17 @@ fn check_smoke_disk() -> Result {
             return Err(format!("the audit log lacks `{event}`"));
         }
     }
+    // The AI service's settings, in the directory init granted it
+    // (ADR-0053).
+    let ai_dir = lookup(&volume, system, "ai")?;
+    let settings = lookup(&volume, ai_dir, "model.conf")?;
+    let mut text = vec![0u8; volume.size(settings).map_err(|e| format!("{e:?}"))? as usize];
+    volume
+        .read(settings, 0, &mut text)
+        .map_err(|e| format!("reading the AI settings: {e:?}"))?;
+    if !String::from_utf8_lossy(&text).contains(" oceans-test") {
+        return Err("the AI settings were not stored in /system/ai".into());
+    }
     // Copied from FAT (ADR-0039); moved away, or removed with `rm -r`.
     let mut node = keep;
     for name in ["docs-copy", "notes", "deep.txt"] {
@@ -2112,7 +2132,13 @@ fn fake_model(request: &str) -> String {
             "{{\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{{\"id\":\"call_{done}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":\"{arguments}\"}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}"
         )
     };
-    if user.contains("memory") {
+    if user.contains("notes") {
+        match done {
+            0 => call("files_read", r#"{"path":"notes.txt"}"#),
+            _ if last.contains("denied") => say("Understood: I did not read your notes."),
+            _ => say(&format!("Your notes say: {last}")),
+        }
+    } else if user.contains("memory") {
         match done {
             0 => call("system_memory", "{}"),
             _ => say(&format!("Memory: {last}")),

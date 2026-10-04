@@ -434,6 +434,7 @@ name = "init"
 version = "0.1.0"
 dependencies = [
  "oceans-archive",
+ "oceans-fs-proto",
  "oceans-rt",
 ]
 

@@ -59,5 +59,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0049](0049-app-services.md) | App services | Accepted |
 | [0050](0050-go-on-oceans.md) | Go on Oceans (WebAssembly in a Rust host) | Accepted |
 | [0051](0051-ai-runtime.md) | The AI runtime: agents, tools, approvals and the model gateway | Accepted |
+| [0053](0053-directory-grants.md) | Directory grants from init, and the AI's settings | Accepted |
+| [0055](0055-sensitive-reads.md) | Sensitive reads by AI agents | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

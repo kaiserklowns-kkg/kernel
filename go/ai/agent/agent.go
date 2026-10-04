@@ -27,6 +27,10 @@ const (
 	ReadOnly Sensitivity = iota
 	// Changes tools change the system; each call needs the user's approval.
 	Changes
+	// Reads tools read sensitive data (file contents, ADR-0055); like
+	// changes, each call needs the user's approval, and only what the
+	// requester delegated (a folder) can be read.
+	Reads
 )
 
 // Env is what a session may use: capabilities delegated by its requester.

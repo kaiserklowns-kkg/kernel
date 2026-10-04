@@ -79,10 +79,20 @@ impl Shell {
                 .ok()
                 .and_then(|got| got.handle)
         });
-        let handles: &[Handle] = match &delegated {
-            Some(handle) => core::slice::from_ref(handle),
-            None => &[],
-        };
+        // And the user's folder, read-only (ADR-0055): the agent may ask to
+        // read in it, nothing else. Sent after the Core capability only.
+        let files = delegated.and(
+            self.fs_root()
+                .and_then(|root| root.open("home", 0).ok())
+                .map(|(node, _)| node.0),
+        );
+        let mut sent = [Handle(0); 2];
+        let mut count = 0;
+        for handle in [delegated, files].into_iter().flatten() {
+            sent[count] = handle;
+            count += 1;
+        }
+        let handles = &sent[..count];
         let mut reply = [0u8; 256];
         let mut handles_back = [Handle(0); 1];
         let mut got = oceans_rt::ipc_call_msg(

@@ -23,8 +23,12 @@ import (
 	"github.com/kaiserklowns-kkg/kernel/go/ai/model"
 	"github.com/kaiserklowns-kkg/kernel/go/ai/tools"
 	"github.com/kaiserklowns-kkg/kernel/go/oceans"
+	"github.com/kaiserklowns-kkg/kernel/go/oceans/fs"
 	"github.com/kaiserklowns-kkg/kernel/go/oceans/tcp"
 )
+
+// The settings file in the service's storage (ADR-0053).
+const settingsFile = "model.conf"
 
 const systemPrompt = "You are Oceans AI, the assistant built into the Oceans operating system. " +
 	"Use the tools to look at the system or to act on it. The system asks the user before any " +
@@ -64,6 +68,9 @@ type service struct {
 	log     oceans.Handle
 	net     oceans.Handle
 	sysinfo oceans.Handle
+	// Its own directory (`grant = storage:/system/ai`), for settings; 0
+	// without one (settings then last until a restart).
+	storage oceans.Handle
 	runtime *agent.Runtime
 	// Delegated capabilities of open sessions, closed when they end.
 	delegated map[uint32][]oceans.Handle
@@ -87,13 +94,18 @@ func main() {
 	s.log, _ = oceans.Find("log", "log")
 	s.net, _ = oceans.Find("use", "net")
 	s.sysinfo, _ = oceans.Find("sysinfo", "sysinfo")
+	s.storage, _ = oceans.Find("use", "storage")
 	s.runtime = &agent.Runtime{
 		Model:  unconfigured{},
 		Tools:  tools.All(),
 		Prompt: systemPrompt,
 		Record: func(entry string) { s.say("activity: " + entry) },
 	}
-	s.say("ready; " + itoa(len(s.runtime.Tools)) + " tools; no model configured yet")
+	if s.loadSettings() {
+		s.say("ready; " + itoa(len(s.runtime.Tools)) + " tools; model settings restored")
+	} else {
+		s.say("ready; " + itoa(len(s.runtime.Tools)) + " tools; no model configured yet")
+	}
 	for {
 		msg, err := oceans.Receive(server)
 		if err == oceans.ErrPeerClosed {
@@ -129,15 +141,18 @@ func (s *service) handle(msg oceans.Message) (uint64, []byte, []oceans.Handle) {
 			return statusBadRequest, nil, nil
 		}
 		env := agent.Env{Capabilities: map[string]any{"sysinfo": s.sysinfo}}
-		// What the requester delegated: [core].
-		if len(msg.Handles) >= 1 {
-			env.Capabilities["core"] = msg.Handles[0]
+		// What the requester delegated: [core][files] (either may be 0:
+		// not given).
+		for i, name := range []string{"core", "files"} {
+			if i < len(msg.Handles) && msg.Handles[i] != 0 {
+				env.Capabilities[name] = msg.Handles[i]
+			}
 		}
-		for _, extra := range msg.Handles[min(len(msg.Handles), 1):] {
+		for _, extra := range msg.Handles[min(len(msg.Handles), 2):] {
 			_ = oceans.Close(extra)
 		}
 		session := s.runtime.Ask(prompt, env)
-		s.delegated[session.ID] = msg.Handles[:min(len(msg.Handles), 1)]
+		s.delegated[session.ID] = msg.Handles[:min(len(msg.Handles), 2)]
 		return s.reply(session)
 	case opContinue:
 		closeAll()
@@ -197,7 +212,31 @@ func (s *service) configure(text string) (uint64, []byte, []oceans.Handle) {
 		Model:     fields[1],
 	}
 	s.say("model " + fields[1] + " at " + fields[0])
+	if s.storage != 0 {
+		if err := fs.FromHandle(s.storage).WriteFile(settingsFile, []byte(fields[0]+" "+fields[1]+"\n")); err != nil {
+			s.say("cannot save the model settings: " + err.Error())
+			return statusDone, []byte("set, but not saved: " + err.Error()), nil
+		}
+	}
 	return statusDone, nil, nil
+}
+
+// loadSettings applies the saved model settings, if any.
+func (s *service) loadSettings() bool {
+	if s.storage == 0 {
+		return false
+	}
+	file, _, err := fs.FromHandle(s.storage).Open(settingsFile, 0)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	text, err := file.ReadAll(1024)
+	if err != nil {
+		return false
+	}
+	status, _, _ := s.configure(strings.TrimSpace(string(text)))
+	return status == statusDone
 }
 
 // reply reports a session's state; an ended session's capabilities are

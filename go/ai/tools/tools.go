@@ -17,7 +17,7 @@ import (
 
 // All returns the tools.
 func All() []agent.Tool {
-	return []agent.Tool{memory{}, processes{}, appsList{}, appsStart{}, appsStop{}}
+	return []agent.Tool{memory{}, processes{}, appsList{}, appsStart{}, appsStop{}, filesList{}, filesRead{}}
 }
 
 var noArguments = []byte(`{"type":"object","properties":{}}`)

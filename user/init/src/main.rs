@@ -36,6 +36,7 @@
 use core::fmt::Write;
 
 use oceans_archive::Archive;
+use oceans_fs_proto::{Kind, Node, flags};
 
 use oceans_rt::{Buffer, Error, Handle, Start, prot, rights};
 
@@ -94,6 +95,10 @@ enum Grant {
     /// so a grant stays small (init's tables live on its stack).
     Use(&'static str),
     Module(&'static str),
+    /// A directory of the filesystem (`storage:/PATH`, ADR-0053), created
+    /// if missing, opened writable and handed over as `use storage`: the
+    /// service's own files and nothing else.
+    Storage(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -346,6 +351,13 @@ fn parse(
                             && !module.is_empty()
                         {
                             Grant::Module(module)
+                        } else if let Some(path) = other.strip_prefix("storage:") {
+                            if !valid_storage_path(path) {
+                                return error(
+                                    "storage grants are storage:/DIR[/DIR...] (plain names)",
+                                );
+                            }
+                            Grant::Storage(path)
                         } else if let Some(id) = other.strip_prefix("device:") {
                             match parse_device_id(id) {
                                 Some((vendor, device)) => Grant::Device(vendor, device, id),
@@ -358,7 +370,7 @@ fn parse(
                             }
                         } else {
                             return error(
-                                "unknown grant (known: log, console, console-input, sysinfo, devices, device:VVVV:DDDD, device-class:CCSSPP, module:NAME)",
+                                "unknown grant (known: log, console, console-input, sysinfo, devices, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
                             );
                         }
                     }
@@ -535,6 +547,10 @@ impl Init {
                         let module = self.module(name).ok_or(Error::InvalidImage)?;
                         (oceans_rt::duplicate(module, MODULE_RIGHTS)?, "module", name)
                     }
+                    Grant::Storage(path) => {
+                        let fs = self.registry.get("fs").ok_or(Error::NotFound)?;
+                        (open_storage(fs, path)?, "use", "storage")
+                    }
                 };
                 handles[count] = handle;
                 let _ = writeln!(directory, "{count} {kind} {name}");
@@ -673,4 +689,37 @@ fn publish(text: &[u8]) -> Result<Handle, Error> {
     })();
     let _ = oceans_rt::close(memory);
     result
+}
+
+/// `storage:` paths: absolute, at least one component, each a plain name.
+fn valid_storage_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && path
+            .trim_start_matches('/')
+            .split('/')
+            .all(|part| oceans_fs_proto::valid_name(part.as_bytes()))
+}
+
+/// Opens (creating as needed) directory `path` through the filesystem
+/// endpoint `fs`, writable, and returns its handle (ADR-0053).
+fn open_storage(fs: Handle, path: &str) -> Result<Handle, Error> {
+    let mut parent: Option<Node> = None;
+    for part in path.trim_start_matches('/').split('/') {
+        let from = parent.as_ref().map_or(Node(fs), |node| Node(node.0));
+        let opened = from.open(part, flags::CREATE_DIRECTORY | flags::WRITE);
+        if let Some(node) = parent.take() {
+            node.close();
+        }
+        match opened {
+            Ok((node, Kind::Directory)) => parent = Some(node),
+            Ok((node, Kind::File)) => {
+                node.close();
+                return Err(Error::InvalidArgument);
+            }
+            Err(oceans_fs_proto::FsError::Ipc(error)) => return Err(error),
+            Err(_) => return Err(Error::NotFound),
+        }
+    }
+    parent.map(|node| node.0).ok_or(Error::InvalidArgument)
 }
