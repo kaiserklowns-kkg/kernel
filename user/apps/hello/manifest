@@ -1,0 +1,15 @@
+# The example app's package manifest (ADR-0046). `cargo xtask` packages
+# it with the `hello-app` program as `hello`, signed with the development
+# key (tools/keys), into build/packages/.
+id = app.oceans.hello
+name = Hello
+version = 1.0.0
+publisher = Oceans Examples
+description = The example app: greets you, counts its runs, says hello over the network
+architecture = x86_64
+api = 1
+entry = hello
+permission = console
+permission = storage
+permission = network: say hello to the server you name
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/hello

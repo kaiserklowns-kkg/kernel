@@ -52,5 +52,8 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0042](0042-usb-mice-and-pointer-input.md) | USB mice and pointer input | Accepted |
 | [0043](0043-ipv6.md) | IPv6 | Accepted |
 | [0044](0044-stopping-processes.md) | Stopping processes (ABI 12) | Accepted |
+| [0045](0045-oceans-runtime.md) | The Oceans Runtime: apps, Oceans Core and API level 1 | Accepted |
+| [0046](0046-packages.md) | Packages (.opk) and publisher signatures | Accepted |
+| [0047](0047-permissions-and-consent.md) | Permissions and consent | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

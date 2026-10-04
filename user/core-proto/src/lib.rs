@@ -1,0 +1,268 @@
+//! The Oceans Core protocol (ADR-0045), between the `core` service (apps,
+//! packages, permissions) and its clients: the shell today, the system UI
+//! later.
+//!
+//! One endpoint, `core`. Its unbadged client end is full authority over
+//! apps: installing, running, stopping and removing them, and deciding
+//! their permissions. It goes to the user's agent (the shell), never to an
+//! app. Requests are IPC calls; labels select the operation and replies
+//! carry a [`Status`] label. Apps are named by their id (`app.oceans.hello`).
+//!
+//! Permissions are numbered as `oceans_package::Permission::ALL` lists them
+//! (see [`permission_index`] in the service).
+
+#![no_std]
+
+use oceans_rt::{Error, Handle};
+
+/// Operations (request labels).
+pub mod op {
+    /// handles = `[package file]` (an fs node opened for reading) →
+    /// `[outcome u8]` + `ID\0VERSION\0PREVIOUS` ([`super::outcome`]).
+    /// A refused package: `Invalid` with the reason as data.
+    pub const INSTALL: u64 = 1;
+    /// data = `[index u32]` → `[running u8]` + `ID\0VERSION\0NAME`;
+    /// `NotFound` past the last app.
+    pub const LIST: u64 = 2;
+    /// data = `[field u8][id]` → the field as text ([`super::field`]).
+    pub const INFO: u64 = 3;
+    /// data = `[index u8][id]` → `[permission u8][decision u8][reason]`
+    /// for the app's `index`th request; `NotFound` past the last.
+    pub const PERMISSION: u64 = 4;
+    /// data = `[flags u8][id length u8][id][arguments]`, handles = `[out]`
+    /// (the console the app may write to, if it asks for `console`).
+    /// → handles = `[process]` (`WAIT` only) unless detached.
+    /// `NeedsConsent` while a requested permission is undecided.
+    pub const RUN: u64 = 5;
+    /// data = id: kills the running app.
+    pub const STOP: u64 = 6;
+    /// data = `[keep data u8][id]`: stops and uninstalls the app.
+    pub const REMOVE: u64 = 7;
+    /// data = `[permission u8][allow u8][source u8][id]`: records the
+    /// user's decision ([`super::source`]). Denying a permission a running
+    /// app holds stops it → `[stopped u8]`.
+    pub const DECIDE: u64 = 8;
+    /// data = id: goes back to the previous version → its version.
+    pub const ROLLBACK: u64 = 9;
+    /// data = `[index u32]` → an audit entry, newest first; `NotFound`
+    /// past the oldest kept.
+    pub const AUDIT: u64 = 10;
+}
+
+/// `RUN` flags.
+pub mod run_flags {
+    /// Run in the background: no process handle comes back.
+    pub const DETACH: u8 = 1 << 0;
+}
+
+/// `INSTALL` outcomes.
+pub mod outcome {
+    pub const INSTALLED: u8 = 0;
+    pub const UPDATED: u8 = 1;
+}
+
+/// `INFO` fields.
+pub mod field {
+    pub const NAME: u8 = 0;
+    pub const VERSION: u8 = 1;
+    pub const PUBLISHER: u8 = 2;
+    pub const DESCRIPTION: u8 = 3;
+    pub const CHANNEL: u8 = 4;
+    /// The signing key's fingerprint (first 8 bytes, hex).
+    pub const KEY: u8 = 5;
+    /// `running` or `installed`.
+    pub const STATE: u8 = 6;
+    /// The version a rollback returns to, or empty.
+    pub const PREVIOUS: u8 = 7;
+    pub const SOURCE: u8 = 8;
+}
+
+/// Who made a `DECIDE` decision (kept in the audit log).
+pub mod source {
+    /// The user answered a consent prompt.
+    pub const PROMPT: u8 = 0;
+    /// The user typed a command (`app grant`, `app revoke`).
+    pub const COMMAND: u8 = 1;
+}
+
+/// A permission's state for one app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Decision {
+    /// Granted without asking (low-risk, ADR-0047).
+    Automatic = 0,
+    Allowed = 1,
+    Denied = 2,
+    /// Not asked yet: the next run asks.
+    Undecided = 3,
+}
+
+impl Decision {
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Automatic),
+            1 => Some(Self::Allowed),
+            2 => Some(Self::Denied),
+            3 => Some(Self::Undecided),
+            _ => None,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Allowed => "allowed",
+            Self::Denied => "denied",
+            Self::Undecided => "not decided",
+        }
+    }
+}
+
+/// Reply status (reply label).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum Status {
+    Ok = 0,
+    /// No such app (or entry).
+    NotFound = 1,
+    BadRequest = 2,
+    /// The package was refused; the reply data says why.
+    Invalid = 3,
+    /// A requested permission is undecided: ask the user, `DECIDE`, retry.
+    NeedsConsent = 4,
+    NotRunning = 5,
+    /// An update that is not newer than what is installed.
+    NotNewer = 6,
+    /// An update signed with another key than the installed version.
+    KeyChanged = 7,
+    /// No previous version to roll back to.
+    NoRollback = 8,
+    /// The app is already running (one instance at a time).
+    AlreadyRunning = 9,
+    /// Storage failed.
+    IoError = 10,
+    /// The app cannot be started (bad program, out of memory).
+    CannotStart = 11,
+}
+
+impl Status {
+    pub fn from_label(label: u64) -> Self {
+        match label {
+            0 => Self::Ok,
+            1 => Self::NotFound,
+            3 => Self::Invalid,
+            4 => Self::NeedsConsent,
+            5 => Self::NotRunning,
+            6 => Self::NotNewer,
+            7 => Self::KeyChanged,
+            8 => Self::NoRollback,
+            9 => Self::AlreadyRunning,
+            10 => Self::IoError,
+            11 => Self::CannotStart,
+            _ => Self::BadRequest,
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::NotFound => "not installed",
+            Self::BadRequest => "bad request",
+            Self::Invalid => "package refused",
+            Self::NeedsConsent => "needs your permission",
+            Self::NotRunning => "not running",
+            Self::NotNewer => "not newer than the installed version",
+            Self::KeyChanged => "signed with a different key than the installed version",
+            Self::NoRollback => "no previous version to roll back to",
+            Self::AlreadyRunning => "already running",
+            Self::IoError => "storage failed",
+            Self::CannotStart => "cannot be started",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreError {
+    Status(Status),
+    Ipc(Error),
+}
+
+impl CoreError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Status(status) => status.message(),
+            Self::Ipc(Error::PeerClosed) => "the app service is unavailable",
+            Self::Ipc(_) => "the request failed",
+        }
+    }
+}
+
+/// Largest request or reply data.
+pub const MAX_DATA: usize = 248;
+/// Longest app id.
+pub const MAX_ID: usize = 64;
+
+/// A reply: its data length and the handle it carried, if any. `Invalid`
+/// replies come back as `Err` with their data (the reason) still written.
+pub struct Reply {
+    pub len: usize,
+    pub handle: Option<Handle>,
+}
+
+/// The `core` endpoint.
+#[derive(Clone, Copy, Debug)]
+pub struct Core(pub Handle);
+
+impl Core {
+    /// One request. On error the reply data (e.g. why a package was
+    /// refused) is still in `reply`, `len` bytes of it.
+    pub fn call(
+        &self,
+        op: u64,
+        data: &[u8],
+        handles: &[Handle],
+        reply: &mut [u8],
+    ) -> Result<Reply, (CoreError, usize)> {
+        let mut received = [Handle(0); 1];
+        let got = oceans_rt::ipc_call_msg(self.0, op, data, handles, reply, &mut received)
+            .map_err(|error| (CoreError::Ipc(error), 0))?;
+        let handle = (got.handles_len == 1).then_some(received[0]);
+        match Status::from_label(got.label) {
+            Status::Ok => Ok(Reply {
+                len: got.data_len,
+                handle,
+            }),
+            status => {
+                if let Some(handle) = handle {
+                    let _ = oceans_rt::close(handle);
+                }
+                Err((CoreError::Status(status), got.data_len))
+            }
+        }
+    }
+
+    /// A request about one app: `prefix` bytes, then its id.
+    pub fn about(
+        &self,
+        op: u64,
+        prefix: &[u8],
+        id: &str,
+        reply: &mut [u8],
+    ) -> Result<Reply, (CoreError, usize)> {
+        let mut data = [0u8; MAX_DATA];
+        let len = prefix.len() + id.len();
+        if id.is_empty() || id.len() > MAX_ID || len > MAX_DATA {
+            return Err((CoreError::Status(Status::BadRequest), 0));
+        }
+        data[..prefix.len()].copy_from_slice(prefix);
+        data[prefix.len()..len].copy_from_slice(id.as_bytes());
+        self.call(op, &data[..len], &[], reply)
+    }
+}
+
+/// Splits `\0`-separated reply text into its parts.
+pub fn parts(bytes: &[u8]) -> impl Iterator<Item = &str> {
+    bytes
+        .split(|&b| b == 0)
+        .map(|part| core::str::from_utf8(part).unwrap_or("?"))
+}

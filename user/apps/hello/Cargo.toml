@@ -1,0 +1,17 @@
+[package]
+name = "hello-app"
+description = "Hello: the example Oceans app, packaged (.opk) and run by Oceans Core (ADR-0045)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hello-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-fs-proto.workspace = true
+oceans-net-proto.workspace = true

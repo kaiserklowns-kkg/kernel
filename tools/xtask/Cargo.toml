@@ -6,10 +6,12 @@ edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-# No external dependencies: the build tool must work on a fresh checkout.
-# The volume crate is in-tree; the smoke test mounts the guest's disk with it.
+# In-tree crates only (the volume crate mounts the guest's disk in the
+# smoke test); oceans-package brings the RustCrypto Ed25519 and SHA-2
+# crates the TLS stack already uses, to sign example packages.
 [dependencies]
 oceans-archive.workspace = true
+oceans-package = { workspace = true, features = ["build"] }
 oceans-dns.workspace = true
 oceans-fat.workspace = true
 oceans-volume.workspace = true

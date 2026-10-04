@@ -1,0 +1,309 @@
+extern crate std;
+
+use std::string::String;
+use std::vec::Vec;
+
+use super::*;
+
+const SEED: [u8; 32] = [7; 32];
+const OTHER_SEED: [u8; 32] = [9; 32];
+
+const MANIFEST_TEXT: &str = "\
+# An example app.
+id = app.oceans.hello
+name = Hello
+version = 1.2.3
+publisher = Oceans Examples
+description = Says hello and counts its runs
+architecture = x86_64
+api = 1
+entry = hello
+permission = storage
+permission = network: fetch today's greeting
+source = https://example.org/hello
+";
+
+fn trust(seed: &[u8; 32], publisher: &str) -> String {
+    std::format!("# trusted\n{} {publisher}\n", public_key_hex(seed))
+}
+
+fn package(manifest: &str, seed: &[u8; 32]) -> Vec<u8> {
+    build(
+        &[
+            ("manifest", manifest.as_bytes()),
+            ("hello", b"\x7fELF program"),
+        ],
+        seed,
+    )
+    .unwrap()
+}
+
+#[test]
+fn manifests_parse() {
+    let manifest = Manifest::parse(MANIFEST_TEXT).unwrap();
+    assert_eq!(manifest.id, "app.oceans.hello");
+    assert_eq!(manifest.name, "Hello");
+    assert_eq!(
+        manifest.version,
+        Version {
+            major: 1,
+            minor: 2,
+            patch: 3
+        }
+    );
+    assert_eq!(manifest.publisher, "Oceans Examples");
+    assert_eq!(
+        (manifest.api, manifest.entry, manifest.channel),
+        (1, "hello", "stable")
+    );
+    assert_eq!(manifest.source, Some("https://example.org/hello"));
+    let requests: Vec<_> = manifest.requests().collect();
+    assert_eq!(
+        requests,
+        [
+            Request {
+                permission: Permission::Storage,
+                reason: ""
+            },
+            Request {
+                permission: Permission::Network,
+                reason: "fetch today's greeting"
+            },
+        ]
+    );
+    assert!(manifest.asks_for(Permission::Network));
+    assert!(!manifest.asks_for(Permission::Files));
+}
+
+#[test]
+fn bad_manifests_are_refused() {
+    let replace = |from: &str, to: &str| MANIFEST_TEXT.replace(from, to);
+    let cases = [
+        (
+            replace("id = app.oceans.hello", "id = Hello"),
+            ManifestError::BadId,
+        ),
+        (
+            replace("id = app.oceans.hello", "id = app..hello"),
+            ManifestError::BadId,
+        ),
+        (
+            replace("id = app.oceans.hello", "id = app.oceans/x"),
+            ManifestError::BadId,
+        ),
+        (
+            replace("version = 1.2.3", "version = 1.2"),
+            ManifestError::BadVersion,
+        ),
+        (
+            replace("version = 1.2.3", "version = 01.2.3"),
+            ManifestError::BadVersion,
+        ),
+        (
+            replace("version = 1.2.3", "version = 1.2.3-beta"),
+            ManifestError::BadVersion,
+        ),
+        (replace("api = 1", "api = one"), ManifestError::BadApi),
+        (
+            replace("permission = storage", "permission = camera"),
+            ManifestError::UnknownPermission(10),
+        ),
+        (
+            replace("permission = storage", "permission = network"),
+            ManifestError::DuplicatePermission(11),
+        ),
+        (
+            replace("name = Hello", "nmae = Hello"),
+            ManifestError::UnknownKey(3),
+        ),
+        (
+            replace("name = Hello", "name = Hello\nname = Again"),
+            ManifestError::DuplicateKey(4),
+        ),
+        (
+            replace("name = Hello", "just words"),
+            ManifestError::Syntax(3),
+        ),
+        (
+            replace("entry = hello\n", ""),
+            ManifestError::Missing("the manifest has no entry"),
+        ),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(Manifest::parse(&text), Err(expected), "{text}");
+    }
+    for (from, to) in [
+        ("entry = hello", "entry = ../hello"),
+        ("entry = hello", "entry = signature"),
+        ("architecture = x86_64", "architecture = X86 64"),
+        ("name = Hello", "name = Hello\u{7}"),
+        ("source = https://example.org/hello", "source = not a url"),
+    ] {
+        assert!(
+            matches!(
+                Manifest::parse(&replace(from, to)),
+                Err(ManifestError::BadText(_))
+            ),
+            "{to}"
+        );
+    }
+    let many: String = (0..17)
+        .map(|i| std::format!("permission = x{i}\n"))
+        .collect();
+    assert!(Manifest::parse(&many).is_err());
+}
+
+#[test]
+fn versions_order() {
+    let v = |text| Version::parse(text).unwrap();
+    assert!(v("1.10.0") > v("1.9.9"));
+    assert!(v("2.0.0") > v("1.99.99"));
+    assert_eq!(std::format!("{}", v("0.1.0")), "0.1.0");
+    assert_eq!(Version::parse("1.2.3.4"), None);
+    assert_eq!(Version::parse("-1.2.3"), None);
+}
+
+#[test]
+fn ids() {
+    assert!(valid_id("app.oceans.hello"));
+    assert!(valid_id("com.example.my-app2"));
+    assert!(!valid_id("hello"));
+    assert!(!valid_id("app.Oceans.hello"));
+    assert!(!valid_id("app.1oceans"));
+    assert!(!valid_id("app.oceans."));
+    assert!(!valid_id(&"a.".repeat(40)));
+}
+
+#[test]
+fn trust_lists_parse() {
+    let text = std::format!(
+        "{}\nnot-hex Someone\n{} \n",
+        trust(&SEED, "Oceans Examples"),
+        public_key_hex(&OTHER_SEED)
+    );
+    let keys: Vec<_> = trusted_keys(&text).collect();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].publisher, "Oceans Examples");
+    assert_eq!(trust_errors(&text), 2);
+}
+
+#[test]
+fn signed_packages_open() {
+    let bytes = package(MANIFEST_TEXT, &SEED);
+    let trust = trust(&SEED, "Oceans Examples");
+    let keys: Vec<_> = trusted_keys(&trust).collect();
+    let opened = Package::open(&bytes, &keys).unwrap();
+    assert_eq!(opened.manifest.id, "app.oceans.hello");
+    assert_eq!(opened.entry(), b"\x7fELF program");
+    assert_eq!(std::format!("{}", public_key_hex(&SEED)), {
+        let mut hex = String::new();
+        for b in opened.key {
+            hex.push_str(&std::format!("{b:02x}"));
+        }
+        hex
+    });
+}
+
+#[test]
+fn tampering_and_trust_are_checked() {
+    let trust_text = trust(&SEED, "Oceans Examples");
+    let keys: Vec<_> = trusted_keys(&trust_text).collect();
+    let good = package(MANIFEST_TEXT, &SEED);
+
+    // Any changed byte of a file breaks the archive checksum or the
+    // signature; rebuilding the archive around changed contents with the
+    // old signature breaks the signature.
+    let archive = oceans_archive::Archive::parse(&good).unwrap();
+    let signature = archive.find(SIGNATURE).unwrap().to_vec();
+    let forged_files: [(&str, &[u8]); 3] = [
+        ("manifest", MANIFEST_TEXT.as_bytes()),
+        ("hello", b"\x7fELF evil!!"),
+        (SIGNATURE, &signature),
+    ];
+    let mut forged = std::vec![0u8; oceans_archive::archive_len(&forged_files)];
+    oceans_archive::write(&forged_files, &mut forged).unwrap();
+    assert_eq!(
+        Package::open(&forged, &keys).err(),
+        Some(PackageError::BadSignature)
+    );
+
+    let mut flipped = good.clone();
+    let last = flipped.len() - 20;
+    flipped[last] ^= 1;
+    assert!(Package::open(&flipped, &keys).is_err());
+
+    // Unsigned, signed by a stranger, or by a key of another publisher.
+    let unsigned_files: [(&str, &[u8]); 2] =
+        [("manifest", MANIFEST_TEXT.as_bytes()), ("hello", b"x")];
+    let mut unsigned = std::vec![0u8; oceans_archive::archive_len(&unsigned_files)];
+    oceans_archive::write(&unsigned_files, &mut unsigned).unwrap();
+    assert_eq!(
+        Package::open(&unsigned, &keys).err(),
+        Some(PackageError::Unsigned)
+    );
+    let stranger = package(MANIFEST_TEXT, &OTHER_SEED);
+    assert_eq!(
+        Package::open(&stranger, &keys).err(),
+        Some(PackageError::UntrustedKey)
+    );
+    let other_trust = std::format!("{trust_text}{} Someone Else\n", public_key_hex(&OTHER_SEED));
+    let both: Vec<_> = trusted_keys(&other_trust).collect();
+    assert_eq!(
+        Package::open(&stranger, &both).err(),
+        Some(PackageError::WrongPublisher)
+    );
+
+    // Valid signature, but unusable contents.
+    let cases = [
+        (
+            MANIFEST_TEXT.replace("architecture = x86_64", "architecture = aarch64"),
+            PackageError::WrongArchitecture,
+        ),
+        (
+            MANIFEST_TEXT.replace("api = 1", "api = 2"),
+            PackageError::ApiTooNew,
+        ),
+        (
+            MANIFEST_TEXT.replace("entry = hello", "entry = missing"),
+            PackageError::NoEntry,
+        ),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(
+            Package::open(&package(&text, &SEED), &keys).err(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn the_digest_depends_on_names_sizes_and_contents() {
+    let base = digest([("a", &b"xy"[..]), ("b", &b"z"[..])].into_iter());
+    assert_ne!(
+        base,
+        digest([("a", &b"x"[..]), ("b", &b"yz"[..])].into_iter())
+    );
+    assert_ne!(
+        base,
+        digest([("b", &b"xy"[..]), ("a", &b"z"[..])].into_iter())
+    );
+    assert_ne!(
+        base,
+        digest([("a", &b"xy"[..]), ("b", &b"y"[..])].into_iter())
+    );
+    assert_eq!(
+        base,
+        digest([("a", &b"xy"[..]), ("b", &b"z"[..])].into_iter())
+    );
+}
+
+#[test]
+fn permissions_round_trip() {
+    for permission in Permission::ALL {
+        assert_eq!(Permission::from_name(permission.name()), Some(permission));
+        assert!(!permission.description().is_empty());
+    }
+    assert!(Permission::Storage.automatic());
+    assert!(!Permission::Network.automatic());
+    assert!(!Permission::Files.automatic());
+}

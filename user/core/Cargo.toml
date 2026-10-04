@@ -1,19 +1,18 @@
 [package]
-name = "shell"
-description = "The Oceans shell: a capability-explicit command line (ADR-0018)"
+name = "core"
+description = "Oceans Core: installs, verifies and runs apps with the permissions the user granted (ADR-0045 to ADR-0047)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "shell"
+name = "core"
 test = false
 bench = false
 
 [dependencies]
-oceans-elf.workspace = true
+oceans-rt = { workspace = true, features = ["alloc"] }
 oceans-fs-proto.workspace = true
 oceans-core-proto.workspace = true
 oceans-package.workspace = true
-oceans-rt.workspace = true

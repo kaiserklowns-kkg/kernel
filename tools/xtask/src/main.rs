@@ -36,6 +36,7 @@ const USER_PROGRAMS: &[&str] = &[
     "e1000e",
     "xhci",
     "usb-storage",
+    "core",
     "usb-hid",
     "net",
     "net-echo",
@@ -71,6 +72,18 @@ const NVME_IMAGE: &str = "build/nvme.img";
 const SMOKE_NVME_IMAGE: &str = "build/smoke-nvme.img";
 const NVME_SIZE: usize = 16 * 1024 * 1024;
 const NVME_TEXT: &str = "kept on nvme";
+/// The development package signing key (ADR-0046, tools/keys/README.md):
+/// public, for examples and tests only. Images trust it as `DEV_PUBLISHER`.
+const DEV_SEED: &str = include_str!("../../keys/oceans-dev.seed");
+const DEV_PUBLISHER: &str = "Oceans Examples";
+/// A key no image trusts (the smoke test's refused package).
+const UNTRUSTED_SEED: [u8; 32] = [0x55; 32];
+/// Signed example packages, built with every image (and served to the
+/// smoke test's guest over HTTP).
+const PACKAGES_DIR: &str = "build/packages";
+/// The example app (user/apps/hello) and its manifest.
+const HELLO_PROGRAM: &str = "hello-app";
+const HELLO_MANIFEST: &str = include_str!("../../../user/apps/hello/manifest");
 /// A second stick, plugged in during the first smoke boot: FAT16 in an MBR
 /// partition, made by mkfs.fat and mtools (libs/fat/testdata, ADR-0036).
 const SMOKE_FAT_IMAGE: &str = "build/smoke-fat.img";
@@ -183,6 +196,32 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run host out use:net -- ipv6.oceans.test [fec0::2]:$DNS6\r\n",
     b"run nc out use:net -- [fec0::2] $TCP6 hello over ipv6\r\n",
     b"run fetch out use:net -- http://[fec0::2]:$HTTP6/ipv6.txt\r\n",
+    // Apps (ADR-0045 to ADR-0047): signed packages from the host; refused
+    // ones; a permission asked for (denied), granted, revoked while the
+    // app runs; an update, a refused downgrade, a rollback; the audit.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/hello-1.0.0.opk /keep/hello.opk\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/hello-2.0.0.opk /keep/hello2.opk\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/untrusted.opk /keep/untrusted.opk\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/tampered.opk /keep/tampered.opk\r\n",
+    b"app install /keep/untrusted.opk\r\n",
+    b"app install /keep/tampered.opk\r\n",
+    b"app install /keep/hello.opk\r\n",
+    b"app list\r\n",
+    b"app run app.oceans.hello 10.0.2.2 $TCP\r\n",
+    b"n\r\n",
+    b"app grant app.oceans.hello network\r\n",
+    b"app run app.oceans.hello 10.0.2.2 $TCP\r\n",
+    b"app info app.oceans.hello\r\n",
+    b"app install /keep/hello2.opk\r\n",
+    b"app install /keep/hello.opk\r\n",
+    b"app run app.oceans.hello\r\n",
+    b"app start app.oceans.hello wait\r\n",
+    b"app list\r\n",
+    b"app revoke app.oceans.hello network\r\n",
+    b"app rollback app.oceans.hello\r\n",
+    b"app start app.oceans.hello wait\r\n",
+    b"app stop app.oceans.hello\r\n",
+    b"app audit\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -293,6 +332,10 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"ls /usb\r\n",
     b"cat /usb/note.txt\r\n",
     b"cat /nvme/note.txt\r\n",
+    b"app list\r\n",
+    b"app run app.oceans.hello\r\n",
+    b"app remove app.oceans.hello\r\n",
+    b"app list\r\n",
     b"run lspci out devices\r\n",
     b"run ifconfig out use:net\r\n",
     b"run ping out use:net -- 10.0.2.2 3\r\n",
@@ -312,6 +355,11 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("kept on a usb stick"),
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
+    Expect::Contains("core: ready, 1 apps installed"),
+    Expect::Line("  app.oceans.hello  1.0.0  Hello"),
+    Expect::Line("hello: run 6 (counted in my storage)"),
+    Expect::Contains("app: removed app.oceans.hello"),
+    Expect::Contains("app: no apps installed"),
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept across reboots"),
     Expect::Line("  note.txt"),
@@ -425,6 +473,39 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("disk: 32768 sectors of 512 bytes (16 MiB)"),
     Expect::Line("  note.txt"),
     Expect::Line("  big.bin"),
+    Expect::Contains("core: ready, 0 apps installed, 1 trusted publisher keys"),
+    Expect::Contains("app: /keep/untrusted.opk: signed with a key this system does not trust"),
+    Expect::Contains(
+        "app: /keep/tampered.opk: the signature does not match: the package was changed",
+    ),
+    Expect::Contains("app: installed app.oceans.hello 1.0.0"),
+    Expect::Line("  app.oceans.hello  1.0.0  Hello"),
+    Expect::Contains("Hello (app.oceans.hello 1.0.0, from Oceans Examples) asks to:"),
+    Expect::Line("  connect to the internet and the local network"),
+    Expect::Contains("reason given by the app: \"say hello to the server you name\""),
+    Expect::Contains("app: network denied"),
+    Expect::Line("Hello from app.oceans.hello 1.0.0"),
+    Expect::Line("hello: run 1 (counted in my storage)"),
+    Expect::Line("hello: no network permission; not connecting"),
+    Expect::Contains("app: network allowed for app.oceans.hello"),
+    Expect::Line("hello: run 2 (counted in my storage)"),
+    Expect::Line("hello from the host: hello from an app"),
+    Expect::Contains("network      allowed     say hello to the server you name"),
+    Expect::Contains("app: updated app.oceans.hello 1.0.0 -> 2.0.0"),
+    Expect::Contains("app: /keep/hello.opk: not newer than the installed version"),
+    Expect::Line("Hello from app.oceans.hello 2.0.0"),
+    Expect::Line("hello: run 3 (counted in my storage)"),
+    Expect::Contains("app: started app.oceans.hello"),
+    Expect::Line("hello: waiting until stopped"),
+    Expect::Line("  app.oceans.hello  2.0.0  Hello  (running)"),
+    Expect::Contains(
+        "app: network revoked for app.oceans.hello; it was running and has been stopped",
+    ),
+    Expect::Contains("app: app.oceans.hello rolled back to 1.0.0"),
+    Expect::Contains("app: stopped app.oceans.hello"),
+    Expect::Contains("installed app.oceans.hello 1.0.0 from Oceans Examples"),
+    Expect::Contains("denied app.oceans.hello network (at its prompt)"),
+    Expect::Contains("stopped app.oceans.hello: a permission it used was revoked"),
     Expect::Contains("lsusb: requests `use:usb`"),
     Expect::Contains(
         "xhci: port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s), keyboard (console input)",
@@ -738,6 +819,10 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     let manifest_bytes = fs::read(&manifest_path)
         .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
     files.push(("services.conf".to_string(), manifest_bytes));
+    // Oceans Core's trusted publisher keys (ADR-0046): the root of trust
+    // for apps comes with the boot image.
+    files.push(("trust.keys".to_string(), trust_list()?.into_bytes()));
+    build_packages(&user)?;
     let entries: Vec<(&str, &[u8])> = files
         .iter()
         .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
@@ -1139,6 +1224,76 @@ fn fsck_fat(image: &Path) -> Option<(bool, String)> {
     ))
 }
 
+fn dev_seed() -> Result<[u8; 32]> {
+    let hex = DEV_SEED.trim();
+    let mut seed = [0u8; 32];
+    if hex.len() != 64 {
+        return Err("tools/keys/oceans-dev.seed is not 32 bytes of hex".into());
+    }
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
+            .map_err(|_| "tools/keys/oceans-dev.seed is not hex".to_string())?;
+    }
+    Ok(seed)
+}
+
+/// The image's `trust.keys`: the development key only (ADR-0046).
+fn trust_list() -> Result<String> {
+    Ok(format!(
+        "# Publisher keys Oceans Core trusts (ADR-0046): `KEY-HEX PUBLISHER`.\n\
+         # The development key (tools/keys): never in a release image.\n\
+         {} {DEV_PUBLISHER}\n",
+        oceans_package::public_key_hex(&dev_seed()?)
+    ))
+}
+
+/// The example packages in `build/packages`: Hello 1.0.0 and 2.0.0, and
+/// two the system must refuse (signed by an untrusted key, and changed
+/// after signing).
+fn build_packages(user: &Path) -> Result {
+    let program = fs::read(user.join(HELLO_PROGRAM))
+        .map_err(|e| format!("cannot read {HELLO_PROGRAM}: {e}"))?;
+    let seed = dev_seed()?;
+    let v2 = HELLO_MANIFEST.replace("version = 1.0.0", "version = 2.0.0");
+    let sign = |manifest: &str, seed: &[u8; 32]| {
+        oceans_package::build(
+            &[("manifest", manifest.as_bytes()), ("hello", &program)],
+            seed,
+        )
+        .map_err(|e| format!("cannot build a package: {e:?}"))
+    };
+    let v1 = sign(HELLO_MANIFEST, &seed)?;
+    // Same files, one byte of the program changed, the original signature.
+    let signature = oceans_archive::Archive::parse(&v1)
+        .ok()
+        .and_then(|archive| archive.find(oceans_package::SIGNATURE).map(<[u8]>::to_vec))
+        .ok_or("the package has no signature")?;
+    let mut changed = program.clone();
+    if let Some(last) = changed.last_mut() {
+        *last ^= 0xff;
+    }
+    let forged: [(&str, &[u8]); 3] = [
+        ("manifest", HELLO_MANIFEST.as_bytes()),
+        ("hello", &changed),
+        (oceans_package::SIGNATURE, &signature),
+    ];
+    let mut tampered = vec![0u8; oceans_archive::archive_len(&forged)];
+    oceans_archive::write(&forged, &mut tampered)
+        .map_err(|e| format!("cannot build a package: {e:?}"))?;
+    let dir = root().join(PACKAGES_DIR);
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    for (name, bytes) in [
+        ("hello-1.0.0.opk", v1),
+        ("hello-2.0.0.opk", sign(&v2, &seed)?),
+        ("untrusted.opk", sign(HELLO_MANIFEST, &UNTRUSTED_SEED)?),
+        ("tampered.opk", tampered),
+    ] {
+        let path = dir.join(name);
+        fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// A blank (zero-filled) image of `size` bytes; an existing one is
 /// replaced only if `fresh`.
 fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
@@ -1251,6 +1406,7 @@ enum Console {
 }
 
 const SHELL_PROMPT: &[u8] = b"oceans> ";
+const CONSENT_PROMPT: &[u8] = b"Allow? [y/N] ";
 
 /// One headless boot: types `script` into the shell, one command per
 /// prompt, and requires every `expected` line, the online banner and a
@@ -1320,7 +1476,10 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                 }
             } else {
                 line.push(byte);
-                if line.ends_with(SHELL_PROMPT) && events_tx.send(Console::Prompt).is_err() {
+                // The consent question (ADR-0047) waits for an answer
+                // like a prompt: the script's next line is that answer.
+                let prompt = line.ends_with(SHELL_PROMPT) || line.ends_with(CONSENT_PROMPT);
+                if prompt && events_tx.send(Console::Prompt).is_err() {
                     break;
                 }
             }
@@ -1549,6 +1708,33 @@ fn check_smoke_disk() -> Result {
     }
     if volume.lookup(keep, "gone.txt").is_ok() {
         return Err("a removed file is still on the disk".into());
+    }
+    // Apps (ADR-0045): removed by the second boot, with every step of its
+    // life in the audit log.
+    if let Ok(apps) = volume.lookup(ROOT, "apps")
+        && volume.lookup(apps, "app.oceans.hello").is_ok()
+    {
+        return Err("a removed app is still in /apps".into());
+    }
+    let system = lookup(&volume, ROOT, "system")?;
+    let audit = lookup(&volume, system, "audit.log")?;
+    let mut log = vec![0u8; volume.size(audit).map_err(|e| format!("{e:?}"))? as usize];
+    volume
+        .read(audit, 0, &mut log)
+        .map_err(|e| format!("reading the audit log: {e:?}"))?;
+    let log = String::from_utf8_lossy(&log);
+    for event in [
+        "installed app.oceans.hello 1.0.0 from Oceans Examples",
+        "denied app.oceans.hello network (at its prompt)",
+        "allowed app.oceans.hello network (by command)",
+        "updated app.oceans.hello 1.0.0 -> 2.0.0",
+        "stopped app.oceans.hello: a permission it used was revoked",
+        "rolled back app.oceans.hello 2.0.0 -> 1.0.0",
+        "removed app.oceans.hello",
+    ] {
+        if !log.contains(event) {
+            return Err(format!("the audit log lacks `{event}`"));
+        }
     }
     // Copied from FAT (ADR-0039); moved away, or removed with `rm -r`.
     let mut node = keep;
@@ -1893,6 +2079,22 @@ fn http_server(bind: &str) -> Result<u16> {
                 "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
                 "/big" => fixed("200 OK", &big_body()),
                 "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
+                // The example packages (ADR-0046), by plain file name.
+                package
+                    if package.strip_prefix("/packages/").is_some_and(|name| {
+                        !name.is_empty()
+                            && name
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+                            && !name.contains("..")
+                    }) =>
+                {
+                    let name = &package["/packages/".len()..];
+                    match fs::read(root().join(PACKAGES_DIR).join(name)) {
+                        Ok(bytes) => fixed("200 OK", &bytes),
+                        Err(_) => fixed("404 Not Found", b"no such package\n"),
+                    }
+                }
                 _ => fixed("404 Not Found", b"not here\n"),
             };
             let _ = stream.write_all(&response);

@@ -1,0 +1,10 @@
+[package]
+name = "oceans-core-proto"
+description = "The Oceans Core protocol: installing, running and stopping apps, and their permissions (ADR-0045)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt.workspace = true

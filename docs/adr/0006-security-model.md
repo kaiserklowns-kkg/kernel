@@ -1,6 +1,6 @@
 # ADR-0006: Capability-based security model
 
-- Status: Accepted — mechanism specified in [ADR-0011](0011-capabilities.md); permission broker and consent design follow in Phase 5
+- Status: Accepted — mechanism specified in [ADR-0011](0011-capabilities.md); permission broker and consent in [ADR-0047](0047-permissions-and-consent.md), signed apps in [ADR-0046](0046-packages.md)
 - Date: 2026-10-03
 
 ## Context

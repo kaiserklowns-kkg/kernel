@@ -550,6 +550,16 @@ name = "oceans-nvme"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-package"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "oceans-archive",
+ "oceans-package",
+ "sha2",
+]
+
+[[package]]
 name = "oceans-pci"
 version = "0.1.0"
 
@@ -599,6 +609,7 @@ dependencies = [
  "oceans-archive",
  "oceans-dns",
  "oceans-fat",
+ "oceans-package",
  "oceans-volume",
 ]
 

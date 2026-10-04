@@ -14,6 +14,9 @@
 #![no_std]
 #![no_main]
 
+mod apps;
+
+use core::cell::RefCell;
 use core::fmt::{self, Write};
 
 use oceans_elf::{Executable, Limits};
@@ -44,6 +47,9 @@ struct Shell {
     console: Handle,
     /// What the shell holds (`grants`), from init.
     directory: Directory,
+    /// Console input typed ahead, shared by the command line and questions
+    /// asked while a command runs (consent, ADR-0047).
+    input: RefCell<Input>,
 }
 
 fn main(start: Start) -> i64 {
@@ -60,6 +66,7 @@ fn main(start: Start) -> i64 {
         log,
         console,
         directory,
+        input: RefCell::new(Input::new()),
     };
     let _ = oceans_rt::debug_write(log, "shell: ready");
     shell.print(format_args!("Oceans shell. Type `help` for commands.\r\n"));
@@ -106,10 +113,10 @@ impl Shell {
 
     fn run(&self) -> i64 {
         let mut line = [0u8; LINE_MAX];
-        let mut input = Input::new();
         loop {
             self.write(PROMPT);
-            let Some(len) = self.read_line(&mut input, &mut line) else {
+            let len = self.read_line(&mut self.input.borrow_mut(), &mut line);
+            let Some(len) = len else {
                 return 4; // console unreadable
             };
             let Ok(text) = core::str::from_utf8(&line[..len]) else {
@@ -120,6 +127,16 @@ impl Shell {
                 return code;
             }
         }
+    }
+
+    /// Asks a yes/no question on the console; `None` if it cannot be read.
+    /// Only `y` or `yes` is yes.
+    fn ask(&self, question: &str) -> Option<bool> {
+        self.write(question.as_bytes());
+        let mut line = [0u8; LINE_MAX];
+        let len = self.read_line(&mut self.input.borrow_mut(), &mut line)?;
+        let answer = core::str::from_utf8(&line[..len]).unwrap_or("").trim();
+        Some(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
     }
 
     /// Reads one edited line. `None` if the console cannot be read. Bytes
@@ -215,6 +232,7 @@ impl Shell {
             ["cp", source, destination] => self.copy(source, destination, false),
             ["cp", "-r", source, destination] => self.copy(source, destination, true),
             ["sync"] => self.sync(),
+            ["app", words @ ..] => self.app(words),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
             ["exit"] => return Some(0),
             // Anything else is a program in /bin, run with what its manifest
@@ -250,6 +268,13 @@ impl Shell {
              \x20 cp [-r] FROM TO            copy a file (-r: a directory), also between\r\n\
              \x20                              filesystems; into TO if it is a directory\r\n\
              \x20 sync                       make every file change durable on disk now\r\n\
+             \x20 app list | info ID          installed apps and what they may do\r\n\
+             \x20 app install PATH           install or update a signed package (.opk)\r\n\
+             \x20 app run | start ID [ARGS]  run an app (start: in the background);\r\n\
+             \x20                              asks before granting a permission\r\n\
+             \x20 app stop | remove ID       stop or uninstall an app\r\n\
+             \x20 app grant | revoke ID PERM allow or withdraw a permission\r\n\
+             \x20 app rollback ID | audit    previous version; what was decided\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
         );
