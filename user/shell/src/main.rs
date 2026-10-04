@@ -251,7 +251,8 @@ impl Shell {
              \x20 grants                     capabilities this shell holds\r\n\
              \x20 call ENDPOINT TEXT         send TEXT to a service endpoint I use\r\n\
              \x20 run PROGRAM [GRANT...]     run a program with only the listed authority:\r\n\
-             \x20                              log, console, out, sysinfo, devices, use:ENDPOINT\r\n\
+             \x20                              log, console, out, sysinfo, devices, use:ENDPOINT,\r\n\
+             \x20                              core:RIGHTS (query+run+manage+decide+audit)\r\n\
              \x20                              (PROGRAM: a granted module, /bin/NAME, or a path;\r\n\
              \x20                              arguments after `--`)\r\n\
              \x20 PROGRAM [ARGS...]          run /bin/PROGRAM with what its manifest requests\r\n\
@@ -273,6 +274,7 @@ impl Shell {
              \x20 app run | start ID [ARGS]  run an app (start: in the background);\r\n\
              \x20                              asks before granting a permission\r\n\
              \x20 app stop | remove ID       stop or uninstall an app\r\n\
+             \x20 app enable | disable ID    a service: start at boot (and now), or not\r\n\
              \x20 app grant | revoke ID PERM allow or withdraw a permission\r\n\
              \x20 app rollback ID | audit    previous version; what was decided\r\n\
              \x20 clear                      clear the screen\r\n\
@@ -855,6 +857,24 @@ impl Shell {
                 "devices",
                 "devices",
             ),
+            // A narrower Oceans Core capability (ADR-0048), minted for the
+            // program: e.g. `core:query+run`.
+            _ if grant.starts_with("core:") => {
+                let wanted = oceans_core_proto::access::parse(&grant["core:".len()..])
+                    .ok_or("core rights are query, run, manage, decide, audit (joined by +)")?;
+                let core = self
+                    .directory
+                    .find("use", "core")
+                    .ok_or("this shell does not hold it")?;
+                let mut reply = [0u8; 8];
+                let minted = oceans_core_proto::Core(core)
+                    .call(oceans_core_proto::op::MINT, &[wanted], &[], &mut reply)
+                    .map_err(|(error, _)| error.message())?;
+                return minted
+                    .handle
+                    .map(|handle| (handle, "use", "core"))
+                    .ok_or("no capability came back");
+            }
             _ => match grant.strip_prefix("use:") {
                 Some(endpoint) => (
                     self.directory.find("use", endpoint),
@@ -866,7 +886,7 @@ impl Shell {
                 ),
                 None => {
                     return Err(
-                        "unknown grant (log, console, out, sysinfo, devices, use:ENDPOINT)",
+                        "unknown grant (log, console, out, sysinfo, devices, use:ENDPOINT, core:RIGHTS)",
                     );
                 }
             },

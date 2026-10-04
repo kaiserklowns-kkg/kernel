@@ -47,6 +47,7 @@ const USER_PROGRAMS: &[&str] = &[
     "fetch",
     "date",
     "lsusb",
+    "apps",
     "mouse",
     "ipc-test",
 ];
@@ -84,6 +85,9 @@ const PACKAGES_DIR: &str = "build/packages";
 /// The example app (user/apps/hello) and its manifest.
 const HELLO_PROGRAM: &str = "hello-app";
 const HELLO_MANIFEST: &str = include_str!("../../../user/apps/hello/manifest");
+/// The example service (user/apps/heartbeat, ADR-0049).
+const HEARTBEAT_PROGRAM: &str = "heartbeat-app";
+const HEARTBEAT_MANIFEST: &str = include_str!("../../../user/apps/heartbeat/manifest");
 /// A second stick, plugged in during the first smoke boot: FAT16 in an MBR
 /// partition, made by mkfs.fat and mtools (libs/fat/testdata, ADR-0036).
 const SMOKE_FAT_IMAGE: &str = "build/smoke-fat.img";
@@ -222,6 +226,20 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app start app.oceans.hello wait\r\n",
     b"app stop app.oceans.hello\r\n",
     b"app audit\r\n",
+    // Narrower Core capabilities (ADR-0048): `apps` gets only what is
+    // minted for it. Services (ADR-0049): one that fails at first is
+    // restarted; enabled, it starts again at the next boot.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/heartbeat-1.0.0.opk /keep/heartbeat.opk\r\n",
+    b"app install /keep/heartbeat.opk\r\n",
+    b"run apps out core:query -- list\r\n",
+    b"run apps out core:query -- start app.oceans.hello wait\r\n",
+    b"run apps out core:query+run -- start app.oceans.hello wait\r\n",
+    b"run apps out core:query+run -- stop app.oceans.hello\r\n",
+    b"run apps out core:query+run -- mint query\r\n",
+    b"run apps out core:query+run -- mint decide\r\n",
+    b"app enable app.oceans.hello\r\n",
+    b"app enable app.oceans.heartbeat\r\n",
+    b"app info app.oceans.heartbeat\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -335,6 +353,7 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"app list\r\n",
     b"app run app.oceans.hello\r\n",
     b"app remove app.oceans.hello\r\n",
+    b"app disable app.oceans.heartbeat\r\n",
     b"app list\r\n",
     b"run lspci out devices\r\n",
     b"run ifconfig out use:net\r\n",
@@ -355,11 +374,14 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("kept on a usb stick"),
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
-    Expect::Contains("core: ready, 1 apps installed"),
+    Expect::Contains("core: ready, 2 apps installed"),
     Expect::Line("  app.oceans.hello  1.0.0  Hello"),
-    Expect::Line("hello: run 6 (counted in my storage)"),
+    Expect::Line("hello: run 7 (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
-    Expect::Contains("app: no apps installed"),
+    Expect::Contains("core: started service app.oceans.heartbeat"),
+    Expect::Contains("heartbeat: run 3, beating"),
+    Expect::Contains("app: disabled app.oceans.heartbeat"),
+    Expect::Line("  app.oceans.heartbeat  1.0.0  Heartbeat"),
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept across reboots"),
     Expect::Line("  note.txt"),
@@ -506,6 +528,23 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("installed app.oceans.hello 1.0.0 from Oceans Examples"),
     Expect::Contains("denied app.oceans.hello network (at its prompt)"),
     Expect::Contains("stopped app.oceans.hello: a permission it used was revoked"),
+    Expect::Contains("app: installed app.oceans.heartbeat 1.0.0"),
+    Expect::Line("app.oceans.heartbeat 1.0.0"),
+    Expect::Line("app.oceans.hello 1.0.0"),
+    Expect::Contains("apps: app.oceans.hello: not allowed by this capability"),
+    Expect::Contains("apps: started app.oceans.hello"),
+    Expect::Contains("apps: stopped app.oceans.hello"),
+    Expect::Contains("apps: minted query"),
+    Expect::Contains("apps: decide: not allowed by this capability"),
+    Expect::Contains("app: app.oceans.hello: not a service (only services start at boot)"),
+    Expect::Contains("app: enabled app.oceans.heartbeat: it runs now and at every boot"),
+    Expect::Contains("heartbeat: run 1, failing on purpose"),
+    Expect::Contains(
+        "core: service app.oceans.heartbeat failed (exit 3); restarting in 1 s (1 of 5)",
+    ),
+    Expect::Contains("core: restarted service app.oceans.heartbeat"),
+    Expect::Contains("heartbeat: run 2, beating"),
+    Expect::Contains("service, enabled (starts at boot), "),
     Expect::Contains("lsusb: requests `use:usb`"),
     Expect::Contains(
         "xhci: port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s), keyboard (console input)",
@@ -1280,9 +1319,20 @@ fn build_packages(user: &Path) -> Result {
     let mut tampered = vec![0u8; oceans_archive::archive_len(&forged)];
     oceans_archive::write(&forged, &mut tampered)
         .map_err(|e| format!("cannot build a package: {e:?}"))?;
+    let heartbeat = fs::read(user.join(HEARTBEAT_PROGRAM))
+        .map_err(|e| format!("cannot read {HEARTBEAT_PROGRAM}: {e}"))?;
+    let heartbeat = oceans_package::build(
+        &[
+            ("manifest", HEARTBEAT_MANIFEST.as_bytes()),
+            ("heartbeat", &heartbeat),
+        ],
+        &seed,
+    )
+    .map_err(|e| format!("cannot build a package: {e:?}"))?;
     let dir = root().join(PACKAGES_DIR);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (name, bytes) in [
+        ("heartbeat-1.0.0.opk", heartbeat),
         ("hello-1.0.0.opk", v1),
         ("hello-2.0.0.opk", sign(&v2, &seed)?),
         ("untrusted.opk", sign(HELLO_MANIFEST, &UNTRUSTED_SEED)?),
@@ -1731,6 +1781,8 @@ fn check_smoke_disk() -> Result {
         "stopped app.oceans.hello: a permission it used was revoked",
         "rolled back app.oceans.hello 2.0.0 -> 1.0.0",
         "removed app.oceans.hello",
+        "enabled service app.oceans.heartbeat (starts at boot)",
+        "disabled service app.oceans.heartbeat",
     ] {
         if !log.contains(event) {
             return Err(format!("the audit log lacks `{event}`"));

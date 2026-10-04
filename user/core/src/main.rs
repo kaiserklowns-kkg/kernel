@@ -33,12 +33,14 @@
 extern crate alloc;
 
 use alloc::borrow::ToOwned;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use oceans_core_proto::{Decision, MAX_DATA, Status, field, op, outcome, run_flags, source};
+use oceans_core_proto::{
+    Decision, MAX_DATA, Status, access, field, op, outcome, run_flags, source,
+};
 use oceans_fs_proto::{FsError, Kind, Node, flags};
 use oceans_package::{Package, PackageError, Permission, TrustedKey, Version};
 use oceans_rt::{Buffer, Directory, Handle, Start, prot, rights};
@@ -47,6 +49,12 @@ oceans_rt::entry!(main);
 
 /// Most apps running at once (one notification bit each).
 const MAX_RUNNING: usize = 32;
+/// The notification bit of the restart timer (ADR-0049).
+const RESTART_TIMER: u64 = 1 << 63;
+/// Restarts of a failing service per boot, the first after a second, each
+/// following one waiting twice as long.
+const MAX_RESTARTS: u32 = 5;
+const RESTART_DELAY_MS: u64 = 1000;
 /// Largest package accepted.
 const MAX_PACKAGE: u64 = 32 << 20;
 /// Bytes moved per filesystem request.
@@ -86,6 +94,7 @@ fn main(start: Start) -> i64 {
         return EXIT_BAD_START;
     }
     core.notification = notification;
+    core.start_services();
     core.serve(server)
 }
 
@@ -108,6 +117,8 @@ struct App {
     requests: Vec<(Permission, String)>,
     /// The version `ROLLBACK` returns to.
     previous: Option<Version>,
+    /// A background service (ADR-0049).
+    service: bool,
 }
 
 impl App {
@@ -126,6 +137,7 @@ impl App {
                 .map(|r| (r.permission, r.reason.to_owned()))
                 .collect(),
             previous,
+            service: manifest.service,
         }
     }
 
@@ -145,6 +157,8 @@ struct Launch<'a> {
     image: Handle,
     granted: &'a [Permission],
     args: &'a str,
+    /// Services get a log (ADR-0049).
+    service: bool,
 }
 
 struct Running {
@@ -193,6 +207,17 @@ struct Core {
     running: [Option<Running>; MAX_RUNNING],
     notification: Handle,
     audit: VecDeque<String>,
+    /// Rights of the client ends minted by `MINT` (ADR-0048), by badge.
+    minted: BTreeMap<u64, u8>,
+    next_badge: u64,
+    /// Services started at boot (ADR-0049), kept in `/system/services`.
+    enabled: BTreeSet<String>,
+    /// Restarts so far this boot, and those waiting for their time.
+    restarts: BTreeMap<String, u32>,
+    pending_restarts: Vec<(String, u64)>,
+    /// Slots freed by `stop` whose exit signal has not arrived yet: not
+    /// reused until it has (the signal would be taken for the new app's).
+    stale: u64,
 }
 
 impl Core {
@@ -237,9 +262,16 @@ impl Core {
             running: [const { None }; MAX_RUNNING],
             notification: Handle(0),
             audit: VecDeque::new(),
+            minted: BTreeMap::new(),
+            next_badge: 1,
+            enabled: BTreeSet::new(),
+            restarts: BTreeMap::new(),
+            pending_restarts: Vec::new(),
+            stale: 0,
         };
         core.load_apps();
         core.load_decisions();
+        core.load_enabled();
         say(
             log,
             format_args!(
@@ -302,6 +334,140 @@ impl Core {
                 ),
             }
         }
+    }
+
+    fn load_enabled(&mut self) {
+        let Ok(bytes) = read_path(&self.system_dir, "services") else {
+            return;
+        };
+        for id in core::str::from_utf8(&bytes).unwrap_or("").lines() {
+            if self.apps.get(id).is_some_and(|app| app.service) {
+                self.enabled.insert(id.to_owned());
+            }
+        }
+    }
+
+    fn save_enabled(&self) -> Result<(), Refusal> {
+        let mut text = String::new();
+        for id in &self.enabled {
+            let _ = writeln!(text, "{id}");
+        }
+        write_file(&self.system_dir, "services", text.as_bytes()).map_err(io)
+    }
+
+    /// Starts the enabled services (at boot, once the endpoint is bound).
+    fn start_services(&mut self) {
+        let ids: Vec<String> = self.enabled.iter().cloned().collect();
+        for id in ids {
+            match self.start_service(&id) {
+                Ok(()) => say(self.log, format_args!("core: started service {id}")),
+                Err(refusal) => say(
+                    self.log,
+                    format_args!(
+                        "core: service {id} not started: {}",
+                        refusal.status.message()
+                    ),
+                ),
+            }
+        }
+    }
+
+    fn start_service(&mut self, id: &str) -> Result<(), Refusal> {
+        let mut data = Vec::with_capacity(2 + id.len());
+        data.push(run_flags::DETACH);
+        data.push(id.len() as u8);
+        data.extend_from_slice(id.as_bytes());
+        self.start_app(&data, None).map(drop)
+    }
+
+    fn enable(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let id = id_of(data)?.to_owned();
+        if !self.app(&id)?.service {
+            return Err(Status::NotAService.into());
+        }
+        if self.slot_of(&id).is_none() {
+            match self.start_service(&id) {
+                Ok(())
+                | Err(Refusal {
+                    status: Status::AlreadyRunning,
+                    ..
+                }) => {}
+                Err(refusal) => return Err(refusal),
+            }
+        }
+        if self.enabled.insert(id.clone()) {
+            self.save_enabled()?;
+            self.record(format_args!("enabled service {id} (starts at boot)"));
+        }
+        self.restarts.remove(&id);
+        Ok(())
+    }
+
+    fn disable(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let id = id_of(data)?.to_owned();
+        self.app(&id)?;
+        self.pending_restarts.retain(|(pending, _)| *pending != id);
+        if self.enabled.remove(&id) {
+            self.save_enabled()?;
+            self.record(format_args!("disabled service {id}"));
+        }
+        self.stop(&id, "service disabled");
+        Ok(())
+    }
+
+    /// A failed service is restarted later, while it has restarts left.
+    fn schedule_restart(&mut self, id: &str, code: i64) {
+        let count = self.restarts.entry(id.to_owned()).or_insert(0);
+        *count += 1;
+        let count = *count;
+        if count > MAX_RESTARTS {
+            self.record(format_args!(
+                "gave up on service {id}: failed {MAX_RESTARTS} times (last exit {code})"
+            ));
+            return;
+        }
+        let delay = RESTART_DELAY_MS << (count - 1);
+        say(
+            self.log,
+            format_args!(
+                "core: service {id} failed (exit {code}); restarting in {} s ({count} of {MAX_RESTARTS})",
+                delay / 1000
+            ),
+        );
+        self.pending_restarts
+            .push((id.to_owned(), oceans_rt::clock_ms() + delay));
+        self.arm_restart_timer();
+    }
+
+    fn arm_restart_timer(&self) {
+        if let Some(due) = self.pending_restarts.iter().map(|(_, due)| *due).min() {
+            let wait = due.saturating_sub(oceans_rt::clock_ms()).max(1);
+            let _ = oceans_rt::timer_set(self.notification, RESTART_TIMER, wait);
+        }
+    }
+
+    fn run_due_restarts(&mut self) {
+        let now = oceans_rt::clock_ms();
+        let (due, later): (Vec<_>, Vec<_>) = core::mem::take(&mut self.pending_restarts)
+            .into_iter()
+            .partition(|(_, at)| *at <= now);
+        self.pending_restarts = later;
+        for (id, _) in due {
+            if !self.enabled.contains(&id) || self.slot_of(&id).is_some() {
+                continue;
+            }
+            match self.start_service(&id) {
+                Ok(()) => say(self.log, format_args!("core: restarted service {id}")),
+                Err(refusal) => say(
+                    self.log,
+                    format_args!(
+                        "core: service {id} not restarted: {}",
+                        refusal.status.message()
+                    ),
+                ),
+            }
+        }
+        self.arm_restart_timer();
     }
 
     fn load_decisions(&mut self) {
@@ -385,22 +551,48 @@ impl Core {
                 }
             };
             if got.signals != 0 {
-                self.reap(got.signals);
+                self.reap(got.signals & !RESTART_TIMER);
+                if got.signals & RESTART_TIMER != 0 {
+                    self.run_due_restarts();
+                }
                 continue;
             }
             if got.closed {
+                self.minted.remove(&got.badge);
                 continue;
             }
             let received = &handles[..got.handles_len];
             let mut reply = Vec::new();
             let mut reply_handle = None;
-            let result = self.request(
-                got.label,
-                &data[..got.data_len],
-                received,
-                &mut reply,
-                &mut reply_handle,
-            );
+            // The unbadged end has every right; a minted one its own.
+            let rights = match got.badge {
+                0 => access::ALL,
+                badge => self.minted.get(&badge).copied().unwrap_or(0),
+            };
+            let allowed = access::needed(got.label).is_some_and(|needed| rights & needed == needed);
+            let result = if !allowed {
+                for &handle in received {
+                    let _ = oceans_rt::close(handle);
+                }
+                Err(if access::needed(got.label).is_some() {
+                    Status::Denied.into()
+                } else {
+                    Status::BadRequest.into()
+                })
+            } else if got.label == op::MINT {
+                for &handle in received {
+                    let _ = oceans_rt::close(handle);
+                }
+                self.mint(server, rights, &data[..got.data_len], &mut reply_handle)
+            } else {
+                self.request(
+                    got.label,
+                    &data[..got.data_len],
+                    received,
+                    &mut reply,
+                    &mut reply_handle,
+                )
+            };
             let status = match result {
                 Ok(()) => Status::Ok,
                 Err(refusal) => {
@@ -478,6 +670,8 @@ impl Core {
                     op::REMOVE => self.remove(data),
                     op::DECIDE => self.decide(data, reply),
                     op::ROLLBACK => self.rollback(data, reply),
+                    op::ENABLE => self.enable(data),
+                    op::DISABLE => self.disable(data),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;
@@ -488,6 +682,32 @@ impl Core {
                 }
             }
         }
+    }
+
+    /// `MINT` (ADR-0048): a client end with a subset of the caller's
+    /// rights.
+    fn mint(
+        &mut self,
+        server: Handle,
+        rights: u8,
+        data: &[u8],
+        reply_handle: &mut Option<Handle>,
+    ) -> Result<(), Refusal> {
+        let &[wanted] = data else {
+            return Err(Status::BadRequest.into());
+        };
+        if wanted == 0 || wanted & !access::ALL != 0 {
+            return Err(Status::BadRequest.into());
+        }
+        if wanted & !rights != 0 {
+            return Err(Status::Denied.into());
+        }
+        let badge = self.next_badge;
+        let end = oceans_rt::endpoint_mint(server, badge).map_err(|_| Status::CannotStart)?;
+        self.next_badge += 1;
+        self.minted.insert(badge, wanted);
+        *reply_handle = Some(end);
+        Ok(())
     }
 
     fn app(&self, id: &str) -> Result<&App, Refusal> {
@@ -615,6 +835,10 @@ impl Core {
         removed.and_then(|()| self.apps_dir.sync()).map_err(io)?;
         self.apps.remove(&id);
         self.decisions.retain(|(app_id, _), _| *app_id != id);
+        if self.enabled.remove(&id) {
+            let _ = self.save_enabled();
+        }
+        self.pending_restarts.retain(|(pending, _)| *pending != id);
         let _ = self.save_decisions();
         self.record(format_args!(
             "removed {id}{}",
@@ -657,6 +881,11 @@ impl Core {
                 None => Ok(()),
             },
             field::SOURCE => text.write_str(app.source.as_deref().unwrap_or("")),
+            field::KIND => text.write_str(match (app.service, self.enabled.contains(id)) {
+                (false, _) => "app",
+                (true, false) => "service",
+                (true, true) => "service, enabled (starts at boot)",
+            }),
             _ => return Err(Status::BadRequest.into()),
         };
         Ok(())
@@ -760,8 +989,9 @@ impl Core {
             let id_len = usize::from(*id_len);
             let id = id_of(rest.get(..id_len).ok_or(Status::BadRequest)?)?.to_owned();
             let args = core::str::from_utf8(&rest[id_len..]).map_err(|_| Status::BadRequest)?;
-            let detach = flags_byte & run_flags::DETACH != 0;
             let app = self.app(&id)?;
+            let detach = flags_byte & run_flags::DETACH != 0 || app.service;
+            let service = app.service;
             if self.slot_of(&id).is_some() {
                 return Err(Status::AlreadyRunning.into());
             }
@@ -772,10 +1002,12 @@ impl Core {
             {
                 return Err(Status::NeedsConsent.into());
             }
+            let stale = self.stale;
             let slot = self
                 .running
                 .iter()
-                .position(Option::is_none)
+                .enumerate()
+                .position(|(slot, r)| r.is_none() && stale & (1 << slot) == 0)
                 .ok_or(Status::CannotStart)?;
             let granted: Vec<Permission> = app
                 .requests
@@ -810,6 +1042,7 @@ impl Core {
                 image,
                 granted: &granted,
                 args,
+                service,
             };
             let process = self.spawn(&launch, &mut out);
             let _ = oceans_rt::close(image);
@@ -851,6 +1084,7 @@ impl Core {
             image,
             granted,
             args,
+            service,
         } = *launch;
         let mut handles: Vec<Handle> = Vec::new();
         let mut directory = String::new();
@@ -902,6 +1136,16 @@ impl Core {
                 ),
             }
         }
+        // A service writes to the system log (it has no terminal).
+        if service {
+            match oceans_rt::duplicate(self.log, rights::WRITE | rights::TRANSFER) {
+                Ok(handle) => {
+                    let _ = writeln!(directory, "{} log log", handles.len());
+                    handles.push(handle);
+                }
+                Err(_) => return Err(failed(&handles)),
+            }
+        }
         // Its own identity: `ID VERSION`.
         match oceans_rt::publish_text(info.as_bytes()) {
             Ok(handle) => {
@@ -948,6 +1192,8 @@ impl Core {
         let _ = oceans_rt::process_kill(running.process);
         let code = oceans_rt::process_wait(running.process);
         let _ = oceans_rt::close(running.process);
+        // Its exit signal is still to come: the slot waits for it.
+        self.stale |= 1 << slot;
         self.record(format_args!(
             "stopped {id}: {why} (exit {})",
             code.unwrap_or(oceans_rt::EXIT_KILLED)
@@ -961,6 +1207,11 @@ impl Core {
             if bits & (1 << slot) == 0 {
                 continue;
             }
+            // The exit of an app `stop` already waited for.
+            if self.stale & (1 << slot) != 0 {
+                self.stale &= !(1 << slot);
+                continue;
+            }
             if let Some(running) = self.running[slot].take() {
                 let code = oceans_rt::process_wait(running.process).unwrap_or(-1);
                 let _ = oceans_rt::close(running.process);
@@ -968,6 +1219,10 @@ impl Core {
                     self.log,
                     format_args!("core: {} exited with code {code}", running.id),
                 );
+                let failed = code != 0 && code != oceans_rt::EXIT_KILLED;
+                if failed && self.enabled.contains(&running.id) {
+                    self.schedule_restart(&running.id, code);
+                }
             }
         }
     }

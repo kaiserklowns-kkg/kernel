@@ -72,6 +72,10 @@ fn manifests_parse() {
         ]
     );
     assert!(manifest.asks_for(Permission::Network));
+    assert!(!manifest.service);
+    let text = std::format!("{MANIFEST_TEXT}kind = service\n");
+    assert!(Manifest::parse(&text).unwrap().service);
+    assert!(Manifest::parse(&std::format!("{MANIFEST_TEXT}kind = daemon\n")).is_err());
     assert!(!manifest.asks_for(Permission::Files));
 }
 

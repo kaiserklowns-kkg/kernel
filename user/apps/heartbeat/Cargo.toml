@@ -1,0 +1,16 @@
+[package]
+name = "heartbeat-app"
+description = "Heartbeat: the example Oceans service, started at boot and restarted by Oceans Core when it fails (ADR-0049)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "heartbeat-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-fs-proto.workspace = true

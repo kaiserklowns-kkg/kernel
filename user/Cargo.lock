@@ -374,6 +374,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "heartbeat-app"
+version = "0.1.0"
+dependencies = [
+ "oceans-fs-proto",
+ "oceans-rt",
+]
+
+[[package]]
 name = "hello-app"
 version = "0.1.0"
 dependencies = [
@@ -1048,6 +1056,7 @@ version = "0.1.0"
 dependencies = [
  "oceans-abi",
  "oceans-block-proto",
+ "oceans-core-proto",
  "oceans-fs-proto",
  "oceans-http",
  "oceans-input",

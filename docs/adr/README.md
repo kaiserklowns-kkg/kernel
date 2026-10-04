@@ -55,5 +55,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0045](0045-oceans-runtime.md) | The Oceans Runtime: apps, Oceans Core and API level 1 | Accepted |
 | [0046](0046-packages.md) | Packages (.opk) and publisher signatures | Accepted |
 | [0047](0047-permissions-and-consent.md) | Permissions and consent | Accepted |
+| [0048](0048-delegating-core-authority.md) | Delegating Oceans Core authority | Accepted |
+| [0049](0049-app-services.md) | App services | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

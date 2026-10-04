@@ -1,0 +1,13 @@
+# The example service's package manifest (ADR-0049). `cargo xtask`
+# packages it with the `heartbeat-app` program as `heartbeat`, signed with
+# the development key (tools/keys), into build/packages/.
+id = app.oceans.heartbeat
+name = Heartbeat
+version = 1.0.0
+publisher = Oceans Examples
+description = The example service: runs in the background, starts at boot
+architecture = x86_64
+api = 1
+kind = service
+entry = heartbeat
+permission = storage

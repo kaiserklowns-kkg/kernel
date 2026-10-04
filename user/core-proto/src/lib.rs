@@ -5,7 +5,9 @@
 //! One endpoint, `core`. Its unbadged client end is full authority over
 //! apps: installing, running, stopping and removing them, and deciding
 //! their permissions. It goes to the user's agent (the shell), never to an
-//! app. Requests are IPC calls; labels select the operation and replies
+//! app. A holder can mint **narrower** ends (`MINT`, ADR-0048): badged
+//! client ends carrying a subset of its own [`access`] rights, to hand to
+//! a program or an agent session. Requests are IPC calls; labels select the operation and replies
 //! carry a [`Status`] label. Apps are named by their id (`app.oceans.hello`).
 //!
 //! Permissions are numbered as `oceans_package::Permission::ALL` lists them
@@ -47,6 +49,65 @@ pub mod op {
     /// data = `[index u32]` → an audit entry, newest first; `NotFound`
     /// past the oldest kept.
     pub const AUDIT: u64 = 10;
+    /// data = `[rights u8]` ([`super::access`]) → handles = a new client
+    /// end with those rights, which must be among the caller's own
+    /// (ADR-0048).
+    pub const MINT: u64 = 11;
+    /// data = id: a service (ADR-0049) starts now and at every boot, and is
+    /// restarted when it fails. `NeedsConsent` while a permission is
+    /// undecided.
+    pub const ENABLE: u64 = 12;
+    /// data = id: stops the service and no longer starts it at boot.
+    pub const DISABLE: u64 = 13;
+}
+
+/// What a `core` client end may do (ADR-0048). The unbadged end has all.
+pub mod access {
+    /// `LIST`, `INFO`, `PERMISSION`.
+    pub const QUERY: u8 = 1 << 0;
+    /// `RUN` (and `STOP`) of installed apps.
+    pub const RUN: u8 = 1 << 1;
+    /// `INSTALL`, `REMOVE`, `ROLLBACK`.
+    pub const MANAGE: u8 = 1 << 2;
+    /// `DECIDE`: answering consent, granting and revoking permissions.
+    pub const DECIDE: u8 = 1 << 3;
+    /// `AUDIT`.
+    pub const AUDIT: u8 = 1 << 4;
+    pub const ALL: u8 = QUERY | RUN | MANAGE | DECIDE | AUDIT;
+
+    /// Rights from names joined by `+` (`query+run`); `None` for an
+    /// unknown name.
+    pub fn parse(names: &str) -> Option<u8> {
+        names.split('+').try_fold(0, |rights, name| {
+            Some(
+                rights
+                    | match name {
+                        "query" => QUERY,
+                        "run" => RUN,
+                        "manage" => MANAGE,
+                        "decide" => DECIDE,
+                        "audit" => AUDIT,
+                        "all" => ALL,
+                        _ => return None,
+                    },
+            )
+        })
+    }
+
+    /// The right an operation needs.
+    pub fn needed(op: u64) -> Option<u8> {
+        use super::op;
+        Some(match op {
+            op::LIST | op::INFO | op::PERMISSION => QUERY,
+            op::RUN | op::STOP => RUN,
+            op::INSTALL | op::REMOVE | op::ROLLBACK | op::ENABLE | op::DISABLE => MANAGE,
+            op::DECIDE => DECIDE,
+            op::AUDIT => AUDIT,
+            // Minting gives only rights the caller already has.
+            op::MINT => 0,
+            _ => return None,
+        })
+    }
 }
 
 /// `RUN` flags.
@@ -75,6 +136,8 @@ pub mod field {
     /// The version a rollback returns to, or empty.
     pub const PREVIOUS: u8 = 7;
     pub const SOURCE: u8 = 8;
+    /// `app` or `service`; a service also says whether it is enabled.
+    pub const KIND: u8 = 9;
 }
 
 /// Who made a `DECIDE` decision (kept in the audit log).
@@ -143,6 +206,10 @@ pub enum Status {
     IoError = 10,
     /// The app cannot be started (bad program, out of memory).
     CannotStart = 11,
+    /// This client end lacks the right (ADR-0048).
+    Denied = 12,
+    /// `ENABLE` of an app that is not a service.
+    NotAService = 13,
 }
 
 impl Status {
@@ -159,6 +226,8 @@ impl Status {
             9 => Self::AlreadyRunning,
             10 => Self::IoError,
             11 => Self::CannotStart,
+            12 => Self::Denied,
+            13 => Self::NotAService,
             _ => Self::BadRequest,
         }
     }
@@ -177,6 +246,8 @@ impl Status {
             Self::AlreadyRunning => "already running",
             Self::IoError => "storage failed",
             Self::CannotStart => "cannot be started",
+            Self::Denied => "not allowed by this capability",
+            Self::NotAService => "not a service (only services start at boot)",
         }
     }
 }

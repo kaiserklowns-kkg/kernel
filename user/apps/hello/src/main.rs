@@ -2,8 +2,8 @@
 //!
 //! It uses only what Oceans Core grants, each found by name in its handle
 //! directory, and works with whatever it was not given:
-//! - `console out`: where it writes (without it, it has nobody to talk to
-//!   and exits);
+//! - `console out`: where it writes (started without one, e.g. by a
+//!   program holding only `core:run`, it works silently);
 //! - `app info`: its id and version;
 //! - `use storage`: its private data directory, where it counts its runs;
 //! - `use net`: with `HOST PORT` arguments it says hello to that TCP
@@ -27,10 +27,7 @@ fn main(start: Start) -> i64 {
     let Some(directory) = Directory::from_start(&start) else {
         return 2;
     };
-    let Some(console) = directory.find("console", "out") else {
-        return 3;
-    };
-    let mut out = Out::new(console);
+    let mut out = Talk(directory.find("console", "out").map(Out::new));
     let info = directory
         .find("app", "info")
         .and_then(oceans_rt::map_text)
@@ -106,7 +103,19 @@ fn count_run(storage: &Node) -> Result<u64, &'static str> {
 }
 
 /// Says hello to `host:port` and prints the answer.
-fn greet(out: &mut Out, net: oceans_rt::Handle, host: &str, port: u16) {
+/// The console, if the app was given one; otherwise output goes nowhere.
+struct Talk(Option<Out>);
+
+impl Write for Talk {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        match &mut self.0 {
+            Some(out) => out.write_str(s),
+            None => Ok(()),
+        }
+    }
+}
+
+fn greet(out: &mut Talk, net: oceans_rt::Handle, host: &str, port: u16) {
     let stream = match connect_host(net, host, port, CONNECT_MS) {
         Ok(stream) => stream,
         Err(error) => {

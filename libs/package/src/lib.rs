@@ -169,6 +169,10 @@ pub struct Manifest<'a> {
     pub entry: &'a str,
     /// `stable` unless named.
     pub channel: &'a str,
+    /// `kind = service` (ADR-0049): runs in the background, can start at
+    /// boot and is restarted when it fails; `kind = app` (the default):
+    /// started by the user.
+    pub service: bool,
     /// Where the source is, if published.
     pub source: Option<&'a str>,
     requests: [Option<Request<'a>>; MAX_PERMISSIONS],
@@ -210,8 +214,8 @@ impl ManifestError {
 
 impl<'a> Manifest<'a> {
     pub fn parse(text: &'a str) -> Result<Self, ManifestError> {
-        let mut fields: [Option<&'a str>; 9] = [None; 9];
-        const KEYS: [&str; 9] = [
+        let mut fields: [Option<&'a str>; 10] = [None; 10];
+        const KEYS: [&str; 10] = [
             "id",
             "name",
             "version",
@@ -221,6 +225,7 @@ impl<'a> Manifest<'a> {
             "api",
             "entry",
             "channel",
+            "kind",
         ];
         let mut source = None;
         let mut requests = [None; MAX_PERMISSIONS];
@@ -289,6 +294,15 @@ impl<'a> Manifest<'a> {
             .map_err(|_| ManifestError::BadApi)?;
         let entry = field(7, "the manifest has no entry")?;
         let channel = fields[8].unwrap_or("stable");
+        let service = match fields[9] {
+            None | Some("app") => false,
+            Some("service") => true,
+            Some(_) => {
+                return Err(ManifestError::BadText(
+                    "the kind is neither app nor service",
+                ));
+            }
+        };
         let checks = [
             (
                 text_ok(name, MAX_NAME),
@@ -326,6 +340,7 @@ impl<'a> Manifest<'a> {
             api,
             entry,
             channel,
+            service,
             source,
             requests,
         })

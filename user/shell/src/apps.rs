@@ -18,7 +18,8 @@ use oceans_rt::{Buffer, Handle, rights};
 use super::{LINE_MAX, Shell};
 
 const USAGE: &str = "usage: app list | info ID | install PATH | run ID [ARGS...] | \
-                     start ID [ARGS...] | stop ID | remove ID [--keep-data] | \
+                     start ID [ARGS...] | stop ID | enable ID | disable ID | \
+                     remove ID [--keep-data] | \
                      grant ID PERMISSION | revoke ID PERMISSION | rollback ID | audit\r\n";
 
 impl Shell {
@@ -38,6 +39,8 @@ impl Shell {
             ["run", id, args @ ..] => self.app_run(core, id, args, false),
             ["start", id, args @ ..] => self.app_run(core, id, args, true),
             ["stop", id] => self.app_simple(core, op::STOP, &[], id, "stopped"),
+            ["enable", id] => self.app_enable(core, id),
+            ["disable", id] => self.app_simple(core, op::DISABLE, &[], id, "disabled"),
             ["remove", id] => self.app_simple(core, op::REMOVE, &[0], id, "removed"),
             ["remove", id, "--keep-data"] => {
                 self.app_simple(core, op::REMOVE, &[1], id, "removed (its data kept)")
@@ -73,6 +76,27 @@ impl Shell {
         match core.about(operation, prefix, id, &mut reply) {
             Ok(_) => self.print(format_args!("app: {done} {id}\r\n")),
             Err((error, _)) => self.app_error(id, error, &[]),
+        }
+    }
+
+    /// `app enable ID` (ADR-0049): asks for undecided permissions first,
+    /// as a run does.
+    fn app_enable(&self, core: Core, id: &str) {
+        let mut reply = [0u8; 8];
+        for attempt in 0..2 {
+            match core.about(op::ENABLE, &[], id, &mut reply) {
+                Ok(_) => {
+                    return self.print(format_args!(
+                        "app: enabled {id}: it runs now and at every boot\r\n"
+                    ));
+                }
+                Err((CoreError::Status(Status::NeedsConsent), _)) if attempt == 0 => {
+                    if !self.ask_permissions(core, id) {
+                        return;
+                    }
+                }
+                Err((error, _)) => return self.app_error(id, error, &[]),
+            }
         }
     }
 
@@ -134,7 +158,8 @@ impl Shell {
         }
         let previous = get(field::PREVIOUS);
         self.print(format_args!(
-            "  state: {}, channel: {}{}{}\r\n  permissions:\r\n",
+            "  {}, {}, channel: {}{}{}\r\n  permissions:\r\n",
+            get(field::KIND).as_str(),
             get(field::STATE).as_str(),
             get(field::CHANNEL).as_str(),
             if previous.as_str().is_empty() {
