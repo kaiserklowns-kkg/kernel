@@ -401,6 +401,7 @@ impl Process {
         for (notification, bits) in watchers {
             notification.signal(bits);
         }
+        crate::display::process_exited(self);
     }
 
     /// Called when the process's last thread has been reaped (never while

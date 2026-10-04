@@ -35,6 +35,11 @@ also needs the console as a fallback that can never be lost.
 - **Taking the screen back:** when the claiming process is gone, the
   console takes the screen back at its next write, and redraws everything.
   A crashed desktop never leaves a blank screen.
+- **Locking:** every holder of the display lock runs without preemption,
+  as the logger does, because the logger takes it with preemption off. The
+  exit of the claimer is reported by the process's exit path. Under the
+  lock, the claimer is never upgraded to a strong reference, because
+  dropping the last reference to a process logs.
 
 ### The display service (`user/display`, Rust)
 

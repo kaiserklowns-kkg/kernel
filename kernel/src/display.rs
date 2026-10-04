@@ -30,6 +30,7 @@ use crate::klog;
 use crate::memory::paging;
 use crate::object::MemoryObject;
 use crate::process::Process;
+use crate::sched::NoPreempt;
 
 const WEIGHT: FontWeight = FontWeight::Regular;
 const HEIGHT: RasterHeight = RasterHeight::Size16;
@@ -53,6 +54,9 @@ struct Display {
     /// Whether the console draws (false while a display service holds the
     /// screen).
     visible: bool,
+    /// The process holding the screen. Never upgraded under the lock:
+    /// dropping the last reference to a process logs, and logging needs
+    /// this lock.
     claimer: Option<Weak<Process>>,
     /// Bumped by every write: lets `DISPLAY_TEXT` readers skip unchanged
     /// text.
@@ -325,13 +329,13 @@ pub fn try_write(bytes: &[u8]) {
 }
 
 impl Display {
-    /// The console draws again if the process holding the screen is gone.
+    /// The console draws again if the process holding the screen is gone:
+    /// it exited (`process_exited` cleared the claimer) or was dropped.
     fn take_back_if_abandoned(&mut self) {
         let alive = self
             .claimer
             .as_ref()
-            .and_then(Weak::upgrade)
-            .is_some_and(|process| process.exit_status().is_none());
+            .is_some_and(|claimer| claimer.strong_count() > 0);
         if self.visible || alive {
             return;
         }
@@ -349,6 +353,7 @@ impl Display {
 
 /// What `DISPLAY_INFO` reports (ADR-0057), if there is a usable screen.
 pub fn info() -> Option<oceans_abi::display::Info> {
+    let _no_preempt = NoPreempt::new();
     let guard = DISPLAY.lock();
     let display = guard.as_ref()?;
     let fb = &display.framebuffer;
@@ -369,6 +374,7 @@ pub fn info() -> Option<oceans_abi::display::Info> {
 /// drawing until that process is gone. `None` if there is no screen or a
 /// live process already holds it.
 pub fn claim(process: &Arc<Process>) -> Option<Arc<MemoryObject>> {
+    let _no_preempt = NoPreempt::new();
     let mut guard = DISPLAY.lock();
     let display = guard.as_mut()?;
     display.take_back_if_abandoned();
@@ -389,6 +395,7 @@ pub fn claim(process: &Arc<Process>) -> Option<Arc<MemoryObject>> {
 /// and row as u16, the generation as u64), then the cells, row by row.
 /// Returns the bytes written, or `None` without a screen.
 pub fn text(out: &mut [u8]) -> Option<usize> {
+    let _no_preempt = NoPreempt::new();
     let mut guard = DISPLAY.lock();
     let display = guard.as_mut()?;
     display.take_back_if_abandoned();
@@ -407,4 +414,19 @@ pub fn text(out: &mut [u8]) -> Option<usize> {
         out[header..len].copy_from_slice(&display.cells[..len - header]);
     }
     Some(len)
+}
+
+/// Called when `process` exits: if it held the screen, the console takes
+/// it back at its next write (ADR-0057).
+pub fn process_exited(process: &Process) {
+    let _no_preempt = NoPreempt::new();
+    let mut guard = DISPLAY.lock();
+    if let Some(display) = guard.as_mut()
+        && display
+            .claimer
+            .as_ref()
+            .is_some_and(|claimer| core::ptr::eq(claimer.as_ptr(), process))
+    {
+        display.claimer = None;
+    }
 }
