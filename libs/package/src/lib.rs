@@ -110,6 +110,41 @@ impl Permission {
     }
 }
 
+/// How the program is run (ADR-0052).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runtime {
+    /// An x86-64 ELF executable, spawned directly (the default).
+    Native,
+    /// A WebAssembly module built for wasip1 (a Go program, ADR-0050), run
+    /// by the Go host.
+    Wasm,
+}
+
+impl Runtime {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Wasm => "wasm",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Native, Self::Wasm]
+            .into_iter()
+            .find(|r| r.name() == name)
+    }
+
+    /// Whether `program` starts as this runtime's programs must: an ELF
+    /// header, or the WebAssembly magic and binary format version 1. The
+    /// rest is checked by whoever loads it (the kernel, the Go host).
+    pub fn accepts(self, program: &[u8]) -> bool {
+        match self {
+            Self::Native => program.starts_with(b"\x7fELF"),
+            Self::Wasm => program.starts_with(b"\0asm\x01\0\0\0"),
+        }
+    }
+}
+
 /// A requested permission and the app's reason for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Request<'a> {
@@ -173,6 +208,8 @@ pub struct Manifest<'a> {
     /// boot and is restarted when it fails; `kind = app` (the default):
     /// started by the user.
     pub service: bool,
+    /// `runtime = native` (the default) or `wasm` (ADR-0052).
+    pub runtime: Runtime,
     /// Where the source is, if published.
     pub source: Option<&'a str>,
     requests: [Option<Request<'a>>; MAX_PERMISSIONS],
@@ -214,8 +251,8 @@ impl ManifestError {
 
 impl<'a> Manifest<'a> {
     pub fn parse(text: &'a str) -> Result<Self, ManifestError> {
-        let mut fields: [Option<&'a str>; 10] = [None; 10];
-        const KEYS: [&str; 10] = [
+        let mut fields: [Option<&'a str>; 11] = [None; 11];
+        const KEYS: [&str; 11] = [
             "id",
             "name",
             "version",
@@ -226,6 +263,7 @@ impl<'a> Manifest<'a> {
             "entry",
             "channel",
             "kind",
+            "runtime",
         ];
         let mut source = None;
         let mut requests = [None; MAX_PERMISSIONS];
@@ -303,6 +341,12 @@ impl<'a> Manifest<'a> {
                 ));
             }
         };
+        let runtime = match fields[10] {
+            None => Runtime::Native,
+            Some(name) => Runtime::from_name(name).ok_or(ManifestError::BadText(
+                "the runtime is neither native nor wasm",
+            ))?,
+        };
         let checks = [
             (
                 text_ok(name, MAX_NAME),
@@ -341,6 +385,7 @@ impl<'a> Manifest<'a> {
             entry,
             channel,
             service,
+            runtime,
             source,
             requests,
         })
@@ -475,6 +520,8 @@ pub enum PackageError {
     WrongArchitecture,
     /// Needs a newer API level than the system offers.
     ApiTooNew,
+    /// The program is not in its runtime's format (ADR-0052).
+    WrongFormat(Runtime),
 }
 
 impl PackageError {
@@ -490,6 +537,8 @@ impl PackageError {
             Self::NoEntry => "the program named by the manifest is missing",
             Self::WrongArchitecture => "built for another architecture",
             Self::ApiTooNew => "needs a newer version of Oceans",
+            Self::WrongFormat(Runtime::Native) => "the program is not an ELF executable",
+            Self::WrongFormat(Runtime::Wasm) => "the program is not a WebAssembly module",
         }
     }
 }
@@ -505,7 +554,8 @@ pub struct Package<'a> {
 
 impl<'a> Package<'a> {
     /// Verifies and opens a package: archive, signature, trust, manifest,
-    /// in that order (nothing unverified is interpreted).
+    /// in that order (nothing unverified is interpreted), then that the
+    /// program is in its runtime's format.
     pub fn open(bytes: &'a [u8], trusted: &[TrustedKey<'_>]) -> Result<Self, PackageError> {
         let archive = Archive::parse(bytes).map_err(PackageError::Archive)?;
         let count = archive.len();
@@ -549,8 +599,9 @@ impl<'a> Package<'a> {
         if manifest.api > API_LEVEL {
             return Err(PackageError::ApiTooNew);
         }
-        if archive.find(manifest.entry).is_none() {
-            return Err(PackageError::NoEntry);
+        let entry = archive.find(manifest.entry).ok_or(PackageError::NoEntry)?;
+        if !manifest.runtime.accepts(entry) {
+            return Err(PackageError::WrongFormat(manifest.runtime));
         }
         Ok(Self {
             archive,

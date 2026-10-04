@@ -57,6 +57,9 @@ func hostPublishText(text unsafe.Pointer, n uint32) int64
 //go:wasmimport oceans system_info
 func hostSystemInfo(sysinfo uint64, kind uint64, buf unsafe.Pointer, cap uint32) int64
 
+//go:wasmimport oceans read_text
+func hostReadText(memory uint64, buf unsafe.Pointer, cap uint32) int64
+
 func ptr(b []byte) unsafe.Pointer {
 	if len(b) == 0 {
 		return nil

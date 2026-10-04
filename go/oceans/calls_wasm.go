@@ -133,6 +133,24 @@ func PublishText(text string) (Handle, error) {
 	return Handle(v), err
 }
 
+// ReadText returns the text in read-only memory object `memory` (as
+// PublishText makes them: UTF-8, up to the first NUL), at most MaxText
+// bytes.
+func ReadText(memory Handle) (string, error) {
+	for _, size := range []int{1024, MaxText} {
+		buf := make([]byte, size)
+		n, err := result(hostReadText(uint64(memory), ptr(buf), uint32(len(buf))))
+		if err == ErrTooLarge && size < MaxText {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return string(buf[:n]), nil
+	}
+	return "", ErrTooLarge
+}
+
 // SystemInfo reads records of `kind` (oceans_abi::sysinfo) into a buffer.
 func SystemInfo(sysinfo Handle, kind uint64) ([]byte, error) {
 	buf := make([]byte, 16*1024)

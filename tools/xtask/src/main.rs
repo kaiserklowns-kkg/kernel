@@ -58,7 +58,8 @@ const USER_PROGRAMS: &[&str] = &[
 /// the result on the host.
 const DISK_IMAGE: &str = "build/disk.img";
 const SMOKE_DISK_IMAGE: &str = "build/smoke-disk.img";
-const DISK_SIZE: u64 = 8 * 1024 * 1024;
+/// Room for Go apps too (ADR-0052): their packages are a few MB each.
+const DISK_SIZE: u64 = 32 * 1024 * 1024;
 /// The USB stick QEMU plugs into the xHCI controller (ADR-0034): `run`
 /// keeps its own, `smoke` starts from a blank one: the first boot gets it
 /// formatted through `/usb` (ADR-0035) and stores `STICK_TEXT` and a
@@ -83,6 +84,9 @@ const UNTRUSTED_SEED: [u8; 32] = [0x55; 32];
 /// Go programs (ADR-0050), built for wasip1 and run by `gohost`: the
 /// package under `go/` and the module file name in the boot archive.
 const GO_PROGRAMS: &[(&str, &str)] = &[("./cmd/gohello", "gohello.wasm"), ("./cmd/ai", "ai.wasm")];
+/// Go apps (ADR-0052): built the same way into `build/go`, but shipped as
+/// packages, not in the boot archive.
+const GO_APPS: &[(&str, &str)] = &[("./apps/greeter", "greeter.wasm")];
 /// Signed example packages, built with every image (and served to the
 /// smoke test's guest over HTTP).
 const PACKAGES_DIR: &str = "build/packages";
@@ -92,6 +96,9 @@ const HELLO_MANIFEST: &str = include_str!("../../../user/apps/hello/manifest");
 /// The example service (user/apps/heartbeat, ADR-0049).
 const HEARTBEAT_PROGRAM: &str = "heartbeat-app";
 const HEARTBEAT_MANIFEST: &str = include_str!("../../../user/apps/heartbeat/manifest");
+/// The example Go app (go/apps/greeter, ADR-0052): a `wasm` program.
+const GREETER_PROGRAM: &str = "greeter.wasm";
+const GREETER_MANIFEST: &str = include_str!("../../../go/apps/greeter/manifest");
 /// A second stick, plugged in during the first smoke boot: FAT16 in an MBR
 /// partition, made by mkfs.fat and mtools (libs/fat/testdata, ADR-0036).
 const SMOKE_FAT_IMAGE: &str = "build/smoke-fat.img";
@@ -244,6 +251,17 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app enable app.oceans.hello\r\n",
     b"app enable app.oceans.heartbeat\r\n",
     b"app info app.oceans.heartbeat\r\n",
+    // Go apps (ADR-0052): a signed package whose program is WebAssembly,
+    // run by the Go host with the app's permissions (here the console and
+    // system information); as a service its output goes to the log.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/greeter-1.0.0.opk /keep/greeter.opk\r\n",
+    b"app install /keep/greeter.opk\r\n",
+    b"app info app.oceans.greeter\r\n",
+    b"app run app.oceans.greeter alpha beta\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/greeter-service-1.0.0.opk /keep/greeter-service.opk\r\n",
+    b"app install /keep/greeter-service.opk\r\n",
+    b"app enable app.oceans.greeter-service\r\n",
+    b"app list\r\n",
     // Oceans AI (ADR-0051): an agent with tools, against the scripted
     // model server; a read-only answer, an action approved, one denied.
     b"ai ask how much memory is free?\r\n",
@@ -368,6 +386,7 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"cat /nvme/note.txt\r\n",
     b"app list\r\n",
     b"app run app.oceans.hello\r\n",
+    b"app run app.oceans.greeter after a reboot\r\n",
     b"app remove app.oceans.hello\r\n",
     b"app disable app.oceans.heartbeat\r\n",
     b"app list\r\n",
@@ -390,7 +409,11 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("kept on a usb stick"),
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
-    Expect::Contains("core: ready, 2 apps installed"),
+    // Hello, Heartbeat, Greeter and Greeter Service (ADR-0052).
+    Expect::Contains("core: ready, 4 apps installed"),
+    Expect::Contains("core: started service app.oceans.greeter-service"),
+    Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
+    Expect::Line("greeter: 3 arguments: \"after\" \"a\" \"reboot\""),
     Expect::Line("  app.oceans.hello  1.0.0  Hello"),
     Expect::Line("hello: run 8 (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
@@ -582,6 +605,19 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: restarted service app.oceans.heartbeat"),
     Expect::Contains("heartbeat: run 2, beating"),
     Expect::Contains("service, enabled (starts at boot), "),
+    Expect::Contains("app: installed app.oceans.greeter 1.0.0"),
+    Expect::Line("  runtime: wasm"),
+    Expect::Line("Greeter (app.oceans.greeter) 1.0.0"),
+    Expect::Line("greeter: hello from app.oceans.greeter 1.0.0, a Go app on Oceans"),
+    Expect::Line("greeter: 2 arguments: \"alpha\" \"beta\""),
+    Expect::Contains("greeter: memory: "),
+    Expect::Contains("core: app.oceans.greeter exited with code 0"),
+    Expect::Contains("started app.oceans.greeter 1.0.0 with console, system-info"),
+    Expect::Contains("app: installed app.oceans.greeter-service 1.0.0"),
+    Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
+    Expect::Contains("greeter: no arguments"),
+    Expect::Contains("core: app.oceans.greeter-service exited with code 0"),
+    Expect::Line("  app.oceans.greeter  1.0.0  Greeter"),
     Expect::Contains("lsusb: requests `use:usb`"),
     Expect::Contains(
         "xhci: port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s), keyboard (console input)",
@@ -896,13 +932,13 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     let manifest_bytes = fs::read(&manifest_path)
         .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
     files.push(("services.conf".to_string(), manifest_bytes));
-    for (name, bytes) in build_go()? {
+    for (name, bytes) in build_go(GO_PROGRAMS)? {
         files.push((name, bytes));
     }
     // Oceans Core's trusted publisher keys (ADR-0046): the root of trust
     // for apps comes with the boot image.
     files.push(("trust.keys".to_string(), trust_list()?.into_bytes()));
-    build_packages(&user)?;
+    build_packages(&user, &build_go(GO_APPS)?)?;
     let entries: Vec<(&str, &[u8])> = files
         .iter()
         .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
@@ -1318,13 +1354,13 @@ fn go() -> Command {
     cmd
 }
 
-/// The Go programs (ADR-0050), built for WebAssembly: `(archive name,
-/// module)`.
-fn build_go() -> Result<Vec<(String, Vec<u8>)>> {
+/// Go programs (ADR-0050), built for WebAssembly into `build/go`: `(file
+/// name, module)` for each `(package, file name)` of `programs`.
+fn build_go(programs: &[(&str, &str)]) -> Result<Vec<(String, Vec<u8>)>> {
     let out = root().join("build").join("go");
     fs::create_dir_all(&out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
     let mut modules = Vec::new();
-    for &(package, name) in GO_PROGRAMS {
+    for &(package, name) in programs {
         let path = out.join(name);
         run_command(
             go().env("GOOS", "wasip1")
@@ -1389,10 +1425,11 @@ fn trust_list() -> Result<String> {
     ))
 }
 
-/// The example packages in `build/packages`: Hello 1.0.0 and 2.0.0, and
-/// two the system must refuse (signed by an untrusted key, and changed
-/// after signing).
-fn build_packages(user: &Path) -> Result {
+/// The example packages in `build/packages`: Hello 1.0.0 and 2.0.0, two
+/// the system must refuse (signed by an untrusted key, and changed after
+/// signing), the Heartbeat service, and the Go app Greeter (`go_apps`, as
+/// `build_go` made them) as an app and as a service.
+fn build_packages(user: &Path, go_apps: &[(String, Vec<u8>)]) -> Result {
     let program = fs::read(user.join(HELLO_PROGRAM))
         .map_err(|e| format!("cannot read {HELLO_PROGRAM}: {e}"))?;
     let seed = dev_seed()?;
@@ -1432,6 +1469,27 @@ fn build_packages(user: &Path) -> Result {
         &seed,
     )
     .map_err(|e| format!("cannot build a package: {e:?}"))?;
+    let greeter = go_apps
+        .iter()
+        .find(|(name, _)| name == GREETER_PROGRAM)
+        .map(|(_, bytes)| bytes.as_slice())
+        .ok_or("the greeter Go app was not built")?;
+    // The same program as a service (ADR-0049): no console, so the Go
+    // host sends its output to the log.
+    let greeter_service = GREETER_MANIFEST
+        .replace("id = app.oceans.greeter", "id = app.oceans.greeter-service")
+        .replace("name = Greeter", "name = Greeter Service")
+        .replace("runtime = wasm", "runtime = wasm\nkind = service");
+    let greeter_package = |manifest: &str| {
+        oceans_package::build(
+            &[
+                ("manifest", manifest.as_bytes()),
+                (GREETER_PROGRAM, greeter),
+            ],
+            &seed,
+        )
+        .map_err(|e| format!("cannot build a package: {e:?}"))
+    };
     let dir = root().join(PACKAGES_DIR);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (name, bytes) in [
@@ -1440,6 +1498,11 @@ fn build_packages(user: &Path) -> Result {
         ("hello-2.0.0.opk", sign(&v2, &seed)?),
         ("untrusted.opk", sign(HELLO_MANIFEST, &UNTRUSTED_SEED)?),
         ("tampered.opk", tampered),
+        ("greeter-1.0.0.opk", greeter_package(GREETER_MANIFEST)?),
+        (
+            "greeter-service-1.0.0.opk",
+            greeter_package(&greeter_service)?,
+        ),
     ] {
         let path = dir.join(name);
         fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
