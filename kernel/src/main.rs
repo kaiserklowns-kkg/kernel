@@ -97,7 +97,8 @@ extern "C" fn kernel_main_on_kernel_stack() -> ! {
     // Hand the system to init. This thread stays only to report if init
     // ever exits (it should not): nothing else would notice.
     if let Some(init) = process::init::start(boot, false) {
-        let code = init.wait_exit();
+        // A kernel thread is never interrupted: the code is always there.
+        let code = init.wait_exit().unwrap_or(process::EXIT_KILLED);
         klog::error!("init exited with code {code}: no userspace is running");
     }
     sched::exit()

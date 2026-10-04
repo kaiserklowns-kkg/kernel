@@ -78,6 +78,14 @@ pub fn set_user_fault_handler(handler: fn(&TrapFrame) -> !) {
     USER_FAULT_HANDLER.call_once(|| handler);
 }
 
+/// Runs before an interrupt returns to user mode (ADR-0044: a killed
+/// process must not run user code again).
+static USER_RETURN_HOOK: Once<fn()> = Once::new();
+
+pub fn set_user_return_hook(hook: fn()) {
+    USER_RETURN_HOOK.call_once(|| hook);
+}
+
 /// Register state at the time of the exception, in stack order.
 #[repr(C)]
 #[derive(Debug)]
@@ -316,6 +324,9 @@ extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
             }
         }
         _ => fatal_exception(frame),
+    }
+    if from_user && let Some(hook) = USER_RETURN_HOOK.get() {
+        hook();
     }
 }
 

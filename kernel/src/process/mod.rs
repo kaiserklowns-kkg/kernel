@@ -16,7 +16,7 @@
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -54,6 +54,9 @@ const IMAGE_LIMITS: Limits = Limits {
 /// Where `MEMORY_MAP` places objects when the caller lets the kernel choose.
 const MAP_REGION_START: u64 = 0x0000_1000_0000_0000;
 const MAP_REGION_END: u64 = 0x0000_7000_0000_0000;
+
+/// Exit code of a process ended by `PROCESS_KILL` (ADR-0044).
+pub const EXIT_KILLED: i64 = oceans_abi::EXIT_KILLED;
 
 /// Exit code of a process killed by CPU exception `vector`.
 pub const fn killed_by_exception(vector: u64) -> i64 {
@@ -246,6 +249,11 @@ pub struct Process {
     /// Notifications signalled at exit (`PROCESS_WATCH`); guarded by
     /// `exit_waiters`' lock ordering: always taken after it.
     watchers: Mutex<Vec<(Arc<Notification>, u64)>>,
+    /// `PROCESS_KILL` was called: the process ends at its next return to
+    /// user mode (ADR-0044).
+    killed: AtomicBool,
+    /// The process's thread (one per process for now), to interrupt it.
+    thread: Mutex<Option<Weak<Thread>>>,
 }
 
 impl fmt::Debug for Process {
@@ -315,20 +323,50 @@ impl Process {
             .then(|| self.exit_code.load(Ordering::Relaxed))
     }
 
-    /// Blocks until the process exits; returns its exit code.
-    pub fn wait_exit(&self) -> i64 {
+    /// Blocks until the process exits; returns its exit code (`None` if
+    /// the waiting thread was interrupted, ADR-0044).
+    pub fn wait_exit(&self) -> Option<i64> {
         arch::without_interrupts(|| {
             loop {
                 {
                     let mut waiters = self.exit_waiters.lock();
                     if let Some(code) = self.exit_status() {
-                        return code;
+                        return Some(code);
+                    }
+                    if sched::interrupted() {
+                        let me = sched::current();
+                        waiters.retain(|waiter| !Arc::ptr_eq(waiter, &me));
+                        return None;
                     }
                     waiters.push_back(sched::current());
                 }
                 sched::block();
             }
         })
+    }
+
+    /// Records the thread running this process (see `sched::spawn_user`).
+    pub fn attach_thread(&self, thread: Weak<Thread>) {
+        arch::without_interrupts(|| *self.thread.lock() = Some(thread));
+    }
+
+    /// Ends the process (ADR-0044): its thread is interrupted out of any
+    /// wait and exits with [`EXIT_KILLED`] before it runs user code again.
+    /// Killing a process that has exited does nothing.
+    pub fn kill(&self) {
+        if self.exit_status().is_some() {
+            return;
+        }
+        self.killed.store(true, Ordering::Release);
+        let thread =
+            arch::without_interrupts(|| self.thread.lock().as_ref().and_then(Weak::upgrade));
+        if let Some(thread) = thread {
+            sched::interrupt(&thread);
+        }
+    }
+
+    pub fn is_killed(&self) -> bool {
+        self.killed.load(Ordering::Acquire)
     }
 
     /// Signals `bits` on `notification` when the process exits, or now if
@@ -560,6 +598,8 @@ fn spawn_with_parent(
         exit_code: AtomicI64::new(0),
         exit_waiters: Mutex::new(VecDeque::new()),
         watchers: Mutex::new(Vec::new()),
+        killed: AtomicBool::new(false),
+        thread: Mutex::new(None),
     });
     let args = [handles.len() as u64, handles_addr, arg];
     sched::spawn_user(
@@ -589,6 +629,7 @@ pub fn validate_image(image: &[u8]) -> Result<(), Error> {
 /// Enables user mode: syscalls and the ring-3 fault handler.
 pub fn init() {
     arch::set_user_fault_handler(on_user_fault);
+    arch::set_user_return_hook(exit_if_killed);
     arch::init_syscalls(crate::syscall::dispatch);
 }
 
@@ -610,6 +651,17 @@ pub fn exit_current(code: i64) -> ! {
     }
     drop(thread);
     sched::exit()
+}
+
+/// Ends the current process if it has been killed (ADR-0044). Runs before
+/// every return to user mode (syscalls and interrupts).
+pub fn exit_if_killed() {
+    let thread = sched::current();
+    let killed = thread.process().is_some_and(|process| process.is_killed());
+    drop(thread);
+    if killed {
+        exit_current(EXIT_KILLED);
+    }
 }
 
 /// A CPU exception in user mode kills the process, never the kernel.

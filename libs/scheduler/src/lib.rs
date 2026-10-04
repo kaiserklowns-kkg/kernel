@@ -77,6 +77,23 @@ impl<T> RunQueue<T> {
         woken
     }
 
+    /// Moves the first sleeper `matches` accepts to the ready queue now
+    /// (an interrupted sleep); returns whether there was one.
+    pub fn wake_sleeper(&mut self, matches: impl Fn(&T) -> bool) -> bool {
+        let key = self
+            .sleeping
+            .iter()
+            .find(|(_, thread)| matches(thread))
+            .map(|(&key, _)| key);
+        match key.and_then(|key| self.sleeping.remove(&key)) {
+            Some(thread) => {
+                self.ready.push_back(thread);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The earliest wake-up tick, if anything sleeps (for tickless idle).
     pub fn next_deadline(&self) -> Option<u64> {
         self.sleeping.keys().next().map(|&(deadline, _)| deadline)
@@ -116,6 +133,21 @@ impl TimeSlice {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    #[test]
+    fn an_interrupted_sleeper_leaves_the_sleep_queue() {
+        let mut q = RunQueue::new();
+        q.sleep_until(1, 100);
+        q.sleep_until(2, 50);
+        q.sleep_until(3, 200);
+        assert!(q.wake_sleeper(|&t| t == 1));
+        assert!(!q.wake_sleeper(|&t| t == 9));
+        assert_eq!(q.pop_ready(), Some(1));
+        assert_eq!(q.sleeping_len(), 2);
+        // The others still wake on time, in deadline order.
+        assert_eq!(q.wake_due(300), 2);
+        assert_eq!((q.pop_ready(), q.pop_ready()), (Some(2), Some(3)));
+    }
 
     #[test]
     fn ready_queue_is_fifo_round_robin() {

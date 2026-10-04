@@ -21,7 +21,7 @@ pub use context::{prepare_stack, switch_context};
 pub use cpu::{enable_protections, features as cpu_features};
 pub use interrupts::{
     DEVICE_VECTORS, TrapFrame, set_after_device_interrupt, set_device_handler,
-    set_user_fault_handler,
+    set_user_fault_handler, set_user_return_hook,
 };
 pub use paging::{AddressSpace, activate_root, active_root};
 pub use rtc::{Reading as RtcReading, now as rtc_now};

@@ -23,7 +23,7 @@
 /// (39: wall time); 11 = ADR-0032 (40: console input; class selectors for
 /// `DEVICE_OPEN`). Versions only
 /// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 11;
+pub const ABI_VERSION: u64 = 12;
 
 /// System call numbers.
 pub mod nr {
@@ -195,7 +195,19 @@ pub mod nr {
     /// [`CONSOLE_IO_MAX`](super::CONSOLE_IO_MAX)) bytes to the console's
     /// input, as if typed (keyboard drivers). Needs `MANAGE`.
     pub const CONSOLE_INPUT: u64 = 40;
+
+    // ABI 12
+
+    /// `(process) -> ()` — ends the process (ADR-0044): its thread leaves
+    /// any wait and the process exits with
+    /// [`EXIT_KILLED`](super::EXIT_KILLED) before running user code again.
+    /// Killing an exited process does nothing. Needs `MANAGE`.
+    pub const PROCESS_KILL: u64 = 41;
 }
+
+/// The exit code of a process ended by `PROCESS_KILL` (ADR-0044). Exit
+/// codes from CPU exceptions are `-128 - vector`, so they never collide.
+pub const EXIT_KILLED: i64 = -127;
 
 /// Largest single `RANDOM` request, in bytes.
 pub const RANDOM_MAX: usize = 256;

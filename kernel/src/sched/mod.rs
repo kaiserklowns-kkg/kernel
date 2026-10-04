@@ -39,6 +39,9 @@ pub struct Thread {
     /// Set while the thread waits in [`block`] for a [`wake`]. Guards
     /// against double wake-ups, which would queue a thread twice.
     blocked: AtomicBool,
+    /// Set by [`interrupt`]: the thread must not block or sleep any more;
+    /// its process is being killed (ADR-0044).
+    interrupted: AtomicBool,
     /// Page-table root the thread runs in: the kernel's for kernel threads,
     /// its process's for user threads.
     root: u64,
@@ -136,6 +139,7 @@ pub fn init() {
         // Filled in by the first switch away from it.
         saved_rsp: UnsafeCell::new(0),
         blocked: AtomicBool::new(false),
+        interrupted: AtomicBool::new(false),
         root: kernel_root,
         process: None,
         pending_call: Mutex::new(None),
@@ -210,6 +214,9 @@ pub fn spawn_user(
         }
     };
     let id = thread.id;
+    if let Some(process) = &thread.process {
+        process.attach_thread(Arc::downgrade(&thread));
+    }
     arch::without_interrupts(|| SCHEDULER.lock().queue.push_ready(thread));
     Ok(id)
 }
@@ -219,10 +226,15 @@ pub fn yield_now() {
     arch::without_interrupts(|| schedule(Reason::Yield));
 }
 
-/// Blocks the current thread for at least `ms` milliseconds.
+/// Blocks the current thread for at least `ms` milliseconds, or until it
+/// is interrupted.
 pub fn sleep_ms(ms: u64) {
     let ticks = time::ms_to_ticks(ms).max(1);
-    arch::without_interrupts(|| schedule(Reason::Sleep(time::ticks() + ticks)));
+    arch::without_interrupts(|| {
+        if !interrupted() {
+            schedule(Reason::Sleep(time::ticks() + ticks));
+        }
+    });
 }
 
 /// Ends the current thread.
@@ -243,30 +255,80 @@ pub fn current() -> Arc<Thread> {
 /// condition and registering the thread with the object that will wake it:
 /// on a single CPU that makes check-register-block atomic, so no wake-up can
 /// be lost. The registration must keep the thread alive (hold its `Arc`).
+///
+/// An [`interrupted`] thread does not block (or returns as soon as it is
+/// interrupted): the caller then removes its registration and gives up.
 pub fn block() {
-    schedule_to(None, Reason::Block);
+    if !interrupted() {
+        schedule_to(None, Reason::Block);
+    }
 }
 
 /// Like [`block`], but runs `next` (which must be blocked) immediately
-/// instead of the next ready thread: the IPC direct switch.
+/// instead of the next ready thread: the IPC direct switch. If `next` was
+/// interrupted meanwhile (it is already runnable), this is a plain block.
 pub fn block_and_switch_to(next: Arc<Thread>) {
-    claim_wake(&next);
-    schedule_to(Some(next), Reason::Block);
-}
-
-/// Makes a thread blocked in [`block`] runnable again.
-pub fn wake(thread: Arc<Thread>) {
-    claim_wake(&thread);
-    arch::without_interrupts(|| SCHEDULER.lock().queue.push_ready(thread));
-}
-
-fn claim_wake(thread: &Thread) {
-    if !thread.blocked.swap(false, Ordering::AcqRel) {
-        panic!(
-            "thread {} ({}) woken while not blocked",
-            thread.id.0, thread.name
-        );
+    if interrupted() {
+        // `next` stays blocked; give the CPU to whoever is ready.
+        return;
     }
+    if try_claim(&next) {
+        schedule_to(Some(next), Reason::Block);
+    } else {
+        schedule_to(None, Reason::Block);
+    }
+}
+
+/// Makes a thread blocked in [`block`] runnable again. An interrupted
+/// thread has already been made runnable: waking it is a no-op.
+pub fn wake(thread: Arc<Thread>) {
+    if try_claim(&thread) {
+        arch::without_interrupts(|| SCHEDULER.lock().queue.push_ready(thread));
+    }
+}
+
+/// Takes the right to make `thread` runnable: `false` if it was already
+/// woken by [`interrupt`]. A wake of a thread that is neither blocked nor
+/// interrupted is a kernel bug.
+fn try_claim(thread: &Thread) -> bool {
+    if thread.blocked.swap(false, Ordering::AcqRel) {
+        return true;
+    }
+    if thread.interrupted.load(Ordering::Acquire) {
+        return false;
+    }
+    panic!(
+        "thread {} ({}) woken while not blocked",
+        thread.id.0, thread.name
+    );
+}
+
+/// Interrupts `thread` for good (its process is being killed, ADR-0044):
+/// if it is blocked or asleep it runs again now, and it will not block or
+/// sleep again. Whatever it waited on sees it gone when it deregisters.
+pub fn interrupt(thread: &Arc<Thread>) {
+    arch::without_interrupts(|| {
+        thread.interrupted.store(true, Ordering::Release);
+        let mut scheduler = SCHEDULER.lock();
+        if thread.blocked.swap(false, Ordering::AcqRel) {
+            scheduler.queue.push_ready(thread.clone());
+        } else {
+            scheduler
+                .queue
+                .wake_sleeper(|sleeper| Arc::ptr_eq(sleeper, thread));
+        }
+    });
+}
+
+/// Whether the running thread has been interrupted.
+pub fn interrupted() -> bool {
+    arch::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .current
+            .as_ref()
+            .is_some_and(|current| current.interrupted.load(Ordering::Acquire))
+    })
 }
 
 /// Threads that exist (including the idle thread and unreaped zombies).
@@ -294,6 +356,7 @@ fn new_thread(
         name,
         saved_rsp: UnsafeCell::new(rsp),
         blocked: AtomicBool::new(false),
+        interrupted: AtomicBool::new(false),
         root,
         process,
         pending_call: Mutex::new(None),

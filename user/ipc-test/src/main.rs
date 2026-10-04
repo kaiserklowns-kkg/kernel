@@ -11,7 +11,9 @@
 //!   across mappings, overlap), an endpoint it creates, a **child** it spawns
 //!   from its image, and capabilities moved in both directions;
 //! - **child**: maps a memory object received over IPC and replies with a
-//!   new one of its own.
+//!   new one of its own;
+//! - **victim** (ABI 12): blocks in one way or another (receive, call,
+//!   notification wait, sleep, a busy loop) until the parent kills it.
 //!
 //! Every process gets a log capability as handle 0.
 
@@ -29,6 +31,21 @@ const ROLE_CLIENT: u64 = 2;
 const ROLE_INTRUDER: u64 = 3;
 const ROLE_PARENT: u64 = 4;
 const ROLE_CHILD: u64 = 5;
+/// Victims: `ROLE_VICTIM + way` (see [`Victim`]).
+const ROLE_VICTIM: u64 = 0x10;
+
+/// How a victim waits to be killed.
+#[derive(Clone, Copy)]
+enum Victim {
+    /// In `ipc_receive` on the server end it was given.
+    Receive = 0,
+    /// In `ipc_call` on the client end it was given (nobody answers).
+    Call = 1,
+    NotificationWait = 2,
+    Sleep = 3,
+    /// Running user code, never entering the kernel.
+    Spin = 4,
+}
 
 const LABEL_SUM: u64 = 0x5u64 << 8;
 const GREETING: &[u8] = b"hello from child";
@@ -50,6 +67,9 @@ fn main(start: Start) -> i64 {
         (ROLE_INTRUDER, _) => run_intruder(log),
         (ROLE_PARENT, Some(&image)) => run_parent(log, image),
         (ROLE_CHILD, Some(&server)) => run_child(log, server),
+        (way, end) if (ROLE_VICTIM..ROLE_VICTIM + 5).contains(&way) => {
+            run_victim(way - ROLE_VICTIM, end)
+        }
         _ => 1,
     }
 }
@@ -258,7 +278,99 @@ fn parent_steps(log: Handle, image: Handle) -> Result<(), i64> {
             "parent: memory rules, spawn, capability transfer both ways and wait verified"
         ),
     );
+    kill_steps(log, image)?;
+    log_line(
+        log,
+        format_args!(
+            "parent: processes killed while receiving, calling, waiting, sleeping and running"
+        ),
+    );
     Ok(())
+}
+
+/// `PROCESS_KILL` (ADR-0044): a victim is killed in each way it can wait,
+/// exits with `EXIT_KILLED`, and leaves nothing behind (no pending call, no
+/// server end).
+fn kill_steps(log: Handle, image: Handle) -> Result<(), i64> {
+    use oceans_rt::{
+        close, duplicate, endpoint_create, ipc_call, ipc_receive, process_kill, process_spawn,
+        process_wait, rights, sleep_ms,
+    };
+    let expect = |step: i64, ok: bool| if ok { Ok(()) } else { Err(step) };
+    let killed = Ok(oceans_rt::EXIT_KILLED);
+    for (index, way) in [
+        Victim::Receive,
+        Victim::Call,
+        Victim::NotificationWait,
+        Victim::Sleep,
+        Victim::Spin,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let step = 30 + 5 * index as i64;
+        let (server, client) = endpoint_create().map_err(|_| step)?;
+        // The victim gets the end it waits on; we keep the other.
+        let (given, kept) = match way {
+            Victim::Receive => (server, client),
+            _ => (client, server),
+        };
+        let victim_log = duplicate(log, rights::WRITE | rights::TRANSFER).map_err(|_| step)?;
+        let victim = process_spawn(image, 0, &[victim_log, given], ROLE_VICTIM + way as u64)
+            .map_err(|_| step + 1)?;
+        // Long enough for it to block (or spin) on the single CPU.
+        sleep_ms(30);
+        expect(step + 2, process_kill(victim).is_ok())?;
+        expect(step + 3, process_wait(victim) == killed)?;
+        // Its ends closed with it, and no call it made stayed queued.
+        let mut buffer = [0u8; 8];
+        let gone = match way {
+            Victim::Receive => ipc_call(kept, 1, b"", &mut buffer).map(drop),
+            _ => ipc_receive(kept, &mut buffer).map(drop),
+        };
+        expect(step + 4, gone == Err(Error::PeerClosed))?;
+        let _ = close(kept);
+        // Killing it again does nothing.
+        expect(step + 4, process_kill(victim).is_ok())?;
+        let _ = close(victim);
+    }
+    // Without MANAGE, a process handle cannot kill.
+    let victim_log = duplicate(log, rights::WRITE | rights::TRANSFER).map_err(|_| 60)?;
+    let victim = process_spawn(image, 0, &[victim_log], ROLE_VICTIM + Victim::Sleep as u64)
+        .map_err(|_| 60)?;
+    let watch_only = duplicate(victim, rights::WAIT).map_err(|_| 61)?;
+    expect(62, process_kill(watch_only) == Err(Error::MissingRights))?;
+    expect(
+        63,
+        process_kill(victim).is_ok() && process_wait(victim) == killed,
+    )?;
+    Ok(())
+}
+
+/// Waits, as `way` says, until killed; returning at all is a failure.
+fn run_victim(way: u64, end: Option<&Handle>) -> i64 {
+    let mut buffer = [0u8; 8];
+    match way {
+        0 => {
+            let _ = end.map(|&server| oceans_rt::ipc_receive(server, &mut buffer));
+        }
+        1 => {
+            let _ = end.map(|&client| oceans_rt::ipc_call(client, 1, b"", &mut buffer));
+        }
+        2 => {
+            if let Ok(notification) = oceans_rt::notification_create() {
+                let _ = oceans_rt::notification_wait(notification);
+            }
+        }
+        3 => oceans_rt::sleep_ms(3_600_000),
+        _ => {
+            let mut spins = 0u64;
+            loop {
+                spins = core::hint::black_box(spins.wrapping_add(1));
+            }
+        }
+    }
+    FAIL_SURVIVED
 }
 
 fn run_child(log: Handle, server: Handle) -> i64 {

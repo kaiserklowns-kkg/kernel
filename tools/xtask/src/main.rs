@@ -319,7 +319,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 11)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 12)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -357,7 +357,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 11)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 12)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),

@@ -9,6 +9,7 @@
 use core::arch::asm;
 use core::fmt;
 
+pub use oceans_abi::EXIT_KILLED;
 pub use oceans_abi::Error;
 pub use oceans_abi::{MessageDesc, prot, rights};
 use oceans_abi::{nr, start::MAX_INITIAL_HANDLES};
@@ -369,6 +370,13 @@ pub fn notification_create() -> Result<Handle, Error> {
 /// Sets `bits` on the notification (needs `SIGNAL`). Never blocks.
 pub fn notification_signal(notification: Handle, bits: u64) -> Result<(), Error> {
     call(nr::NOTIFICATION_SIGNAL, [notification.0, bits, 0, 0, 0, 0]).map(drop)
+}
+
+/// Ends `process` (ABI 12, ADR-0044): it leaves any wait and exits with
+/// [`oceans_rt::EXIT_KILLED`] before running its own code again. Needs
+/// `MANAGE`; killing an exited process does nothing.
+pub fn process_kill(process: Handle) -> Result<(), Error> {
+    call(nr::PROCESS_KILL, [process.0, 0, 0, 0, 0, 0]).map(drop)
 }
 
 /// Blocks until any bit is set; returns and clears them (needs `WAIT`).

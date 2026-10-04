@@ -51,5 +51,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0041](0041-intel-ethernet.md) | Intel Ethernet (82574L / e1000e) | Accepted |
 | [0042](0042-usb-mice-and-pointer-input.md) | USB mice and pointer input | Accepted |
 | [0043](0043-ipv6.md) | IPv6 | Accepted |
+| [0044](0044-stopping-processes.md) | Stopping processes (ABI 12) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

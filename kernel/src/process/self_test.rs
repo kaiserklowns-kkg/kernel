@@ -102,7 +102,7 @@ pub fn self_test(boot: &BootInfo) {
     }
     klog::info!(
         "user process self-test passed: IPC between processes, intruder killed, \
-         parent spawned and waited for a child"
+         parent spawned, waited for and killed children"
     );
 }
 

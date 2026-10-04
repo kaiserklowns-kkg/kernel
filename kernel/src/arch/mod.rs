@@ -12,5 +12,6 @@ pub use self::x86_64::{
     enable_keyboard, enable_protections, enter_user, exception_name, exit_emulator, fault_address,
     halt_forever, hardware_random, init, init_syscalls, msi_message, prepare_stack, rtc_now,
     set_after_device_interrupt, set_device_handler, set_kernel_stack, set_user_fault_handler,
-    start_timer, switch_context, switch_stack, wait_for_interrupt, without_interrupts,
+    set_user_return_hook, start_timer, switch_context, switch_stack, wait_for_interrupt,
+    without_interrupts,
 };

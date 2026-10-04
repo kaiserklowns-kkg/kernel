@@ -102,7 +102,8 @@ impl Notification {
         arch::without_interrupts(|| self.state.lock().bound = None);
     }
 
-    /// Blocks until a signal arrives; returns (and clears) all pending bits.
+    /// Blocks until a signal arrives; returns (and clears) all pending bits
+    /// (0 if the waiting thread was interrupted, ADR-0044).
     pub fn wait(&self) -> u64 {
         arch::without_interrupts(|| {
             loop {
@@ -110,6 +111,11 @@ impl Notification {
                     let mut state = self.state.lock();
                     if state.bits != 0 {
                         return core::mem::take(&mut state.bits);
+                    }
+                    if sched::interrupted() {
+                        let me = sched::current();
+                        state.waiters.retain(|waiter| !Arc::ptr_eq(waiter, &me));
+                        return 0;
                     }
                     state.waiters.push_back(sched::current());
                 }

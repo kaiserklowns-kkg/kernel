@@ -32,6 +32,8 @@ pub enum IpcError {
     OutOfMemory,
     /// The notification is bound to another endpoint.
     Busy,
+    /// The waiting thread was interrupted: its process is being killed.
+    Interrupted,
 }
 
 /// IPC self-tests and round-trip benchmark, for smoke-test boots.

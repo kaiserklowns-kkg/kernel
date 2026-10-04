@@ -134,6 +134,9 @@ impl ClientEnd {
     /// message (the server they were meant for is gone).
     pub fn call(&self, request: Message) -> Result<Message, IpcError> {
         arch::without_interrupts(|| {
+            if sched::interrupted() {
+                return Err(IpcError::Interrupted);
+            }
             let slot = Arc::new(Mutex::new(Call {
                 caller: sched::current(),
                 badge: self.badge,
@@ -153,7 +156,20 @@ impl ClientEnd {
                 None => sched::block(),
             }
             let reply = slot.lock().reply.take();
-            reply.expect("caller woken without a reply")
+            match reply {
+                Some(reply) => reply,
+                // Interrupted: withdraw the call if it was not received
+                // (a server holding it may still answer; nobody listens).
+                None if sched::interrupted() => {
+                    self.endpoint
+                        .state
+                        .lock()
+                        .pending
+                        .retain(|pending| !Arc::ptr_eq(pending, &slot));
+                    Err(IpcError::Interrupted)
+                }
+                None => panic!("caller woken without a reply"),
+            }
         })
     }
 }
@@ -220,6 +236,13 @@ impl ServerEnd {
                     }
                     if state.clients == 0 {
                         return Err(IpcError::PeerClosed);
+                    }
+                    if sched::interrupted() {
+                        let me = sched::current();
+                        state
+                            .receivers
+                            .retain(|receiver| !Arc::ptr_eq(receiver, &me));
+                        return Err(IpcError::Interrupted);
                     }
                     state.receivers.push_back(sched::current());
                 }

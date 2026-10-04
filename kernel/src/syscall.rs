@@ -74,6 +74,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::CONSOLE_READ => console_read(&process, a0, a1, a2),
         nr::CONSOLE_WRITE => console_write(&process, a0, a1, a2),
         nr::CONSOLE_INPUT => console_input(&process, a0, a1, a2),
+        nr::PROCESS_KILL => process_kill(&process, a0),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
         nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
@@ -111,6 +112,9 @@ pub fn dispatch(frame: &mut SyscallFrame) {
     frame.r10 = 0;
     frame.r8 = 0;
     frame.r9 = 0;
+    // A process killed meanwhile (perhaps by itself) never sees the result.
+    drop(process);
+    process::exit_if_killed();
 }
 
 fn handle(raw: u64) -> Handle {
@@ -249,6 +253,8 @@ fn ipc_error(error: IpcError) -> Error {
         IpcError::MessageTooLarge | IpcError::TooManyCapabilities => Error::TooLarge,
         IpcError::OutOfMemory => Error::OutOfMemory,
         IpcError::Busy => Error::Busy,
+        // Only ever seen by a thread about to exit (ADR-0044).
+        IpcError::Interrupted => Error::PeerClosed,
     }
 }
 
@@ -603,8 +609,23 @@ fn process_wait(process: &Process, raw: u64) -> SyscallResult {
         )
     })
     .map_err(object_error)?;
-    let code = child.wait_exit();
+    // `None`: this process is being killed; the result is never seen.
+    let code = child.wait_exit().unwrap_or(process::EXIT_KILLED);
     Ok((0, code as u64))
+}
+
+/// `PROCESS_KILL` (ADR-0044): ends `raw`'s process; needs `MANAGE`.
+fn process_kill(process: &Process, raw: u64) -> SyscallResult {
+    let child = arch::without_interrupts(|| {
+        object::process(
+            &mut process.capabilities().lock(),
+            handle(raw),
+            Rights::MANAGE,
+        )
+    })
+    .map_err(object_error)?;
+    child.kill();
+    Ok((0, 0))
 }
 
 // ---- ABI 3 -----------------------------------------------------------------

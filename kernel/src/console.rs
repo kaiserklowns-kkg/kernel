@@ -135,6 +135,12 @@ pub fn read(out: &mut [u8]) -> usize {
                     }
                     return count;
                 }
+                // Interrupted (ADR-0044): nothing read; the caller exits.
+                if sched::interrupted() {
+                    let me = sched::current();
+                    input.readers.retain(|reader| !Arc::ptr_eq(reader, &me));
+                    return 0;
+                }
                 input.readers.push_back(sched::current());
             }
             sched::block();
