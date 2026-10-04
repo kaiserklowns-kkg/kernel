@@ -138,6 +138,9 @@ pub mod field {
     pub const SOURCE: u8 = 8;
     /// `app` or `service`; a service also says whether it is enabled.
     pub const KIND: u8 = 9;
+    /// `native`, or `wasm` for a WebAssembly program run by the Go host
+    /// (ADR-0052).
+    pub const RUNTIME: u8 = 10;
 }
 
 /// Who made a `DECIDE` decision (kept in the audit log).

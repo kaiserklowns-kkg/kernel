@@ -1,0 +1,16 @@
+# The example Go app's package manifest (ADR-0052). `cargo xtask` builds
+# go/apps/greeter for wasip1 and packages it as `greeter.wasm`, signed with
+# the development key (tools/keys), into build/packages/. Oceans Core runs
+# it in the Go host (gohost).
+id = app.oceans.greeter
+name = Greeter
+version = 1.0.0
+publisher = Oceans Examples
+description = The example Go app: says who it is, its arguments and the free memory
+architecture = x86_64
+api = 1
+runtime = wasm
+entry = greeter.wasm
+permission = console
+permission = system-info: show how much memory is free
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/go/apps/greeter

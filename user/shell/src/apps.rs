@@ -157,6 +157,10 @@ impl Shell {
             self.print(format_args!("  {}\r\n", description.as_str()));
         }
         let previous = get(field::PREVIOUS);
+        let runtime = get(field::RUNTIME);
+        if !runtime.as_str().is_empty() {
+            self.print(format_args!("  runtime: {}\r\n", runtime.as_str()));
+        }
         self.print(format_args!(
             "  {}, {}, channel: {}{}{}\r\n  permissions:\r\n",
             get(field::KIND).as_str(),

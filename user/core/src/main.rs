@@ -21,11 +21,15 @@
 //!   in the foreground (the caller gets a wait-only process handle) or
 //!   detached; `STOP` kills it (ABI 12); exits are noticed through a
 //!   notification bound to the endpoint.
+//! - **Runtimes** (ADR-0052): a `native` program is spawned directly; a
+//!   `wasm` one (a Go program) is run by the Go host, spawned with the
+//!   same capabilities plus the program as a read-only `module`.
 //!
 //! Manifest grants: `log`, `provide = core`, `use = fs` (the root: core
 //! keeps `/apps`, `/system` and hands out `/home`), and what it passes on:
 //! `use = net`, `use = input`, `sysinfo`; `module:trust.keys` (the trusted
-//! publisher keys, from the boot image).
+//! publisher keys, from the boot image); `module:gohost` (the Go host,
+//! for `wasm` apps).
 
 #![no_std]
 #![no_main]
@@ -42,7 +46,7 @@ use oceans_core_proto::{
     Decision, MAX_DATA, Status, access, field, op, outcome, run_flags, source,
 };
 use oceans_fs_proto::{FsError, Kind, Node, flags};
-use oceans_package::{Package, PackageError, Permission, TrustedKey, Version};
+use oceans_package::{Package, PackageError, Permission, Runtime, TrustedKey, Version};
 use oceans_rt::{Buffer, Directory, Handle, Start, prot, rights};
 
 oceans_rt::entry!(main);
@@ -61,9 +65,10 @@ const MAX_PACKAGE: u64 = 32 << 20;
 const FILE_BUFFER: usize = 128 * 1024;
 /// Audit entries kept in memory for `AUDIT` (all go to the log file).
 const AUDIT_KEPT: usize = 64;
-/// Handles an app may get: one per permission, its identity, arguments,
-/// directory.
-const MAX_APP_HANDLES: usize = 9;
+/// Handles an app may get besides its directory: one per permission, a
+/// log (services), its identity, arguments, and its program module
+/// (`wasm`).
+const MAX_APP_HANDLES: usize = Permission::ALL.len() + 4;
 
 const EXIT_BAD_START: i64 = 2;
 const EXIT_NO_STORAGE: i64 = 3;
@@ -119,6 +124,8 @@ struct App {
     previous: Option<Version>,
     /// A background service (ADR-0049).
     service: bool,
+    /// How its program runs (ADR-0052).
+    runtime: Runtime,
 }
 
 impl App {
@@ -138,6 +145,7 @@ impl App {
                 .collect(),
             previous,
             service: manifest.service,
+            runtime: manifest.runtime,
         }
     }
 
@@ -154,7 +162,11 @@ struct Launch<'a> {
     name: &'a str,
     /// `ID VERSION`, given to the app as `app info`.
     info: &'a str,
+    /// What is spawned: the program, or the Go host for a `wasm` one.
     image: Handle,
+    /// A `wasm` program, read-only, handed to the Go host as `module NAME`
+    /// (moved to the process, or closed if it cannot start).
+    module: Option<Handle>,
     granted: &'a [Permission],
     args: &'a str,
     /// Services get a log (ADR-0049).
@@ -200,6 +212,8 @@ struct Core {
     net: Option<Handle>,
     input: Option<Handle>,
     sysinfo: Option<Handle>,
+    /// The Go host's image, for `wasm` apps (ADR-0052).
+    gohost: Option<Handle>,
     trusted: Vec<(String, [u8; 32])>,
     apps: BTreeMap<String, App>,
     /// The user's decisions: `true` allowed, `false` denied.
@@ -256,6 +270,7 @@ impl Core {
             net: directory.find("use", "net"),
             input: directory.find("use", "input"),
             sysinfo: directory.find("sysinfo", "sysinfo"),
+            gohost: directory.find("module", "gohost"),
             trusted,
             apps: BTreeMap::new(),
             decisions: BTreeMap::new(),
@@ -886,6 +901,7 @@ impl Core {
                 (true, false) => "service",
                 (true, true) => "service, enabled (starts at boot)",
             }),
+            field::RUNTIME => text.write_str(app.runtime.name()),
             _ => return Err(Status::BadRequest.into()),
         };
         Ok(())
@@ -1034,18 +1050,45 @@ impl Core {
                 return Err(invalid(PackageError::BadSignature));
             }
             let entry_name = package.manifest.entry;
-            let image = memory_with(package.entry()).ok_or(Status::CannotStart)?;
+            let program = memory_with(package.entry()).ok_or(Status::CannotStart)?;
+            let (image, module) = match package.manifest.runtime {
+                Runtime::Native => (program, None),
+                // The Go host runs it (ADR-0052), with the app's
+                // capabilities and the program as a read-only module.
+                Runtime::Wasm => {
+                    let module = oceans_rt::duplicate(
+                        program,
+                        rights::READ | rights::MAP | rights::TRANSFER,
+                    );
+                    let _ = oceans_rt::close(program);
+                    let module = module.map_err(|_| Status::CannotStart)?;
+                    match self.gohost {
+                        Some(host) => (host, Some(module)),
+                        None => {
+                            let _ = oceans_rt::close(module);
+                            return Err(Refusal {
+                                status: Status::CannotStart,
+                                text: Some("this system has no Go host (gohost)".to_owned()),
+                            });
+                        }
+                    }
+                }
+            };
             let launch = Launch {
                 id: &id,
                 name: entry_name,
                 info: &alloc::format!("{id} {version}"),
                 image,
+                module,
                 granted: &granted,
                 args,
                 service,
             };
             let process = self.spawn(&launch, &mut out);
-            let _ = oceans_rt::close(image);
+            // The Go host's image is kept for the next `wasm` app.
+            if module.is_none() {
+                let _ = oceans_rt::close(image);
+            }
             let process = process?;
             let _ = oceans_rt::process_watch(process, self.notification, 1 << slot);
             self.running[slot] = Some(Running {
@@ -1074,14 +1117,16 @@ impl Core {
         result
     }
 
-    /// Spawns the app with a handle per granted permission, its arguments
-    /// and the directory describing them.
+    /// Spawns the app with its program module (`wasm`), a handle per
+    /// granted permission, its arguments and the directory describing
+    /// them.
     fn spawn(&self, launch: &Launch<'_>, out: &mut Option<Handle>) -> Result<Handle, Refusal> {
         let Launch {
             id,
             name,
             info,
             image,
+            module,
             granted,
             args,
             service,
@@ -1094,6 +1139,12 @@ impl Core {
             }
             Refusal::from(Status::CannotStart)
         };
+        // First, so every failure below closes it; the Go host runs the
+        // first `module` of its directory (entry names have no spaces).
+        if let Some(module) = module {
+            let _ = writeln!(directory, "{} module {name}", handles.len());
+            handles.push(module);
+        }
         for &permission in granted {
             let given = match permission {
                 Permission::Console => out.take().map(|out| (out, "console", "out")),

@@ -311,3 +311,73 @@ fn permissions_round_trip() {
     assert!(!Permission::Network.automatic());
     assert!(!Permission::Files.automatic());
 }
+
+#[test]
+fn runtimes_parse() {
+    assert_eq!(
+        Manifest::parse(MANIFEST_TEXT).unwrap().runtime,
+        Runtime::Native
+    );
+    for (line, runtime) in [
+        ("runtime = native\n", Runtime::Native),
+        ("runtime = wasm\n", Runtime::Wasm),
+    ] {
+        let text = std::format!("{MANIFEST_TEXT}{line}");
+        assert_eq!(Manifest::parse(&text).unwrap().runtime, runtime);
+    }
+    for bad in ["runtime = jvm\n", "runtime = Wasm\n", "runtime =\n"] {
+        let text = std::format!("{MANIFEST_TEXT}{bad}");
+        assert!(
+            matches!(Manifest::parse(&text), Err(ManifestError::BadText(_))),
+            "{bad}"
+        );
+    }
+    let twice = std::format!("{MANIFEST_TEXT}runtime = wasm\nruntime = wasm\n");
+    assert_eq!(
+        Manifest::parse(&twice),
+        Err(ManifestError::DuplicateKey(14))
+    );
+    for runtime in [Runtime::Native, Runtime::Wasm] {
+        assert_eq!(Runtime::from_name(runtime.name()), Some(runtime));
+    }
+}
+
+#[test]
+fn programs_must_match_their_runtime() {
+    const WASM: &[u8] = b"\0asm\x01\0\0\0\x01\x04\x01\x60\0\0";
+    const ELF: &[u8] = b"\x7fELF\x02\x01\x01";
+    assert!(Runtime::Wasm.accepts(WASM));
+    assert!(!Runtime::Wasm.accepts(b"\0asm\x02\0\0\0"));
+    assert!(!Runtime::Wasm.accepts(b"\0asm"));
+    assert!(!Runtime::Wasm.accepts(ELF));
+    assert!(Runtime::Native.accepts(ELF));
+    assert!(!Runtime::Native.accepts(WASM));
+    assert!(!Runtime::Native.accepts(b""));
+
+    let trust_text = trust(&SEED, "Oceans Examples");
+    let keys: Vec<_> = trusted_keys(&trust_text).collect();
+    let wasm_manifest = std::format!("{MANIFEST_TEXT}runtime = wasm\n");
+    let with = |manifest: &str, program: &[u8]| {
+        build(
+            &[("manifest", manifest.as_bytes()), ("hello", program)],
+            &SEED,
+        )
+        .unwrap()
+    };
+    let bytes = with(&wasm_manifest, WASM);
+    let opened = Package::open(&bytes, &keys).unwrap();
+    assert_eq!(opened.manifest.runtime, Runtime::Wasm);
+    assert_eq!(opened.entry(), WASM);
+    assert_eq!(
+        Package::open(&with(&wasm_manifest, ELF), &keys).err(),
+        Some(PackageError::WrongFormat(Runtime::Wasm))
+    );
+    assert_eq!(
+        Package::open(&with(MANIFEST_TEXT, WASM), &keys).err(),
+        Some(PackageError::WrongFormat(Runtime::Native))
+    );
+    assert_ne!(
+        PackageError::WrongFormat(Runtime::Wasm).message(),
+        PackageError::WrongFormat(Runtime::Native).message()
+    );
+}

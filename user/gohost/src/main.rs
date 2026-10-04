@@ -4,8 +4,9 @@
 //! Its authority is the process's, granted as usual (init's `services.conf`
 //! or Core): the host gives the module nothing else. The module sees:
 //! - **the `oceans` host functions**: handle-directory lookup, IPC (call,
-//!   receive, reply, mint), notifications and timers, published text,
-//!   system information. Each checks every pointer range against the
+//!   receive, reply, mint), notifications and timers, published text
+//!   (making it, and reading it: `read_text`, ADR-0052), system
+//!   information. Each checks every pointer range against the
 //!   module's memory and passes the call to the kernel for the process's
 //!   own capabilities. This is the binding `go/oceans` wraps.
 //! - **a WASI preview 1 subset**, enough for the Go runtime: standard
@@ -13,8 +14,10 @@
 //!   clocks, random numbers, sleeping (`poll_oneoff` on clocks), exit. No
 //!   files or sockets: those are Oceans services, reached over IPC.
 //!
-//! The program is the first `module` in the handle directory (a boot
-//! module: `grant = module:NAME.wasm`). The interpreter is wasmi; it uses
+//! The program is the first `module` in the handle directory: a boot
+//! module (`grant = module:NAME.wasm`), or the program of a `wasm` app,
+//! which Oceans Core hands over read-only (ADR-0052). The interpreter is
+//! wasmi; it uses
 //! no floating-point hardware state (soft float), as Oceans user code must
 //! not.
 
@@ -517,7 +520,52 @@ fn define_oceans(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
             }
         },
     )?;
+    linker.func_wrap(
+        M,
+        "read_text",
+        |mut caller: Caller<'_, Host>, memory: u64, buf: u32, cap: u32| -> i64 {
+            match read_text(Handle(memory), cap) {
+                Ok(text) => {
+                    if write(&mut caller, buf, &text) {
+                        text.len() as i64
+                    } else {
+                        BAD_ADDRESS
+                    }
+                }
+                Err(error) => code(error),
+            }
+        },
+    )?;
     Ok(())
+}
+
+/// Most bytes `read_text` copies (published text is small: an app's
+/// identity, its arguments).
+const MAX_TEXT: usize = 64 * 1024;
+
+/// The text in memory object `memory` (as `publish_text` makes them: up to
+/// the first NUL), if it fits in `cap` bytes (at most [`MAX_TEXT`]): a
+/// copy, so the module never sees the mapping. `TooLarge` if it does not
+/// fit, `InvalidArgument` if it is not UTF-8; the kernel refuses handles
+/// that are not memory objects or not mappable.
+fn read_text(memory: Handle, cap: u32) -> Result<Vec<u8>, Error> {
+    let size = usize::try_from(oceans_rt::memory_size(memory)?).map_err(|_| Error::TooLarge)?;
+    let limit = (cap as usize).min(MAX_TEXT);
+    let take = size.min(limit);
+    let base = oceans_rt::memory_map(memory, 0, prot::READ)?;
+    let mut bytes = alloc::vec![0u8; take];
+    // SAFETY: the whole object (`size` >= `take` bytes) is mapped readable
+    // at `base` until the unmap below; it is copied, never referenced, as
+    // another process may hold the object writable.
+    unsafe { core::ptr::copy_nonoverlapping(base, bytes.as_mut_ptr(), take) };
+    let _ = oceans_rt::memory_unmap(base);
+    match bytes.iter().position(|&b| b == 0) {
+        Some(len) => bytes.truncate(len),
+        None if size > take => return Err(Error::TooLarge),
+        None => {}
+    }
+    core::str::from_utf8(&bytes).map_err(|_| Error::InvalidArgument)?;
+    Ok(bytes)
 }
 
 fn define_wasi(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
