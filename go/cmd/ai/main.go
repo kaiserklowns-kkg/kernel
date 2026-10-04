@@ -1,8 +1,9 @@
 // ai: the Oceans AI runtime (ADR-0051), a Go service run by the Go host.
 //
 // It serves the `ai` endpoint (the protocol is in protocol.go). Its own
-// authority is small: a log, the network (for the model gateway) and
-// read-only system information. Everything else an agent may touch comes
+// authority is small: a log, the network (for the model gateway),
+// read-only system information and the system's trusted root
+// certificates (gateway.go, ADR-0054). Everything else an agent may touch comes
 // with each request: the requester delegates capabilities to the session
 // (today an Oceans Core capability limited to querying and running apps,
 // ADR-0048), and they are closed when the session ends.
@@ -16,15 +17,12 @@ package main
 import (
 	"encoding/binary"
 	"strings"
-	"time"
 
 	"github.com/kaiserklowns-kkg/kernel/go/ai/agent"
-	"github.com/kaiserklowns-kkg/kernel/go/ai/httpc"
 	"github.com/kaiserklowns-kkg/kernel/go/ai/model"
 	"github.com/kaiserklowns-kkg/kernel/go/ai/tools"
 	"github.com/kaiserklowns-kkg/kernel/go/oceans"
 	"github.com/kaiserklowns-kkg/kernel/go/oceans/fs"
-	"github.com/kaiserklowns-kkg/kernel/go/oceans/tcp"
 )
 
 // The settings file in the service's storage (ADR-0053).
@@ -34,28 +32,6 @@ const systemPrompt = "You are Oceans AI, the assistant built into the Oceans ope
 	"Use the tools to look at the system or to act on it. The system asks the user before any " +
 	"action that changes something; if the user says no, accept it and say it was not done. " +
 	"Answer briefly, in plain words."
-
-// Time limits for the model server.
-const (
-	connectTimeout  = 10 * time.Second
-	responseTimeout = 120 * time.Second
-)
-
-// transport posts to the configured endpoint over Oceans TCP.
-type transport struct {
-	net      oceans.Handle
-	endpoint httpc.Endpoint
-}
-
-func (t transport) Post(path string, body []byte) (int, []byte, error) {
-	conn, err := tcp.Dial(t.net, t.endpoint.Address, t.endpoint.Port, connectTimeout)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer conn.Close()
-	conn.Timeout = responseTimeout
-	return httpc.Post(conn, t.endpoint.Host, path, body)
-}
 
 // unconfigured fails every session until `CONFIGURE`.
 type unconfigured struct{}
@@ -187,41 +163,22 @@ func (s *service) handle(msg oceans.Message) (uint64, []byte, []oceans.Handle) {
 		}
 		return statusDone, []byte(entry[:min(len(entry), maxChunk)]), nil
 	case opConfigure:
-		closeAll()
-		return s.configure(string(msg.Data))
+		defer closeAll() // the CA, read during configure
+		status, reply, handles := s.configure(string(msg.Data), msg.Handles)
+		if status == statusDone {
+			if err := s.saveSettings(string(msg.Data)); err != nil {
+				s.say("cannot save the model settings: " + err.Error())
+				return status, []byte("set, but not saved: " + err.Error()), handles
+			}
+		}
+		return status, reply, handles
 	}
 	closeAll()
 	return statusBadRequest, nil, nil
 }
 
-func (s *service) configure(text string) (uint64, []byte, []oceans.Handle) {
-	fields := strings.Fields(text)
-	if len(fields) != 2 {
-		return statusBadRequest, []byte("usage: URL MODEL"), nil
-	}
-	endpoint, err := httpc.ParseEndpoint(fields[0])
-	if err != nil {
-		return statusBadRequest, []byte(err.Error()), nil
-	}
-	if s.net == 0 {
-		return statusBadRequest, []byte("the AI service has no network"), nil
-	}
-	s.runtime.Model = model.Chat{
-		Transport: transport{net: s.net, endpoint: endpoint},
-		Path:      endpoint.Path + "/chat/completions",
-		Model:     fields[1],
-	}
-	s.say("model " + fields[1] + " at " + fields[0])
-	if s.storage != 0 {
-		if err := fs.FromHandle(s.storage).WriteFile(settingsFile, []byte(fields[0]+" "+fields[1]+"\n")); err != nil {
-			s.say("cannot save the model settings: " + err.Error())
-			return statusDone, []byte("set, but not saved: " + err.Error()), nil
-		}
-	}
-	return statusDone, nil, nil
-}
-
-// loadSettings applies the saved model settings, if any.
+// loadSettings applies the saved model settings, if any (a CA given with
+// `--ca` is not kept: it comes with each `ai model`).
 func (s *service) loadSettings() bool {
 	if s.storage == 0 {
 		return false
@@ -235,8 +192,16 @@ func (s *service) loadSettings() bool {
 	if err != nil {
 		return false
 	}
-	status, _, _ := s.configure(strings.TrimSpace(string(text)))
+	status, _, _ := s.configure(strings.TrimSpace(string(text)), nil)
 	return status == statusDone
+}
+
+// saveSettings keeps a setting that was applied, for the next start.
+func (s *service) saveSettings(text string) error {
+	if s.storage == 0 {
+		return nil
+	}
+	return fs.FromHandle(s.storage).WriteFile(settingsFile, []byte(strings.TrimSpace(text)+"\n"))
 }
 
 // reply reports a session's state; an ended session's capabilities are

@@ -102,6 +102,34 @@ type Message struct {
 	Signals uint64
 }
 
+// ErrMemoryTooLarge: a memory object is larger than the caller accepts.
+var ErrMemoryTooLarge = errors.New("oceans: the memory object is too large")
+
+// ReadMemory copies all of memory object `memory` (READ and MAP rights),
+// at most `limit` bytes. Memory objects are whole pages, so text in one
+// is followed by zeros; what they mean is the caller's to decide.
+func ReadMemory(memory Handle, limit uint64) ([]byte, error) {
+	size, err := MemorySize(memory)
+	if err != nil {
+		return nil, err
+	}
+	if size > limit {
+		return nil, ErrMemoryTooLarge
+	}
+	out := make([]byte, size)
+	for done := 0; done < len(out); {
+		n, err := MemoryRead(memory, uint64(done), out[done:])
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return out[:done], nil
+		}
+		done += n
+	}
+	return out, nil
+}
+
 func result(value int64) (int64, error) {
 	if value < 0 {
 		return 0, Error(value)

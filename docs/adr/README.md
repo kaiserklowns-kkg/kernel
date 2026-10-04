@@ -61,6 +61,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0051](0051-ai-runtime.md) | The AI runtime: agents, tools, approvals and the model gateway | Accepted |
 | [0052](0052-go-apps-as-packages.md) | Go apps as packages | Accepted |
 | [0053](0053-directory-grants.md) | Directory grants from init, and the AI's settings | Accepted |
+| [0054](0054-ai-gateway-dns-and-https.md) | The AI model gateway: DNS and https | Accepted |
 | [0055](0055-sensitive-reads.md) | Sensitive reads by AI agents | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

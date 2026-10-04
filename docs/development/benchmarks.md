@@ -18,6 +18,8 @@ the serial log).
 | 2026-10-04 | ADR-0028 | `fetch` 1 MiB over HTTP from the host → system disk | QEMU TCG, release, user-mode network | 260 ms |
 | 2026-10-04 | ADR-0028 | `fetch` 1 MiB over HTTP → Oceans USB stick / FAT16 USB stick | same | 340 ms / 1 720 ms |
 | 2026-10-04 | ADR-0031 | `fetch` 256 KiB over HTTPS (TLS 1.3) → system disk | same | 180 ms |
+| 2026-10-04 | ADR-0054 | AI gateway TLS 1.3 handshake in interpreted Go (`crypto/tls`, ECDSA P-256, X25519) | QEMU TCG, release / debug / `-cpu max`, loaded host | 1.14–1.24 s / 1.18–1.26 s / 1.15–1.24 s |
+| 2026-10-04 | ADR-0054 | AI gateway: read and parse 121 root certificates (`ca-roots.pem`), once | QEMU TCG, debug / `-cpu max` | 2.48 s / 1.86 s |
 
 Observations: writing FAT through `fetch` (16 KiB writes, each extending
 the cluster chain with ordered barriers, ADR-0037) is about five times

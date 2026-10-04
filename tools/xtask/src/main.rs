@@ -278,6 +278,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"ai ask what is in my notes?\r\n",
     b"y\r\n",
     b"ai activity\r\n",
+    // The model server by name and over https (ADR-0054): the host's DNS
+    // server names it; its certificate's CA is not trusted until `--ca`
+    // adds it for this server.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/models-ca.pem /keep/models-ca.pem\r\n",
+    b"ai model https://models.oceans.test:$MODELS/v1 oceans-test --dns 10.0.2.2:$DNS\r\n",
+    b"ai ask how much memory is free?\r\n",
+    b"ai model https://models.oceans.test:$MODELS/v1 oceans-test --dns 10.0.2.2:$DNS --ca /keep/models-ca.pem\r\n",
+    b"ai ask how much memory is free?\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -565,6 +573,13 @@ const SHELL_EXPECT: &[Expect] = &[
         "apps_start {\"id\":\"app.oceans.hello\",\"args\":\"wait\"} approved by the user: started Hello",
     ),
     Expect::Contains("apps_stop {\"id\":\"app.oceans.hello\"} denied by the user"),
+    // The gateway by name and over https (ADR-0054).
+    Expect::Contains("ai: using oceans-test at https://models.oceans.test:"),
+    Expect::Contains(" root certificates from ca-roots.pem"),
+    Expect::Contains("x509: certificate signed by unknown authority"),
+    Expect::Contains("ai: trusting 1 more CA certificates for models.oceans.test"),
+    Expect::Contains("ai: model server: TLS 1.3 with models.oceans.test in "),
+    Expect::Contains("Oceans AI: Memory over https: "),
     Expect::Contains("app: /keep/untrusted.opk: signed with a key this system does not trust"),
     Expect::Contains(
         "app: /keep/tampered.opk: the signature does not match: the package was changed",
@@ -947,6 +962,9 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     // Oceans Core's trusted publisher keys (ADR-0046): the root of trust
     // for apps comes with the boot image.
     files.push(("trust.keys".to_string(), trust_list()?.into_bytes()));
+    // The trusted roots for TLS in Go services (ADR-0054): the AI's model
+    // gateway gets them as a module.
+    files.push(("ca-roots.pem".to_string(), ca_roots_pem()?.into_bytes()));
     build_packages(&user, &build_go(GO_APPS)?)?;
     let entries: Vec<(&str, &[u8])> = files
         .iter()
@@ -1411,6 +1429,67 @@ fn check_go() -> Result {
     run_command(go().args(["test", "./..."]))
 }
 
+/// The system's trusted roots as a PEM bundle (ADR-0054): Mozilla's set,
+/// the one the Rust TLS stack trusts (`oceans_tls::web_roots`, from
+/// webpki-roots), as whole certificates (webpki-root-certs, the same
+/// release), since Go's crypto/x509 takes certificates rather than trust
+/// anchors. Refuses to build if the two crates ever disagree.
+fn ca_roots_pem() -> Result<String> {
+    let certificates = webpki_root_certs::TLS_SERVER_ROOT_CERTS;
+    let anchors = oceans_tls::web_roots().roots;
+    let missing = anchors
+        .iter()
+        .filter(|anchor| {
+            let key = anchor.subject_public_key_info.as_ref();
+            !certificates
+                .iter()
+                .any(|certificate| contains(certificate.as_ref(), key))
+        })
+        .count();
+    if certificates.len() != anchors.len() || missing != 0 {
+        return Err(format!(
+            "webpki-root-certs ({} certificates) and webpki-roots ({} anchors, {missing} \
+             without a certificate) disagree: update them together",
+            certificates.len(),
+            anchors.len()
+        ));
+    }
+    let mut pem = String::new();
+    for certificate in certificates {
+        pem.push_str("-----BEGIN CERTIFICATE-----\n");
+        for line in base64(certificate.as_ref()).as_bytes().chunks(64) {
+            pem.push_str(&String::from_utf8_lossy(line));
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+    }
+    Ok(pem)
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Standard base64 with padding (RFC 4648 §4).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 fn dev_seed() -> Result<[u8; 32]> {
     let hex = DEV_SEED.trim();
     let mut seed = [0u8; 32];
@@ -1645,6 +1724,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let tcp_port = tcp_greeter(IPV4_LOOPBACK, "hello from the host")?;
     let http_port = http_server(IPV4_LOOPBACK)?;
     let https = HttpsServer::start()?;
+    let models_port = https_model_server()?;
     // QEMU's user network connects the guest's IPv6 traffic for fec0::2
     // to the host's ::1 (ADR-0043).
     let dns6_port = dns_server(IPV6_LOOPBACK)?;
@@ -1653,6 +1733,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let expand = |command: &[u8]| -> Vec<u8> {
         // Longer names first: `$HTTP` is a prefix of `$HTTPS` and `$HTTP6`.
         String::from_utf8_lossy(command)
+            .replace("$MODELS", &models_port.to_string())
             .replace("$DNS6", &dns6_port.to_string())
             .replace("$DNS", &dns_port.to_string())
             .replace("$TCP6", &tcp6_port.to_string())
@@ -2097,6 +2178,8 @@ const DNS_NAMES: &[DnsName] = &[
         None,
         Some([0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6]),
     ),
+    // The https model server (ADR-0054), on the host.
+    ("models.oceans.test", Some([10, 0, 2, 2]), None),
 ];
 
 /// The question name of a DNS query, as text (no compression in
@@ -2357,69 +2440,194 @@ fn http_server(bind: &str) -> Result<u16> {
                 continue;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-            let mut request = Vec::new();
-            let mut byte = [0u8; 1];
-            while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
-                match stream.read(&mut byte) {
-                    Ok(1) => request.push(byte[0]),
-                    _ => break,
-                }
-            }
-            let request = String::from_utf8_lossy(&request).into_owned();
-            // A POST's body (the fake model server reads it).
-            let length = request
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())?
-                })
-                .unwrap_or(0)
-                .min(1 << 20);
-            let mut body = vec![0u8; length];
-            if stream.read_exact(&mut body).is_err() {
-                body.clear();
-            }
-            let body = String::from_utf8_lossy(&body).into_owned();
-            let path = request.split(' ').nth(1).unwrap_or("").to_string();
-            let fixed = |status: &str, body: &[u8]| {
-                let mut response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .into_bytes();
-                response.extend_from_slice(body);
-                response
-            };
-            let response = match path.as_str() {
-                "/hello.txt" => fixed("200 OK", b"hello over http\n"),
-                "/ipv6.txt" => fixed("200 OK", b"hello over http on ipv6\n"),
-                "/moved.txt" => fixed("200 OK", b"you were redirected\n"),
-                "/redirect" => b"HTTP/1.1 302 Found\r\nLocation: /moved.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
-                "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
-                "/big" => fixed("200 OK", &big_body()),
-                "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
-                "/v1/chat/completions" => fixed("200 OK", fake_model(&body).as_bytes()),
-                // The example packages (ADR-0046), by plain file name.
-                package
-                    if package.strip_prefix("/packages/").is_some_and(|name| {
-                        !name.is_empty()
-                            && name
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-                            && !name.contains("..")
-                    }) =>
-                {
-                    let name = &package["/packages/".len()..];
-                    match fs::read(root().join(PACKAGES_DIR).join(name)) {
-                        Ok(bytes) => fixed("200 OK", &bytes),
-                        Err(_) => fixed("404 Not Found", b"no such package\n"),
-                    }
-                }
-                _ => fixed("404 Not Found", b"not here\n"),
-            };
-            let _ = stream.write_all(&response);
+            serve_http(&mut stream, false);
         }
     });
     Ok(port)
+}
+
+/// The test model server's certificate for models.oceans.test, its key,
+/// and the test CA that issued it (tools/xtask/testdata, ADR-0054).
+/// Test-only; the keys are public.
+const MODELS_CA: &[u8] = include_bytes!("../testdata/models-ca.pem");
+const MODELS_CERT: &[u8] = include_bytes!("../testdata/models.der");
+const MODELS_KEY: &[u8] = include_bytes!("../testdata/models.key.der");
+
+/// Randomness for the test https server: the in-tree generator, seeded
+/// from the clock and the process. Its keys are public test keys; this
+/// only has to make handshakes differ.
+#[derive(Debug)]
+struct ServerRandom;
+
+static SERVER_RNG: std::sync::Mutex<oceans_random::Rng> =
+    std::sync::Mutex::new(oceans_random::Rng::new());
+
+impl rustls::crypto::SecureRandom for ServerRandom {
+    fn fill(&self, out: &mut [u8]) -> std::result::Result<(), rustls::crypto::GetRandomFailed> {
+        let mut rng = SERVER_RNG
+            .lock()
+            .map_err(|_| rustls::crypto::GetRandomFailed)?;
+        if !rng.is_seeded() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let mut seed = now.as_nanos().to_le_bytes().to_vec();
+            seed.extend_from_slice(&std::process::id().to_le_bytes());
+            rng.reseed(&seed);
+        }
+        rng.fill(out);
+        Ok(())
+    }
+}
+
+/// The smoke test's model server over https (ADR-0054): the HTTP server's
+/// answers (the scripted model at `/v1/chat/completions`) behind TLS from
+/// the in-tree TLS stack's server side, with the certificate for
+/// models.oceans.test. On the host's loopback (the guest's 10.0.2.2);
+/// returns its port. (`openssl s_server -WWW` only serves files: the
+/// model needs POST.)
+fn https_model_server() -> Result<u16> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::sync::Arc;
+
+    let provider = Arc::new(oceans_tls::provider(&ServerRandom));
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .and_then(|builder| {
+            builder.with_no_client_auth().with_single_cert(
+                vec![CertificateDer::from(MODELS_CERT.to_vec())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(MODELS_KEY.to_vec())),
+            )
+        })
+        .map_err(|e| format!("cannot set up the https model server: {e}"))?;
+    let config = Arc::new(config);
+    let listener = TcpListener::bind(IPV4_LOOPBACK)
+        .map_err(|e| format!("cannot start the https model server: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else {
+                continue;
+            };
+            let config = Arc::clone(&config);
+            // A connection each: the guest's handshake is interpreted Go.
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+                let Ok(connection) = rustls::ServerConnection::new(config) else {
+                    return;
+                };
+                let mut tls = rustls::StreamOwned::new(connection, stream);
+                serve_http(&mut tls, true);
+                tls.conn.send_close_notify();
+                let _ = tls.flush();
+            });
+        }
+    });
+    Ok(port)
+}
+
+/// Answers one HTTP request on `stream` (the test servers' content).
+fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
+    let mut request = Vec::new();
+    let mut byte = [0u8; 1];
+    while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+        match stream.read(&mut byte) {
+            Ok(1) => request.push(byte[0]),
+            _ => break,
+        }
+    }
+    let request = String::from_utf8_lossy(&request).into_owned();
+    // A POST's body (the fake model server reads it).
+    let length = request
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0)
+        .min(1 << 20);
+    let mut body = vec![0u8; length];
+    if stream.read_exact(&mut body).is_err() {
+        body.clear();
+    }
+    let body = String::from_utf8_lossy(&body).into_owned();
+    let path = request.split(' ').nth(1).unwrap_or("").to_string();
+    let fixed = |status: &str, body: &[u8]| {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    };
+    let response = match path.as_str() {
+        "/hello.txt" => fixed("200 OK", b"hello over http\n"),
+        "/ipv6.txt" => fixed("200 OK", b"hello over http on ipv6\n"),
+        "/moved.txt" => fixed("200 OK", b"you were redirected\n"),
+        "/redirect" => b"HTTP/1.1 302 Found\r\nLocation: /moved.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
+        "/big" => fixed("200 OK", &big_body()),
+        "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
+        "/models-ca.pem" => fixed("200 OK", MODELS_CA),
+        "/v1/chat/completions" => {
+            let mut reply = fake_model(&body);
+            // Over https the model says so: the smoke test can tell the
+            // answers apart.
+            if over_tls {
+                reply = reply.replace("Memory: ", "Memory over https: ");
+            }
+            fixed("200 OK", reply.as_bytes())
+        }
+        // The example packages (ADR-0046), by plain file name.
+        package
+            if package.strip_prefix("/packages/").is_some_and(|name| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+                    && !name.contains("..")
+            }) =>
+        {
+            let name = &package["/packages/".len()..];
+            match fs::read(root().join(PACKAGES_DIR).join(name)) {
+                Ok(bytes) => fixed("200 OK", &bytes),
+                Err(_) => fixed("404 Not Found", b"no such package\n"),
+            }
+        }
+        _ => fixed("404 Not Found", b"not here\n"),
+    };
+    let _ = stream.write_all(&response);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_rfc_4648() {
+        for (input, output) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), output, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn the_roots_bundle_holds_every_root() {
+        let pem = ca_roots_pem().unwrap();
+        let roots = oceans_tls::parse_certificates(pem.as_bytes());
+        assert_eq!(roots.len(), oceans_tls::web_roots().roots.len());
+        assert!(roots.len() > 100);
+        for (parsed, original) in roots.iter().zip(webpki_root_certs::TLS_SERVER_ROOT_CERTS) {
+            assert_eq!(parsed.as_ref(), original.as_ref());
+        }
+    }
 }

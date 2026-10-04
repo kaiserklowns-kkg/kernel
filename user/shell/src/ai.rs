@@ -28,7 +28,8 @@ mod status {
     pub const FAILED: u64 = 2;
 }
 
-const USAGE: &str = "usage: ai ask QUESTION... | ai model URL MODEL | ai activity\r\n";
+const USAGE: &str =
+    "usage: ai ask QUESTION... | ai model URL MODEL [--dns SERVER] [--ca PATH] | ai activity\r\n";
 /// Approvals asked in one session at most (the runtime bounds its steps too).
 const MAX_APPROVALS: usize = 8;
 
@@ -39,25 +40,86 @@ impl Shell {
             return self.print(format_args!("ai: this shell has no AI runtime\r\n"));
         };
         match words {
-            ["model", url, model] => {
-                let mut text = Buffer::<{ LINE_MAX + 2 }>::new();
-                let _ = write!(text, "{url} {model}");
-                let mut reply = [0u8; 256];
-                match oceans_rt::ipc_call(ai, op::CONFIGURE, text.as_bytes(), &mut reply) {
-                    Ok((len, status::DONE)) => {
-                        let _ = len;
-                        self.print(format_args!("ai: using {model} at {url}\r\n"));
-                    }
-                    Ok((len, _)) => self.print(format_args!(
-                        "ai: {}\r\n",
-                        core::str::from_utf8(&reply[..len]).unwrap_or("refused")
-                    )),
-                    Err(error) => self.print(format_args!("ai: {error:?}\r\n")),
-                }
-            }
+            ["model", url, model, options @ ..] => self.ai_model(ai, url, model, options),
             ["ask", question @ ..] if !question.is_empty() => self.ai_ask(ai, question),
             ["activity"] => self.ai_activity(ai),
             _ => self.write(USAGE.as_bytes()),
+        }
+    }
+
+    /// `ai model URL MODEL [--dns SERVER] [--ca PATH]` (ADR-0054). The AI
+    /// service has no filesystem: the shell reads the CA file and hands
+    /// the service a read-only copy for this server only.
+    fn ai_model(&self, ai: Handle, url: &str, model: &str, options: &[&str]) {
+        let mut text = Buffer::<{ LINE_MAX + 2 }>::new();
+        let _ = write!(text, "{url} {model}");
+        let mut ca = None;
+        let mut rest = options;
+        loop {
+            match rest {
+                [] => break,
+                ["--dns", server, more @ ..] => {
+                    let _ = write!(text, " --dns {server}");
+                    rest = more;
+                }
+                ["--ca", path, more @ ..] if ca.is_none() => {
+                    match self.load_file(path) {
+                        Ok(memory) => ca = Some((memory, *path)),
+                        Err(problem) => {
+                            return self.print(format_args!("ai: {path}: {problem}\r\n"));
+                        }
+                    }
+                    rest = more;
+                }
+                _ => {
+                    if let Some((memory, _)) = ca {
+                        let _ = oceans_rt::close(memory);
+                    }
+                    return self.write(USAGE.as_bytes());
+                }
+            }
+        }
+        // Read-only, and nothing more: the service can only look at it.
+        let shared = match ca {
+            Some((memory, path)) => {
+                let shared = oceans_rt::duplicate(
+                    memory,
+                    oceans_rt::rights::READ | oceans_rt::rights::MAP | oceans_rt::rights::TRANSFER,
+                );
+                let _ = oceans_rt::close(memory);
+                match shared {
+                    Ok(shared) => Some(shared),
+                    Err(error) => return self.print(format_args!("ai: {path}: {error:?}\r\n")),
+                }
+            }
+            None => None,
+        };
+        let handles: &[Handle] = match &shared {
+            Some(handle) => core::slice::from_ref(handle),
+            None => &[],
+        };
+        let mut reply = [0u8; 256];
+        match oceans_rt::ipc_call_msg(
+            ai,
+            op::CONFIGURE,
+            text.as_bytes(),
+            handles,
+            &mut reply,
+            &mut [],
+        ) {
+            Ok(got) if got.label == status::DONE => {
+                self.print(format_args!("ai: using {model} at {url}\r\n"));
+            }
+            Ok(got) => self.print(format_args!(
+                "ai: {}\r\n",
+                core::str::from_utf8(&reply[..got.data_len]).unwrap_or("refused")
+            )),
+            Err(error) => {
+                if let Some(handle) = shared {
+                    let _ = oceans_rt::close(handle);
+                }
+                self.print(format_args!("ai: {error:?}\r\n"));
+            }
         }
     }
 

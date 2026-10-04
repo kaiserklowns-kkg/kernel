@@ -454,17 +454,15 @@ mod heap {
     /// away from where it places kernel-chosen mappings).
     const REGION_START: u64 = 0x0000_4000_0000_0000;
     const REGION_END: u64 = 0x0000_5000_0000_0000;
-    /// Live page blocks tracked at once (slabs are cached, so few).
-    const MAX_BLOCKS: usize = 1024;
 
-    struct Block {
-        address: u64,
-        memory: Handle,
-    }
-
+    /// Page blocks: each a memory object, mapped and its handle closed
+    /// at once. The mapping holds the object, so freeing is unmapping,
+    /// and live blocks are bounded by memory alone, not by a table or
+    /// the handle limit (a WebAssembly interpreter keeps thousands of
+    /// blocks for a large module, ADR-0054). Addresses are never reused:
+    /// the region (16 TiB) outlasts any process.
     struct MemoryObjects {
         next: u64,
-        blocks: [Option<Block>; MAX_BLOCKS],
     }
 
     // SAFETY: blocks are fresh memory objects mapped read-write at an
@@ -477,27 +475,16 @@ mod heap {
             if end > REGION_END {
                 return None;
             }
-            let slot = self.blocks.iter().position(Option::is_none)?;
             let memory = memory_create(size).ok()?;
-            if memory_map(memory, address, prot::READ | prot::WRITE).is_err() {
-                let _ = close(memory);
-                return None;
-            }
+            let mapped = memory_map(memory, address, prot::READ | prot::WRITE);
+            let _ = close(memory);
+            mapped.ok()?;
             self.next = end;
-            self.blocks[slot] = Some(Block { address, memory });
             NonNull::new(address as *mut u8)
         }
 
         unsafe fn free(&mut self, block: NonNull<u8>, _order: u8) {
-            let address = block.as_ptr() as u64;
-            let slot = self
-                .blocks
-                .iter()
-                .position(|b| b.as_ref().is_some_and(|b| b.address == address));
-            if let Some(Block { address, memory }) = slot.and_then(|i| self.blocks[i].take()) {
-                let _ = memory_unmap(address as *mut u8);
-                let _ = close(memory);
-            }
+            let _ = memory_unmap(block.as_ptr());
         }
     }
 
@@ -511,7 +498,6 @@ mod heap {
     #[global_allocator]
     static HEAP: ProcessHeap = ProcessHeap(UnsafeCell::new(Heap::new(MemoryObjects {
         next: REGION_START,
-        blocks: [const { None }; MAX_BLOCKS],
     })));
 
     /// Allocations larger than the heap's largest block (4 MiB, e.g. an
