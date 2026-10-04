@@ -42,6 +42,9 @@ func hostMint(server uint64, badge uint64) int64
 //go:wasmimport oceans notification_create
 func hostNotificationCreate() int64
 
+//go:wasmimport oceans notification_wait
+func hostNotificationWait(notification uint64) int64
+
 //go:wasmimport oceans endpoint_bind
 func hostEndpointBind(server uint64, notification uint64) int64
 

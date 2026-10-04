@@ -470,6 +470,14 @@ fn define_oceans(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
     })?;
     linker.func_wrap(
         M,
+        "notification_wait",
+        |_: Caller<'_, Host>, notification: u64| -> i64 {
+            // Bits are below 2^63 by convention, so they stay non-negative.
+            oceans_rt::notification_wait(Handle(notification)).map_or_else(code, |bits| bits as i64)
+        },
+    )?;
+    linker.func_wrap(
+        M,
         "endpoint_bind",
         |_: Caller<'_, Host>, server: u64, notification: u64| -> i64 {
             oceans_rt::endpoint_bind(Handle(server), Handle(notification)).map_or_else(code, |()| 0)

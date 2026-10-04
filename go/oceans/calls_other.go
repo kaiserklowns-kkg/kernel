@@ -28,6 +28,8 @@ func Mint(server Handle, badge uint64) (Handle, error) { return 0, ErrUnsupporte
 
 func NotificationCreate() (Handle, error) { return 0, ErrUnsupported }
 
+func NotificationWait(notification Handle) (uint64, error) { return 0, ErrUnsupported }
+
 func EndpointBind(server, notification Handle) error { return ErrUnsupported }
 
 func TimerSet(notification Handle, bits, ms uint64) error { return ErrUnsupported }

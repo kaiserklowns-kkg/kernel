@@ -106,6 +106,13 @@ func NotificationCreate() (Handle, error) {
 	return Handle(v), err
 }
 
+// NotificationWait blocks until a bit is set on `notification`; returns
+// and clears the bits.
+func NotificationWait(notification Handle) (uint64, error) {
+	v, err := result(hostNotificationWait(uint64(notification)))
+	return uint64(v), err
+}
+
 // EndpointBind makes `notification`'s signals arrive through Receive on
 // `server`.
 func EndpointBind(server, notification Handle) error {

@@ -14,6 +14,7 @@
 #![no_std]
 #![no_main]
 
+mod ai;
 mod apps;
 
 use core::cell::RefCell;
@@ -233,6 +234,7 @@ impl Shell {
             ["cp", "-r", source, destination] => self.copy(source, destination, true),
             ["sync"] => self.sync(),
             ["app", words @ ..] => self.app(words),
+            ["ai", words @ ..] => self.ai(words),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
             ["exit"] => return Some(0),
             // Anything else is a program in /bin, run with what its manifest
@@ -277,6 +279,9 @@ impl Shell {
              \x20 app enable | disable ID    a service: start at boot (and now), or not\r\n\
              \x20 app grant | revoke ID PERM allow or withdraw a permission\r\n\
              \x20 app rollback ID | audit    previous version; what was decided\r\n\
+             \x20 ai ask QUESTION            ask Oceans AI (it asks before changing anything)\r\n\
+             \x20 ai model URL MODEL         its model server (OpenAI-compatible, http)\r\n\
+             \x20 ai activity                what the AI did, and what you decided\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
         );

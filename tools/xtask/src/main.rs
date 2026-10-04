@@ -82,7 +82,7 @@ const DEV_PUBLISHER: &str = "Oceans Examples";
 const UNTRUSTED_SEED: [u8; 32] = [0x55; 32];
 /// Go programs (ADR-0050), built for wasip1 and run by `gohost`: the
 /// package under `go/` and the module file name in the boot archive.
-const GO_PROGRAMS: &[(&str, &str)] = &[("./cmd/gohello", "gohello.wasm")];
+const GO_PROGRAMS: &[(&str, &str)] = &[("./cmd/gohello", "gohello.wasm"), ("./cmd/ai", "ai.wasm")];
 /// Signed example packages, built with every image (and served to the
 /// smoke test's guest over HTTP).
 const PACKAGES_DIR: &str = "build/packages";
@@ -244,6 +244,18 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app enable app.oceans.hello\r\n",
     b"app enable app.oceans.heartbeat\r\n",
     b"app info app.oceans.heartbeat\r\n",
+    // Oceans AI (ADR-0051): an agent with tools, against the scripted
+    // model server; a read-only answer, an action approved, one denied.
+    b"ai ask how much memory is free?\r\n",
+    b"ai model http://10.0.2.2:$HTTP/v1 oceans-test\r\n",
+    b"ai ask how much memory is free?\r\n",
+    b"ai ask start the hello app\r\n",
+    b"y\r\n",
+    b"app list\r\n",
+    b"ai ask stop the hello app\r\n",
+    b"n\r\n",
+    b"app stop app.oceans.hello\r\n",
+    b"ai activity\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
     // typed on it reaches the shell like any other input.
     b"lsusb\r\n",
@@ -380,7 +392,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("kept on nvme"),
     Expect::Contains("core: ready, 2 apps installed"),
     Expect::Line("  app.oceans.hello  1.0.0  Hello"),
-    Expect::Line("hello: run 7 (counted in my storage)"),
+    Expect::Line("hello: run 8 (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
     Expect::Contains("core: started service app.oceans.heartbeat"),
     Expect::Contains("heartbeat: run 3, beating"),
@@ -505,6 +517,22 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("gohello: goroutines computed 30"),
     Expect::Contains("gohello: echo replied \"HELLO FROM GO\""),
     Expect::Contains("gohello: System API calls verified"),
+    Expect::Contains("ai: ready; 5 tools; no model configured yet"),
+    Expect::Contains("ai: model: no model is configured (ai model URL MODEL)"),
+    Expect::Contains("ai: using oceans-test at http://10.0.2.2:"),
+    Expect::Contains("Oceans AI: Memory: "),
+    Expect::Contains(
+        "Oceans AI wants to: start the app Hello (app.oceans.hello) with the arguments \"wait\"",
+    ),
+    Expect::Contains("Oceans AI: Done: started Hello (app.oceans.hello)"),
+    Expect::Line("  app.oceans.hello  1.0.0  Hello  (running)"),
+    Expect::Contains("Oceans AI wants to: stop the app Hello (app.oceans.hello)"),
+    Expect::Contains("Oceans AI: Understood: I left Hello running."),
+    Expect::Contains("system_memory {} (read-only): "),
+    Expect::Contains(
+        "apps_start {\"id\":\"app.oceans.hello\",\"args\":\"wait\"} approved by the user: started Hello",
+    ),
+    Expect::Contains("apps_stop {\"id\":\"app.oceans.hello\"} denied by the user"),
     Expect::Contains("app: /keep/untrusted.opk: signed with a key this system does not trust"),
     Expect::Contains(
         "app: /keep/tampered.opk: the signature does not match: the package was changed",
@@ -2061,6 +2089,67 @@ fn tcp_greeter(bind: &str, greeting: &'static str) -> Result<u16> {
     Ok(port)
 }
 
+/// The smoke test's model server (ADR-0051): an OpenAI-compatible Chat
+/// Completions endpoint that follows a script, so the agent loop, its
+/// tools, approvals and refusals are tested without a real model. What it
+/// answers depends on the user's question and on how many tool results
+/// the conversation already holds; it quotes the last tool result back.
+fn fake_model(request: &str) -> String {
+    let user = json_string_after(request, "\"role\":\"user\",\"content\":\"").unwrap_or_default();
+    let done = request.matches("\"role\":\"tool\"").count();
+    let last = request
+        .rfind("\"role\":\"tool\",\"content\":\"")
+        .and_then(|at| json_string_after(&request[at..], "\"content\":\""))
+        .unwrap_or_default();
+    let say = |content: &str| {
+        format!(
+            "{{\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{content}\"}},\"finish_reason\":\"stop\"}}]}}"
+        )
+    };
+    let call = |name: &str, arguments: &str| {
+        let arguments = arguments.replace('"', "\\\"");
+        format!(
+            "{{\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{{\"id\":\"call_{done}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":\"{arguments}\"}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}"
+        )
+    };
+    if user.contains("memory") {
+        match done {
+            0 => call("system_memory", "{}"),
+            _ => say(&format!("Memory: {last}")),
+        }
+    } else if user.contains("start") {
+        match done {
+            0 => call("apps_list", "{}"),
+            1 => call("apps_start", r#"{"id":"app.oceans.hello","args":"wait"}"#),
+            _ => say(&format!("Done: {last}")),
+        }
+    } else if user.contains("stop") {
+        match done {
+            0 => call("apps_stop", r#"{"id":"app.oceans.hello"}"#),
+            _ if last.contains("denied") => say("Understood: I left Hello running."),
+            _ => say(&format!("Done: {last}")),
+        }
+    } else {
+        say("I can look at memory and processes, and start or stop apps.")
+    }
+}
+
+/// The JSON string (still escaped) that follows `marker` in `text`.
+fn json_string_after(text: &str, marker: &str) -> Option<String> {
+    let start = text.find(marker)? + marker.len();
+    let mut out = String::new();
+    let mut escaped = false;
+    for c in text[start..].chars() {
+        match c {
+            '"' if !escaped => return Some(out),
+            '\\' if !escaped => escaped = true,
+            _ => escaped = false,
+        }
+        out.push(c);
+    }
+    None
+}
+
 /// The body of `/big`: 1 MiB in a pattern that catches reordering.
 fn big_body() -> Vec<u8> {
     (0..1_048_576u32).map(|i| (i % 251) as u8).collect()
@@ -2187,7 +2276,22 @@ fn http_server(bind: &str) -> Result<u16> {
                     _ => break,
                 }
             }
-            let request = String::from_utf8_lossy(&request);
+            let request = String::from_utf8_lossy(&request).into_owned();
+            // A POST's body (the fake model server reads it).
+            let length = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0)
+                .min(1 << 20);
+            let mut body = vec![0u8; length];
+            if stream.read_exact(&mut body).is_err() {
+                body.clear();
+            }
+            let body = String::from_utf8_lossy(&body).into_owned();
             let path = request.split(' ').nth(1).unwrap_or("").to_string();
             let fixed = |status: &str, body: &[u8]| {
                 let mut response = format!(
@@ -2206,6 +2310,7 @@ fn http_server(bind: &str) -> Result<u16> {
                 "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
                 "/big" => fixed("200 OK", &big_body()),
                 "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
+                "/v1/chat/completions" => fixed("200 OK", fake_model(&body).as_bytes()),
                 // The example packages (ADR-0046), by plain file name.
                 package
                     if package.strip_prefix("/packages/").is_some_and(|name| {
