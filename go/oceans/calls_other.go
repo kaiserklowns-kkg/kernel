@@ -37,3 +37,7 @@ func TimerSet(notification Handle, bits, ms uint64) error { return ErrUnsupporte
 func PublishText(text string) (Handle, error) { return 0, ErrUnsupported }
 
 func SystemInfo(sysinfo Handle, kind uint64) ([]byte, error) { return nil, ErrUnsupported }
+
+func MemorySize(memory Handle) (uint64, error) { return 0, ErrUnsupported }
+
+func MemoryRead(memory Handle, offset uint64, buf []byte) (int, error) { return 0, ErrUnsupported }

@@ -10,7 +10,11 @@ import "errors"
 //	CONTINUE  data = [session u32][approve u8] → as ASK
 //	TEXT      data = [session u32][offset u32] → more of the text
 //	ACTIVITY  data = [index u32] → an activity entry, newest first
-//	CONFIGURE data = "URL MODEL" (an OpenAI-compatible endpoint)
+//	CONFIGURE data = "URL MODEL [--dns SERVER]" (an OpenAI-compatible
+//	          endpoint, http:// or https://, by address or name; names
+//	          resolved by SERVER, else the network's DNS server),
+//	          handles = [CA] optional: a read-only memory object of PEM
+//	          certificates to trust for this server (ADR-0054)
 //
 // The text is the answer (Done), the reason (Failed), or the approval
 // question (NeedsApproval), worded by the tool.

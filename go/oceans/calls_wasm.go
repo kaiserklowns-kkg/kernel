@@ -142,3 +142,16 @@ func SystemInfo(sysinfo Handle, kind uint64) ([]byte, error) {
 	}
 	return buf[:n], nil
 }
+
+// MemorySize is the size of memory object `memory` (whole pages).
+func MemorySize(memory Handle) (uint64, error) {
+	v, err := result(hostMemorySize(uint64(memory)))
+	return uint64(v), err
+}
+
+// MemoryRead copies bytes of memory object `memory` from `offset` into
+// buf (the handle needs READ and MAP); returns how many, 0 at the end.
+func MemoryRead(memory Handle, offset uint64, buf []byte) (int, error) {
+	n, err := result(hostMemoryRead(uint64(memory), offset, ptr(buf), uint32(len(buf))))
+	return int(n), err
+}

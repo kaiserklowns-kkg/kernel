@@ -6,12 +6,20 @@ edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-# In-tree crates only (the volume crate mounts the guest's disk in the
-# smoke test); oceans-package brings the RustCrypto Ed25519 and SHA-2
-# crates the TLS stack already uses, to sign example packages.
+# In-tree crates (the volume crate mounts the guest's disk in the smoke
+# test); oceans-package brings the RustCrypto Ed25519 and SHA-2 crates the
+# TLS stack already uses, to sign example packages. The TLS stack itself
+# (its `server` feature, with rustls's std I/O) serves the smoke test's
+# https model server, and its roots go into the boot image as the Go
+# services' trust store (ADR-0054): webpki-root-certs is the same Mozilla
+# set as the webpki-roots it uses, as whole certificates, which Go needs.
 [dependencies]
 oceans-archive.workspace = true
 oceans-package = { workspace = true, features = ["build"] }
 oceans-dns.workspace = true
 oceans-fat.workspace = true
+oceans-random.workspace = true
+oceans-tls = { workspace = true, features = ["server"] }
 oceans-volume.workspace = true
+rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12"] }
+webpki-root-certs = "1.0.9"

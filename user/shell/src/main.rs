@@ -280,7 +280,8 @@ impl Shell {
              \x20 app grant | revoke ID PERM allow or withdraw a permission\r\n\
              \x20 app rollback ID | audit    previous version; what was decided\r\n\
              \x20 ai ask QUESTION            ask Oceans AI (it asks before changing anything)\r\n\
-             \x20 ai model URL MODEL         its model server (OpenAI-compatible, http)\r\n\
+             \x20 ai model URL MODEL         its model server (OpenAI-compatible, http or\r\n\
+             \x20   [--dns SERVER] [--ca PATH] https); a DNS server, a CA to trust for it\r\n\
              \x20 ai activity                what the AI did, and what you decided\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"

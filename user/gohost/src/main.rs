@@ -5,7 +5,8 @@
 //! or Core): the host gives the module nothing else. The module sees:
 //! - **the `oceans` host functions**: handle-directory lookup, IPC (call,
 //!   receive, reply, mint), notifications and timers, published text,
-//!   system information. Each checks every pointer range against the
+//!   system information, and reading memory objects the process holds (a
+//!   boot module, or one handed over IPC; ADR-0054). Each checks every pointer range against the
 //!   module's memory and passes the call to the kernel for the process's
 //!   own capabilities. This is the binding `go/oceans` wraps.
 //! - **a WASI preview 1 subset**, enough for the Go runtime: standard
@@ -517,7 +518,56 @@ fn define_oceans(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
             }
         },
     )?;
+    linker.func_wrap(
+        M,
+        "memory_size",
+        |_: Caller<'_, Host>, memory: u64| -> i64 {
+            oceans_rt::memory_size(Handle(memory))
+                .map_or_else(code, |size| i64::try_from(size).unwrap_or(TOO_LARGE))
+        },
+    )?;
+    linker.func_wrap(
+        M,
+        "memory_read",
+        |mut caller: Caller<'_, Host>, memory: u64, offset: u64, buf: u32, cap: u32| -> i64 {
+            memory_read(&mut caller, Handle(memory), offset, buf, cap)
+        },
+    )?;
     Ok(())
+}
+
+/// Copies up to `cap` bytes of memory object `memory`, from `offset`, to
+/// `buf` in the module's memory (the process needs `READ` and `MAP` on
+/// it); returns how many. The object is mapped read-only only for the
+/// copy.
+fn memory_read(
+    caller: &mut Caller<'_, Host>,
+    memory: Handle,
+    offset: u64,
+    buf: u32,
+    cap: u32,
+) -> i64 {
+    let size = match oceans_rt::memory_size(memory) {
+        Ok(size) => size,
+        Err(error) => return code(error),
+    };
+    let Some(available) = size.checked_sub(offset) else {
+        return 0;
+    };
+    let len = available.min(u64::from(cap)) as usize;
+    if len == 0 {
+        return 0;
+    }
+    let base = match oceans_rt::memory_map(memory, 0, prot::READ) {
+        Ok(base) => base,
+        Err(error) => return code(error),
+    };
+    // SAFETY: the whole object (`size` bytes, `offset + len <= size`) is
+    // mapped readable at `base` until the unmap below.
+    let bytes = unsafe { core::slice::from_raw_parts(base.add(offset as usize), len) };
+    let copied = write(caller, buf, bytes);
+    let _ = oceans_rt::memory_unmap(base);
+    if copied { len as i64 } else { BAD_ADDRESS }
 }
 
 fn define_wasi(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
@@ -729,6 +779,25 @@ fn define_wasi(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
          _: u32,
          _: u32|
          -> i32 { ERRNO_NOTSUP },
+    )?;
+    // What Go's `os` package imports as well (pulled in by `net` and
+    // `crypto/tls`, ADR-0054): there are no files through WASI.
+    linker.func_wrap(
+        W,
+        "fd_readdir",
+        |_: Caller<'_, Host>, _: i32, _: u32, _: u32, _: u64, _: u32| -> i32 { ERRNO_BADF },
+    )?;
+    linker.func_wrap(
+        W,
+        "path_filestat_get",
+        |_: Caller<'_, Host>, _: i32, _: u32, _: u32, _: u32, _: u32| -> i32 { ERRNO_NOTSUP },
+    )?;
+    linker.func_wrap(
+        W,
+        "path_readlink",
+        |_: Caller<'_, Host>, _: i32, _: u32, _: u32, _: u32, _: u32, _: u32| -> i32 {
+            ERRNO_NOTSUP
+        },
     )?;
     Ok(())
 }

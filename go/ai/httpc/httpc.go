@@ -8,56 +8,149 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"strconv"
 	"strings"
 )
 
-// Endpoint is a parsed `http://ADDRESS:PORT/PATH` URL.
+// Endpoint is a parsed `http://` or `https://` URL of a model server.
 type Endpoint struct {
-	// IPv4 address (names need DNS, which the gateway does not do yet).
-	Address [4]byte
+	// TLS: an https:// URL.
+	TLS bool
+	// Name is the host as written: a DNS name, or an address literal
+	// (IPv6 without its brackets). It is what TLS verifies.
+	Name string
+	// Address is the host's address when Name is a literal (else invalid:
+	// the name is resolved when connecting).
+	Address netip.Addr
 	Port    uint16
 	// Path prefix, without a trailing slash ("" or "/v1").
 	Path string
-	// Host header value.
+	// Host header value: the host as written, with the port unless it is
+	// the scheme's default.
 	Host string
 }
 
-// ParseEndpoint accepts `http://A.B.C.D[:PORT][/PATH]`.
+// ParseEndpoint accepts `http[s]://HOST[:PORT][/PATH]`, HOST a DNS name,
+// an IPv4 address or a bracketed IPv6 address. It refuses what a model
+// server URL has no use for and could hide another destination: user
+// information, queries, fragments, zones, percent-escapes and characters
+// outside the path's plain ASCII set.
 func ParseEndpoint(url string) (Endpoint, error) {
+	var e Endpoint
 	rest, ok := strings.CutPrefix(url, "http://")
 	if !ok {
-		if strings.HasPrefix(url, "https://") {
-			return Endpoint{}, errors.New("https is not supported yet (use a local model server over http)")
+		if rest, ok = strings.CutPrefix(url, "https://"); !ok {
+			return Endpoint{}, errors.New("the URL must start with http:// or https://")
 		}
-		return Endpoint{}, errors.New("the URL must start with http://")
+		e.TLS = true
 	}
-	hostPort, path, _ := strings.Cut(rest, "/")
-	host, portText, hasPort := strings.Cut(hostPort, ":")
-	port := uint64(80)
+	authority, path, _ := strings.Cut(rest, "/")
+	if strings.ContainsAny(authority, "@?#%") {
+		return Endpoint{}, fmt.Errorf("%q: only a host and a port may come before the path", authority)
+	}
+	host, portText, hasPort := authority, "", false
+	if strings.HasPrefix(authority, "[") {
+		end := strings.IndexByte(authority, ']')
+		if end < 0 {
+			return Endpoint{}, fmt.Errorf("%q: an IPv6 address must end with ]", authority)
+		}
+		host, rest = authority[1:end], authority[end+1:]
+		if rest != "" {
+			if portText, hasPort = strings.CutPrefix(rest, ":"); !hasPort {
+				return Endpoint{}, fmt.Errorf("%q: expected :PORT after the address", authority)
+			}
+		}
+		address, err := netip.ParseAddr(host)
+		if err != nil || !address.Is6() || address.Is4In6() {
+			return Endpoint{}, fmt.Errorf("%q is not an IPv6 address", host)
+		}
+		e.Address = address
+	} else {
+		host, portText, hasPort = strings.Cut(authority, ":")
+		if allDigitsAndDots(host) {
+			address, err := netip.ParseAddr(host)
+			if err != nil || !address.Is4() {
+				return Endpoint{}, fmt.Errorf("%q is not an IPv4 address", host)
+			}
+			e.Address = address
+		} else if !validHostName(host) {
+			return Endpoint{}, fmt.Errorf("%q is not a valid host name", host)
+		}
+	}
+	e.Name = host
+	e.Port = 80
+	if e.TLS {
+		e.Port = 443
+	}
 	if hasPort {
-		var err error
-		if port, err = strconv.ParseUint(portText, 10, 16); err != nil || port == 0 {
+		if !allDigits(portText) {
 			return Endpoint{}, fmt.Errorf("bad port %q", portText)
 		}
-	}
-	parts := strings.Split(host, ".")
-	if len(parts) != 4 {
-		return Endpoint{}, fmt.Errorf("%q is not an IPv4 address", host)
-	}
-	var address [4]byte
-	for i, part := range parts {
-		n, err := strconv.ParseUint(part, 10, 8)
-		if err != nil {
-			return Endpoint{}, fmt.Errorf("%q is not an IPv4 address", host)
+		port, err := strconv.ParseUint(portText, 10, 16)
+		if err != nil || port == 0 {
+			return Endpoint{}, fmt.Errorf("bad port %q", portText)
 		}
-		address[i] = byte(n)
+		e.Port = uint16(port)
 	}
-	path = strings.TrimSuffix(path, "/")
-	if path != "" {
-		path = "/" + path
+	for _, c := range []byte(path) {
+		if !pathByte(c) {
+			return Endpoint{}, fmt.Errorf("the path %q has a character URLs here may not use", "/"+path)
+		}
 	}
-	return Endpoint{Address: address, Port: uint16(port), Path: path, Host: hostPort}, nil
+	e.Path = strings.TrimSuffix("/"+path, "/")
+	e.Host = authority
+	if hasPort && (e.Port == 80 && !e.TLS || e.Port == 443 && e.TLS) {
+		e.Host = strings.TrimSuffix(authority, ":"+portText)
+	}
+	return e, nil
+}
+
+func allDigits(s string) bool {
+	for _, c := range []byte(s) {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func allDigitsAndDots(s string) bool {
+	for _, c := range []byte(s) {
+		if (c < '0' || c > '9') && c != '.' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// validHostName: dot-separated labels of 1–63 letters, digits and
+// hyphens (not at either end), at most 253 characters, no trailing dot.
+func validHostName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(name, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range []byte(label) {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// pathByte: unreserved characters, sub-delimiters, ':', '@' and '/'
+// (RFC 3986 pchar, without percent-escapes).
+func pathByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("-._~!$&'()*+,;=:@/", c) >= 0
 }
 
 // MaxResponse bounds a response.

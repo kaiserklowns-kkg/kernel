@@ -1,115 +1,115 @@
 // Package tcp is a TCP client over the Oceans network service (net-proto,
-// ADR-0023, ADR-0024) for Go programs: Dial returns a connection that is
-// an io.ReadWriteCloser, with time limits.
+// ADR-0023, ADR-0024, ADR-0043) for Go programs: Dial and DialAddr return
+// a connection that is an io.ReadWriteCloser, with time limits and
+// deadlines (what crypto/tls needs of a connection).
 package tcp
 
 import (
 	"encoding/binary"
-	"errors"
 	"io"
+	"net/netip"
 	"time"
 
 	"github.com/kaiserklowns-kkg/kernel/go/oceans"
+	"github.com/kaiserklowns-kkg/kernel/go/oceans/netproto"
 )
 
-// net-proto operations and constants used here.
+// TCP states, as TCP_STATUS reports them.
 const (
-	opTCPConnect  = 6
-	opTCPSend     = 9
-	opTCPRecv     = 10
-	opTCPShutdown = 11
-	opTCPStatus   = 12
-
-	readable   = 1 << 0
-	timeoutBit = 1 << 1
-
 	stateSynSent     = 2
 	stateSynReceived = 3
 	stateEstablished = 4
 	stateCloseWait   = 7
 
-	statusEmpty = 6
-	statusEOF   = 14
-
 	maxStream = 248
 )
 
-var statusText = map[uint64]string{
-	1: "bad request", 2: "network not configured yet", 3: "port in use", 4: "no route to host",
-	5: "too large", 6: "nothing received", 7: "out of buffers", 8: "no network device",
-	9: "connection refused", 10: "connection reset by peer", 11: "timed out",
-	12: "not connected", 13: "connection closed", 14: "end of stream",
-}
-
 // Error is a net-proto status.
-type Error uint64
+type Error = netproto.Error
 
-func (e Error) Error() string {
-	if text, ok := statusText[uint64(e)]; ok {
-		return "tcp: " + text
-	}
-	return "tcp: network error"
-}
-
-// ErrTimeout: a time limit passed.
-var ErrTimeout = errors.New("tcp: timed out")
+// ErrTimeout: a time limit or deadline passed.
+var ErrTimeout = netproto.ErrTimeout
 
 // Conn is a TCP connection.
 type Conn struct {
 	handle       oceans.Handle
 	notification oceans.Handle
+	remote       netip.AddrPort
 	// Timeout bounds each wait in Read and Write.
-	Timeout time.Duration
-	pending []byte
-	eof     bool
+	Timeout       time.Duration
+	readDeadline  time.Time
+	writeDeadline time.Time
+	pending       []byte
+	eof           bool
 }
 
-// Dial connects to `address:port` through the network service `net`,
-// waiting up to `timeout` for the connection.
+// Dial connects to IPv4 `address:port` through the network service
+// `net`, waiting up to `timeout` for the connection.
 func Dial(net oceans.Handle, address [4]byte, port uint16, timeout time.Duration) (*Conn, error) {
-	notification, err := oceans.NotificationCreate()
+	return DialAddr(net, netip.AddrPortFrom(netip.AddrFrom4(address), port), timeout)
+}
+
+// DialAddr connects to `to`, IPv4 (TCP_CONNECT) or IPv6 (TCP_CONNECT6),
+// waiting up to `timeout` for the connection.
+func DialAddr(net oceans.Handle, to netip.AddrPort, timeout time.Duration) (*Conn, error) {
+	address := to.Addr().Unmap()
+	if !address.IsValid() || to.Port() == 0 {
+		return nil, netproto.StatusBadRequest
+	}
+	notification, shared, err := netproto.Notification()
 	if err != nil {
 		return nil, err
 	}
-	shared, err := oceans.Duplicate(notification, oceans.RightSignal|oceans.RightTransfer)
-	if err != nil {
-		_ = oceans.Close(notification)
-		return nil, err
+	var op uint64
+	var data []byte
+	if address.Is4() {
+		op, data = netproto.OpTCPConnect, make([]byte, 14)
+		a := address.As4()
+		copy(data, a[:])
+		netproto.PutPortBits(data[4:], to.Port(), netproto.Readable)
+	} else {
+		op, data = netproto.OpTCPConnect6, make([]byte, 26)
+		netproto.PutAddr16(data, address)
+		netproto.PutPortBits(data[16:], to.Port(), netproto.Readable)
 	}
-	data := make([]byte, 14)
-	copy(data, address[:])
-	binary.LittleEndian.PutUint16(data[4:], port)
-	binary.LittleEndian.PutUint64(data[6:], readable)
-	reply, err := oceans.Call(net, opTCPConnect, data, []oceans.Handle{shared})
-	if err == nil && reply.Label != 0 {
-		err = Error(reply.Label)
+	reply, err := oceans.Call(net, op, data, []oceans.Handle{shared})
+	if err == nil {
+		err = netproto.Status(reply.Label)
 	}
 	if err == nil && len(reply.Handles) != 1 {
-		err = Error(1)
+		err = netproto.StatusBadRequest
 	}
 	if err != nil {
 		_ = oceans.Close(notification)
 		return nil, err
 	}
-	c := &Conn{handle: reply.Handles[0], notification: notification, Timeout: timeout}
-	if err := c.wait(timeout, c.connected); err != nil {
+	c := &Conn{
+		handle:       reply.Handles[0],
+		notification: notification,
+		remote:       netip.AddrPortFrom(address, to.Port()),
+		Timeout:      timeout,
+	}
+	if err := netproto.Wait(c.notification, timeout, c.connected); err != nil {
 		c.Close()
 		return nil, err
 	}
 	return c, nil
 }
 
+// RemoteAddr is the address connected to.
+func (c *Conn) RemoteAddr() netip.AddrPort { return c.remote }
+
 // connected: done (true), still connecting (false), or failed.
 func (c *Conn) connected() (bool, error) {
-	reply, err := oceans.Call(c.handle, opTCPStatus, nil, nil)
+	reply, err := oceans.Call(c.handle, netproto.OpTCPStatus, nil, nil)
 	if err != nil {
 		return false, err
 	}
-	if reply.Label != 0 {
-		return false, Error(reply.Label)
+	if err := netproto.Status(reply.Label); err != nil {
+		return false, err
 	}
 	if len(reply.Data) < 2 {
-		return false, Error(1)
+		return false, netproto.StatusBadRequest
 	}
 	if reply.Data[1] != 0 {
 		return false, Error(reply.Data[1])
@@ -120,54 +120,69 @@ func (c *Conn) connected() (bool, error) {
 	case stateSynSent, stateSynReceived:
 		return false, nil
 	}
-	return false, Error(12)
+	return false, netproto.StatusNotConnected
 }
 
-// wait calls `done` until it says yes, sleeping on the notification, for
-// at most `limit`.
-func (c *Conn) wait(limit time.Duration, done func() (bool, error)) error {
-	ms := uint64(limit / time.Millisecond)
-	if ms == 0 {
-		ms = 1
+// limit is how long one wait may take: the timeout, cut short by the
+// deadline if one is set (an error if it has passed).
+func (c *Conn) limit(deadline time.Time) (time.Duration, error) {
+	limit := c.Timeout
+	if limit <= 0 {
+		limit = 30 * time.Second
 	}
-	_ = oceans.TimerSet(c.notification, timeoutBit, ms)
-	defer oceans.TimerSet(c.notification, timeoutBit, 0)
-	for {
-		ok, err := done()
-		if err != nil || ok {
-			return err
+	if !deadline.IsZero() {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return 0, ErrTimeout
 		}
-		bits, err := oceans.NotificationWait(c.notification)
-		if err != nil {
-			return err
-		}
-		if bits&timeoutBit != 0 {
-			if ok, err := done(); ok || err != nil {
-				return err
-			}
-			return ErrTimeout
-		}
+		limit = min(limit, left)
 	}
+	return limit, nil
+}
+
+// SetDeadline sets the read and write deadlines (zero: none).
+func (c *Conn) SetDeadline(t time.Time) error {
+	c.readDeadline, c.writeDeadline = t, t
+	return nil
+}
+
+// SetReadDeadline sets the time after which Read fails with ErrTimeout.
+func (c *Conn) SetReadDeadline(t time.Time) error {
+	c.readDeadline = t
+	return nil
+}
+
+// SetWriteDeadline sets the time after which Write fails with ErrTimeout.
+func (c *Conn) SetWriteDeadline(t time.Time) error {
+	c.writeDeadline = t
+	return nil
 }
 
 // Write sends all of `b`, waiting while the send buffer is full.
 func (c *Conn) Write(b []byte) (int, error) {
 	written := 0
 	for written < len(b) {
+		limit, err := c.limit(c.writeDeadline)
+		if err != nil {
+			return written, err
+		}
 		chunk := b[written:min(len(b), written+maxStream)]
 		var accepted int
-		err := c.wait(c.Timeout, func() (bool, error) {
-			reply, err := oceans.Call(c.handle, opTCPSend, chunk, nil)
+		err = netproto.Wait(c.notification, limit, func() (bool, error) {
+			reply, err := oceans.Call(c.handle, netproto.OpTCPSend, chunk, nil)
 			if err != nil {
 				return false, err
 			}
-			if reply.Label != 0 {
-				return false, Error(reply.Label)
+			if err := netproto.Status(reply.Label); err != nil {
+				return false, err
 			}
 			if len(reply.Data) < 4 {
-				return false, Error(1)
+				return false, netproto.StatusBadRequest
 			}
 			accepted = int(binary.LittleEndian.Uint32(reply.Data))
+			if accepted > len(chunk) {
+				return false, netproto.StatusBadRequest
+			}
 			return accepted > 0, nil
 		})
 		if err != nil {
@@ -181,18 +196,22 @@ func (c *Conn) Write(b []byte) (int, error) {
 // Read reads what has arrived, waiting for something or the end.
 func (c *Conn) Read(b []byte) (int, error) {
 	if len(c.pending) == 0 && !c.eof {
-		err := c.wait(c.Timeout, func() (bool, error) {
-			reply, err := oceans.Call(c.handle, opTCPRecv, nil, nil)
+		limit, err := c.limit(c.readDeadline)
+		if err != nil {
+			return 0, err
+		}
+		err = netproto.Wait(c.notification, limit, func() (bool, error) {
+			reply, err := oceans.Call(c.handle, netproto.OpTCPRecv, nil, nil)
 			if err != nil {
 				return false, err
 			}
-			switch reply.Label {
-			case 0:
+			switch Error(reply.Label) {
+			case netproto.StatusOK:
 				c.pending = append(c.pending, reply.Data...)
 				return true, nil
-			case statusEmpty:
+			case netproto.StatusEmpty:
 				return false, nil
-			case statusEOF:
+			case netproto.StatusEOF:
 				c.eof = true
 				return true, nil
 			}
@@ -212,9 +231,9 @@ func (c *Conn) Read(b []byte) (int, error) {
 
 // CloseWrite sends our end of stream.
 func (c *Conn) CloseWrite() error {
-	reply, err := oceans.Call(c.handle, opTCPShutdown, nil, nil)
-	if err == nil && reply.Label != 0 {
-		err = Error(reply.Label)
+	reply, err := oceans.Call(c.handle, netproto.OpTCPShutdown, nil, nil)
+	if err == nil {
+		err = netproto.Status(reply.Label)
 	}
 	return err
 }
