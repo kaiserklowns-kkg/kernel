@@ -3114,7 +3114,12 @@ fn check_bridge(step: &[u8], port: u16, code: Option<&str>) -> Result {
                 &auth,
                 r#"{"question":"how much memory is free?"}"#,
             )?;
-            expect_reply(&answer, "ask", 200, &["\"state\":\"done\"", "Memory over https: "])?;
+            expect_reply(
+                &answer,
+                "ask",
+                200,
+                &["\"state\":\"done\"", "Memory over https: "],
+            )?;
             let asked = post(
                 "/api/ai/ask",
                 &auth,
