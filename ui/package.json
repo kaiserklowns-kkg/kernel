@@ -1,0 +1,25 @@
+{
+  "name": "oceans-ui",
+  "description": "The Oceans web experience: Control Center, Apps, AI Center and Settings (ADR-0058)",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "test": "bun test src",
+    "licenses": "bun scripts/licenses.ts"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "3.0.10",
+    "@sveltejs/kit": "2.70.3",
+    "@sveltejs/vite-plugin-svelte": "6.2.4",
+    "@types/bun": "1.3.14",
+    "svelte": "5.57.1",
+    "svelte-check": "4.7.6",
+    "typescript": "6.0.3",
+    "vite": "7.3.6"
+  }
+}

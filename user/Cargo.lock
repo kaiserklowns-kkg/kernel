@@ -976,6 +976,7 @@ dependencies = [
  "oceans-core-proto",
  "oceans-elf",
  "oceans-fs-proto",
+ "oceans-net-proto",
  "oceans-package",
  "oceans-rt",
 ]

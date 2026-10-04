@@ -16,6 +16,7 @@
 
 mod ai;
 mod apps;
+mod ui;
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
@@ -235,6 +236,7 @@ impl Shell {
             ["sync"] => self.sync(),
             ["app", words @ ..] => self.app(words),
             ["ai", words @ ..] => self.ai(words),
+            ["ui", words @ ..] => self.ui(words),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
             ["exit"] => return Some(0),
             // Anything else is a program in /bin, run with what its manifest
@@ -284,6 +286,8 @@ impl Shell {
              \x20 ai model URL MODEL         its model server (OpenAI-compatible, http or\r\n\
              \x20   [--dns SERVER] [--ca PATH] https); a DNS server, a CA to trust for it\r\n\
              \x20 ai activity                what the AI did, and what you decided\r\n\
+             \x20 ui pair | unpair | status  let a browser use the Oceans web experience\r\n\
+             \x20                              (it may list, start and stop apps, never decide)\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
         );

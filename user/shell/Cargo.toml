@@ -15,5 +15,6 @@ bench = false
 oceans-elf.workspace = true
 oceans-fs-proto.workspace = true
 oceans-core-proto.workspace = true
+oceans-net-proto.workspace = true
 oceans-package.workspace = true
 oceans-rt.workspace = true

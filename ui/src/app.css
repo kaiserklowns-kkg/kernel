@@ -1,0 +1,159 @@
+/*
+ * The Oceans design tokens (master spec §29–32): calm and precise. A deep
+ * dark background, neutral surfaces in small steps, one restrained accent,
+ * and semantic colours that only ever mean their one thing.
+ */
+:root {
+	color-scheme: dark;
+
+	/* Surfaces, darkest first. */
+	--bg: #0a0d12;
+	--surface-1: #10141b;
+	--surface-2: #161b24;
+	--surface-3: #1d2330;
+	--surface-hover: #222939;
+	--border: #242b38;
+	--border-strong: #313a4b;
+
+	/* Text. */
+	--text: #e5e9f0;
+	--text-muted: #9ba4b4;
+	--text-faint: #6c7588;
+
+	/* The accent: the sea at depth. */
+	--accent: #5b9cf8;
+	--accent-hover: #74acfa;
+	--accent-active: #4a8ae6;
+	--accent-soft: rgb(91 156 248 / 0.14);
+	--on-accent: #071226;
+
+	/* Meaning. */
+	--success: #3dbb7d;
+	--success-soft: rgb(61 187 125 / 0.13);
+	--warning: #e3a83b;
+	--warning-soft: rgb(227 168 59 / 0.13);
+	--error: #ef6461;
+	--error-soft: rgb(239 100 97 / 0.13);
+	--info: #64b5f6;
+	--info-soft: rgb(100 181 246 / 0.13);
+
+	/* Shape and space. */
+	--radius-s: 6px;
+	--radius-m: 10px;
+	--radius-l: 14px;
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 16px;
+	--space-5: 24px;
+	--space-6: 32px;
+	--space-7: 48px;
+
+	--font: 'Inter', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+	--mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', ui-monospace, Consolas, monospace;
+	--text-xs: 0.75rem;
+	--text-s: 0.8125rem;
+	--text-m: 0.9375rem;
+	--text-l: 1.125rem;
+	--text-xl: 1.5rem;
+	--text-2xl: 2rem;
+
+	--focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+	--shadow: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 8px 24px rgb(0 0 0 / 0.28);
+	--speed: 140ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--speed: 0ms;
+	}
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	min-height: 100%;
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--font);
+	font-size: var(--text-m);
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+}
+
+.app-root {
+	display: contents;
+}
+
+h1,
+h2,
+h3 {
+	margin: 0;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	line-height: 1.25;
+}
+
+p {
+	margin: 0;
+}
+
+a {
+	color: var(--accent);
+	text-decoration: none;
+}
+
+a:hover {
+	color: var(--accent-hover);
+}
+
+:focus-visible {
+	outline: none;
+	box-shadow: var(--focus-ring);
+	border-radius: var(--radius-s);
+}
+
+code,
+kbd,
+.mono {
+	font-family: var(--mono);
+	font-size: 0.92em;
+}
+
+kbd,
+code {
+	padding: 1px 6px;
+	border-radius: var(--radius-s);
+	background: var(--surface-3);
+	border: 1px solid var(--border);
+	color: var(--text);
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.muted {
+	color: var(--text-muted);
+}
+
+.faint {
+	color: var(--text-faint);
+}
+
+::selection {
+	background: var(--accent-soft);
+}

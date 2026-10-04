@@ -65,5 +65,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0055](0055-sensitive-reads.md) | Sensitive reads by AI agents | Accepted |
 | [0056](0056-ui-architecture.md) | UI architecture: a native desktop, and SvelteKit apps through a bridge | Accepted |
 | [0057](0057-display-and-desktop.md) | The display service and the desktop (ABI 13) | Accepted |
+| [0058](0058-web-experience-and-bridge.md) | The Oceans web experience: SvelteKit apps and the Go bridge | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.
