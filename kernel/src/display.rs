@@ -430,3 +430,14 @@ pub fn process_exited(process: &Process) {
         display.claimer = None;
     }
 }
+
+/// Whether `process` holds the screen (`DISPLAY_CLAIM`).
+pub fn held_by(process: &Process) -> bool {
+    let _no_preempt = NoPreempt::new();
+    DISPLAY.lock().as_ref().is_some_and(|display| {
+        display
+            .claimer
+            .as_ref()
+            .is_some_and(|claimer| core::ptr::eq(claimer.as_ptr(), process))
+    })
+}

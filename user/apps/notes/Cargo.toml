@@ -1,0 +1,18 @@
+[package]
+name = "notes-app"
+description = "Notes: the example windowed Oceans app; what is typed into its window is kept in its storage (ADR-0059)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "notes-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-fs-proto.workspace = true
+oceans-display-proto.workspace = true
+noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }

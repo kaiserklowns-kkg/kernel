@@ -21,9 +21,10 @@
 /// (28–34: devices; errors -15 and -16); 8 = ADR-0023 (35–37: bound
 /// notifications, timers, clock); 9 = ADR-0026 (38: random); 10 = ADR-0031
 /// (39: wall time); 11 = ADR-0032 (40: console input; class selectors for
-/// `DEVICE_OPEN`). Versions only
+/// `DEVICE_OPEN`); 12 = ADR-0044 (41: kill); 13 = ADR-0057 (42–44:
+/// display); 14 = ADR-0059 (45–46: the keyboard to the desktop). Versions only
 /// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 13;
+pub const ABI_VERSION: u64 = 14;
 
 /// System call numbers.
 pub mod nr {
@@ -217,6 +218,21 @@ pub mod nr {
     /// [`display::TEXT_HEADER`](super::display::TEXT_HEADER)-byte header,
     /// then the cells. Needs `READ`.
     pub const DISPLAY_TEXT: u64 = 44;
+
+    // ABI 14 (ADR-0059)
+
+    /// `(display, notification, bits) -> ()` — keyboard input goes to the
+    /// caller instead of the console: key bytes queue for `DISPLAY_KEYS`,
+    /// and `bits` is signalled on `notification` as they arrive. The
+    /// caller must hold the screen (`DISPLAY_CLAIM`; else `Busy`). Serial
+    /// input still goes to the console, and so does the caller's own
+    /// `CONSOLE_INPUT`. Ends when the caller exits. Needs `MANAGE` on the
+    /// display, `SIGNAL` on the notification.
+    pub const DISPLAY_KEYBOARD: u64 = 45;
+    /// `(display, ptr, capacity) -> count` — takes queued key bytes
+    /// without waiting (0: none). Only the keyboard's holder (else
+    /// `Busy`). Needs `READ`.
+    pub const DISPLAY_KEYS: u64 = 46;
 }
 
 /// The display (ADR-0057).
@@ -226,6 +242,12 @@ pub mod display {
     pub const TEXT_HEADER: usize = 16;
     /// Largest `DISPLAY_TEXT` buffer.
     pub const MAX_TEXT: usize = 64 * 1024;
+    /// Key bytes queued for `DISPLAY_KEYS`; more are dropped.
+    pub const MAX_KEYS: usize = 1024;
+    /// The byte keyboards send for Ctrl+Tab (ADR-0059): the desktop moves
+    /// the keyboard focus to the next window. (ASCII RS; no other key
+    /// sends it.)
+    pub const KEY_NEXT_WINDOW: u8 = 0x1e;
 
     /// The screen.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

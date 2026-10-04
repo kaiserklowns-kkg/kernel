@@ -4,7 +4,8 @@
 //! The controller is set to interrupt on IRQ 1 with scancode translation
 //! (set 1). Make codes are mapped to ASCII with Shift, Caps Lock and Ctrl;
 //! Enter sends CR and Backspace DEL, like a serial terminal. Keys without
-//! an ASCII meaning (arrows, function keys) are ignored for now.
+//! an ASCII meaning (arrows, function keys) are ignored for now; Ctrl+Tab
+//! sends the desktop's "next window" byte (ADR-0059).
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -150,6 +151,10 @@ fn translate(code: u8) -> Option<u8> {
     }
     if state & CTRL != 0 && byte.is_ascii_alphabetic() {
         byte = byte.to_ascii_lowercase() & 0x1f;
+    }
+    // Ctrl+Tab: the desktop's "next window" (ADR-0059).
+    if state & CTRL != 0 && byte == b'\t' {
+        byte = oceans_abi::display::KEY_NEXT_WINDOW;
     }
     Some(byte)
 }

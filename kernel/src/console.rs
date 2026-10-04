@@ -5,6 +5,11 @@
 //! Whoever reads the console (the shell, a terminal service) decides. Input
 //! is buffered in a fixed ring (no allocation in interrupt context); when it
 //! is full, further bytes are dropped and counted.
+//!
+//! Keyboard input (the PS/2 keyboard, and USB keyboards through
+//! `CONSOLE_INPUT`) can be taken by the desktop (ADR-0059): it then queues
+//! for the desktop, which hands it to the focused window (the Terminal
+//! puts it back here). Serial input always comes here.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -12,6 +17,8 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 use crate::acpi::Acpi;
+use crate::ipc::Notification;
+use crate::process::Process;
 use crate::sched::{self, Thread};
 use crate::{arch, klog};
 
@@ -36,6 +43,30 @@ static INPUT: Mutex<Input> = Mutex::new(Input {
     dropped: 0,
     readers: VecDeque::new(),
 });
+
+const KEYS_CAPACITY: usize = oceans_abi::display::MAX_KEYS;
+
+/// Keyboard input taken by the desktop (ADR-0059). Always locked with
+/// interrupts disabled: the PS/2 interrupt feeds it.
+struct Keys {
+    ring: [u8; KEYS_CAPACITY],
+    head: usize,
+    len: usize,
+    /// The holder (by address: compared, never dereferenced), and what to
+    /// signal when keys arrive.
+    holder: Option<(usize, Arc<Notification>, u64)>,
+}
+
+static KEYS: Mutex<Keys> = Mutex::new(Keys {
+    ring: [0; KEYS_CAPACITY],
+    head: 0,
+    len: 0,
+    holder: None,
+});
+
+fn identity(process: &Process) -> usize {
+    core::ptr::from_ref(process) as usize
+}
 
 /// Routes the serial line's interrupt and starts accepting input.
 pub fn init(acpi: Option<&Acpi>) {
@@ -77,7 +108,7 @@ pub fn init(acpi: Option<&Acpi>) {
         gsi,
         oceans_acpi::active_low(flags),
         oceans_acpi::level_triggered(flags),
-        on_input,
+        on_key,
     );
     match result {
         Ok(()) => klog::info!("console input: PS/2 keyboard (IRQ {KEYBOARD_IRQ}, GSI {gsi})"),
@@ -104,13 +135,96 @@ fn on_input(byte: u8) {
     }
 }
 
-/// Input from a keyboard driver in user space (ADR-0032), as if typed.
-pub fn inject(bytes: &[u8]) {
+/// A key from a keyboard (interrupt context, or `inject`; interrupts
+/// disabled): to the desktop if it took the keyboard, else to the console.
+fn on_key(byte: u8) {
+    {
+        let mut keys = KEYS.lock();
+        let keys = &mut *keys;
+        if let Some((_, notification, bits)) = &keys.holder {
+            crate::random::sample();
+            if keys.len < KEYS_CAPACITY {
+                keys.ring[(keys.head + keys.len) % KEYS_CAPACITY] = byte;
+                keys.len += 1;
+            }
+            notification.signal(*bits);
+            return;
+        }
+    }
+    on_input(byte);
+}
+
+/// Input from a keyboard driver in user space (ADR-0032), as if typed;
+/// from the keyboard's holder (the desktop handing keys to the Terminal,
+/// ADR-0059), straight to the console.
+pub fn inject(from: &Process, bytes: &[u8]) {
     arch::without_interrupts(|| {
+        let holder = KEYS
+            .lock()
+            .holder
+            .as_ref()
+            .is_some_and(|(who, _, _)| *who == identity(from));
         for &byte in bytes {
-            on_input(byte);
+            if holder {
+                on_input(byte);
+            } else {
+                on_key(byte);
+            }
         }
     });
+}
+
+/// Keyboard input goes to `holder` from now on (`DISPLAY_KEYBOARD`):
+/// queued, with `bits` signalled on `notification`.
+pub fn take_keyboard(holder: &Process, notification: Arc<Notification>, bits: u64) {
+    let old = arch::without_interrupts(|| {
+        let mut keys = KEYS.lock();
+        keys.head = 0;
+        keys.len = 0;
+        keys.holder.replace((identity(holder), notification, bits))
+    });
+    // Dropped with interrupts enabled, outside the lock.
+    drop(old);
+}
+
+/// Takes queued keys for `holder` (`DISPLAY_KEYS`); `None` if it does not
+/// hold the keyboard.
+pub fn read_keys(holder: &Process, out: &mut [u8]) -> Option<usize> {
+    arch::without_interrupts(|| {
+        let mut keys = KEYS.lock();
+        if !keys
+            .holder
+            .as_ref()
+            .is_some_and(|(who, _, _)| *who == identity(holder))
+        {
+            return None;
+        }
+        let count = out.len().min(keys.len);
+        for slot in out.iter_mut().take(count) {
+            *slot = keys.ring[keys.head];
+            keys.head = (keys.head + 1) % KEYS_CAPACITY;
+            keys.len -= 1;
+        }
+        Some(count)
+    })
+}
+
+/// `process` exited: if it held the keyboard, keys go to the console again
+/// (the queued ones are dropped).
+pub fn process_exited(process: &Process) {
+    let old = arch::without_interrupts(|| {
+        let mut keys = KEYS.lock();
+        if !keys
+            .holder
+            .as_ref()
+            .is_some_and(|(who, _, _)| *who == identity(process))
+        {
+            return None;
+        }
+        keys.len = 0;
+        keys.holder.take()
+    });
+    drop(old);
 }
 
 /// Blocks until input is available; copies up to `out.len()` bytes and

@@ -21,6 +21,12 @@
 //!   in the foreground (the caller gets a wait-only process handle) or
 //!   detached; `STOP` kills it (ABI 12); exits are noticed through a
 //!   notification bound to the endpoint.
+//! - **Windows** (ADR-0059): an app given `window` gets a client end of the
+//!   display service's window endpoint, minted by Core with a badge of
+//!   its own; the display service asks `WINDOW_OWNER` whose it is, and
+//!   frames the app's windows with its verified name. The display service
+//!   registers the endpoint (`WINDOWS`) as a server end Core can only mint
+//!   from.
 //! - **Runtimes** (ADR-0052): a `native` program is spawned directly; a
 //!   `wasm` one (a Go program) is run by the Go host, spawned with the
 //!   same capabilities plus the program as a read-only `module`.
@@ -171,6 +177,8 @@ struct Launch<'a> {
     args: &'a str,
     /// Services get a log (ADR-0049).
     service: bool,
+    /// The badge of its window end (`window`, ADR-0059).
+    window: Option<u64>,
 }
 
 struct Running {
@@ -178,6 +186,8 @@ struct Running {
     process: Handle,
     /// The permissions it was started with.
     granted: Vec<Permission>,
+    /// The badge of its window end, if it was given one (ADR-0059).
+    window: Option<u64>,
 }
 
 /// A failed request: its status, and text for the client when there is
@@ -212,6 +222,10 @@ struct Core {
     net: Option<Handle>,
     input: Option<Handle>,
     sysinfo: Option<Handle>,
+    /// The display service's window endpoint (`WINDOWS`, ADR-0059): a
+    /// server end Core may only mint client ends of.
+    windows: Option<Handle>,
+    next_window_badge: u64,
     /// The Go host's image, for `wasm` apps (ADR-0052).
     gohost: Option<Handle>,
     trusted: Vec<(String, [u8; 32])>,
@@ -270,6 +284,8 @@ impl Core {
             net: directory.find("use", "net"),
             input: directory.find("use", "input"),
             sysinfo: directory.find("sysinfo", "sysinfo"),
+            windows: None,
+            next_window_badge: 1,
             gohost: directory.find("module", "gohost"),
             trusted,
             apps: BTreeMap::new(),
@@ -656,6 +672,20 @@ impl Core {
                 node.close();
                 result
             }
+            op::WINDOWS => {
+                let [windows] = received else {
+                    close_all(received);
+                    return Err(Status::BadRequest.into());
+                };
+                if let Some(old) = self.windows.replace(*windows) {
+                    let _ = oceans_rt::close(old);
+                }
+                say(
+                    self.log,
+                    format_args!("core: apps given `window` now get a window end"),
+                );
+                Ok(())
+            }
             op::RUN => {
                 let out = match received {
                     [] => None,
@@ -687,6 +717,7 @@ impl Core {
                     op::ROLLBACK => self.rollback(data, reply),
                     op::ENABLE => self.enable(data),
                     op::DISABLE => self.disable(data),
+                    op::WINDOW_OWNER => self.window_owner(data, reply),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;
@@ -722,6 +753,26 @@ impl Core {
         self.next_badge += 1;
         self.minted.insert(badge, wanted);
         *reply_handle = Some(end);
+        Ok(())
+    }
+
+    /// `WINDOW_OWNER` (ADR-0059): the running app holding the window end
+    /// badged `badge`.
+    fn window_owner(&self, data: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        let badge = data
+            .try_into()
+            .map(u64::from_le_bytes)
+            .map_err(|_| Status::BadRequest)?;
+        let running = self
+            .running
+            .iter()
+            .flatten()
+            .find(|r| r.window == Some(badge))
+            .ok_or(Status::NotFound)?;
+        let app = self.app(&running.id)?;
+        reply.extend_from_slice(
+            alloc::format!("{}\0{}\0{}", running.id, app.version, app.name).as_bytes(),
+        );
         Ok(())
     }
 
@@ -1087,6 +1138,13 @@ impl Core {
                     }
                 }
             };
+            // A window end of its own, badged so the display service can ask
+            // whose it is (ADR-0059).
+            let window =
+                (granted.contains(&Permission::Window) && self.windows.is_some()).then(|| {
+                    self.next_window_badge += 1;
+                    self.next_window_badge - 1
+                });
             let launch = Launch {
                 id: &id,
                 name: entry_name,
@@ -1096,6 +1154,7 @@ impl Core {
                 granted: &granted,
                 args,
                 service,
+                window,
             };
             let process = self.spawn(&launch, &mut out);
             // The Go host's image is kept for the next `wasm` app.
@@ -1108,6 +1167,7 @@ impl Core {
                 id: id.clone(),
                 process,
                 granted: granted.clone(),
+                window,
             });
             let mut names = String::new();
             for (i, permission) in granted.iter().enumerate() {
@@ -1143,6 +1203,7 @@ impl Core {
             granted,
             args,
             service,
+            window,
         } = *launch;
         let mut handles: Vec<Handle> = Vec::new();
         let mut directory = String::new();
@@ -1186,6 +1247,11 @@ impl Core {
                     .input
                     .and_then(|h| oceans_rt::duplicate(h, rights::SEND | rights::TRANSFER).ok())
                     .map(|h| (h, "use", "input")),
+                Permission::Window => self
+                    .windows
+                    .zip(window)
+                    .and_then(|(server, badge)| oceans_rt::endpoint_mint(server, badge).ok())
+                    .map(|h| (h, "use", "windows")),
             };
             match given {
                 Some((handle, kind, label)) => {

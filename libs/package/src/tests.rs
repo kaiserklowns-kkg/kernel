@@ -1,5 +1,6 @@
 extern crate std;
 
+use std::format;
 use std::string::String;
 use std::vec::Vec;
 
@@ -380,4 +381,30 @@ fn programs_must_match_their_runtime() {
         PackageError::WrongFormat(Runtime::Wasm).message(),
         PackageError::WrongFormat(Runtime::Native).message()
     );
+}
+
+/// The bridge (ADR-0058) keeps its own copy of the catalog in Go: the same
+/// permissions, in the same order, in the same words.
+#[test]
+fn the_bridge_catalog_matches() {
+    let go = include_str!("../../../go/cmd/bridge/system.go");
+    let start = go
+        .find("var permissions = ")
+        .expect("the bridge's permission list");
+    let list = &go[start..start + go[start..].find("\n}\n").expect("its end")];
+    let entries: Vec<&str> = list
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| line.starts_with('{'))
+        .collect();
+    assert_eq!(entries.len(), Permission::ALL.len());
+    for (permission, entry) in Permission::ALL.iter().zip(entries) {
+        let want = format!(
+            "{{\"{}\", \"{}\"}},",
+            permission.name(),
+            permission.description()
+        );
+        assert_eq!(entry, want);
+    }
 }

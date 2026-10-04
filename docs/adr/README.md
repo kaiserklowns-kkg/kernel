@@ -66,5 +66,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0056](0056-ui-architecture.md) | UI architecture: a native desktop, and SvelteKit apps through a bridge | Accepted |
 | [0057](0057-display-and-desktop.md) | The display service and the desktop (ABI 13) | Accepted |
 | [0058](0058-web-experience-and-bridge.md) | The Oceans web experience: SvelteKit apps and the Go bridge | Accepted |
+| [0059](0059-keyboard-focus-and-app-windows.md) | Keyboard focus and app windows (ABI 14) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

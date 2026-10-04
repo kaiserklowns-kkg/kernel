@@ -402,6 +402,7 @@ impl Process {
             notification.signal(bits);
         }
         crate::display::process_exited(self);
+        crate::console::process_exited(self);
     }
 
     /// Called when the process's last thread has been reaped (never while

@@ -6,7 +6,16 @@
 //! - the Oceans Bar: the clock and the system's state;
 //! - the launcher: the installed apps, from Oceans Core; a click starts one;
 //! - the Terminal: the console's text (`DISPLAY_TEXT`), where the shell
-//!   keeps working (the keyboard still types into it);
+//!   keeps working;
+//! - **app windows** (ADR-0059): apps given `window` open windows through
+//!   the window endpoint this service makes and registers with Core
+//!   (`WINDOWS`); each app's end is badged by Core, and Core says whose a
+//!   badge is (`WINDOW_OWNER`) before a window opens. The system draws the
+//!   frame, the app the pixels inside;
+//! - **the keyboard focus** (ADR-0059): the keyboard comes here
+//!   (`DISPLAY_KEYBOARD`) and goes to the focused window, or back to the
+//!   console (`console-input`) when the Terminal has the focus. A click
+//!   or Ctrl+Tab moves the focus;
 //! - notifications;
 //! - **permission dialogs**: when an app needs a decision, the desktop
 //!   asks, in the system's words, and sends the answer to Core
@@ -16,8 +25,9 @@
 //! The pointer comes from the input service (ADR-0042). If this service
 //! ends, the kernel console takes the screen back.
 //!
-//! Grants: `log`, `display`, `use = core` (the user's agent, like the
-//! shell), `use = input`, `sysinfo`.
+//! Grants: `log`, `display`, `console-input` (to hand keys to the
+//! console), `use = core` (the user's agent, like the shell), `use =
+//! input`, `sysinfo`.
 
 #![no_std]
 #![no_main]
@@ -26,7 +36,9 @@ extern crate alloc;
 
 mod canvas;
 mod desktop;
+mod windows;
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -36,10 +48,12 @@ use oceans_core_proto::{
 };
 use oceans_input_proto::{Kind, Subscription};
 use oceans_package::Permission;
-use oceans_rt::{Buffer, Directory, Handle, Start, prot};
+use oceans_rt::{Buffer, Directory, Handle, Start, prot, rights};
+use oceans_window::{Focus, KeyRoute, Manager};
 
 use canvas::Canvas;
-use desktop::{App, Desktop, Dialog, Hit, Terminal, Toast};
+use desktop::{App, Desktop, Dialog, Hit, Terminal, Toast, WindowView};
+use windows::{Owner, Pixels};
 
 oceans_rt::entry!(main);
 
@@ -49,6 +63,7 @@ const EXIT_NO_SCREEN: i64 = 3;
 /// Notification bits.
 const INPUT: u64 = 1 << 0;
 const TICK: u64 = 1 << 1;
+const KEYS: u64 = 1 << 2;
 /// How often the clock, the console mirror and the app list are checked.
 const TICK_MS: u64 = 100;
 const APPS_EVERY_MS: u64 = 2000;
@@ -70,6 +85,14 @@ struct Service {
     pending: Vec<(u8, String)>,
     /// Bytes of a `DISPLAY_TEXT` answer: the header and every cell.
     text_capacity: usize,
+    /// Where keys go when the Terminal has the focus.
+    console: Option<Handle>,
+    /// App windows (ADR-0059).
+    windows: Manager,
+    /// The apps with windows, by badge.
+    owners: BTreeMap<u64, Owner>,
+    /// Each window's pixel memory, by window.
+    pixels: BTreeMap<u32, Pixels>,
 }
 
 fn main(start: Start) -> i64 {
@@ -134,6 +157,18 @@ fn main(start: Start) -> i64 {
             format_args!("display: no pointer input; the desktop is view-only"),
         );
     }
+    // The window endpoint (ADR-0059): its notification is the one the
+    // loop waits on, so calls, input and the clock arrive in one place.
+    // Our own client end stays open: without any, receiving would fail.
+    let Ok((server, _own_end)) = oceans_rt::endpoint_create() else {
+        return EXIT_BAD_START;
+    };
+    if oceans_rt::endpoint_bind(server, notification).is_err() {
+        return EXIT_BAD_START;
+    }
+    let console = directory.find("console-input", "console-input");
+    let area = desktop::terminal(canvas.width, canvas.height);
+    let screen_pixels = (canvas.width * canvas.height) as usize;
     let mut service = Service {
         log,
         display,
@@ -141,16 +176,33 @@ fn main(start: Start) -> i64 {
         sysinfo: directory.find("sysinfo", "sysinfo"),
         desktop: Desktop {
             pointer: (canvas.width / 2, canvas.height / 2),
+            terminal_focused: true,
             ..Desktop::default()
         },
         pending: Vec::new(),
         text_capacity: 16 + info.cols as usize * info.rows as usize,
+        console,
+        windows: Manager::new(area, 2 * screen_pixels),
+        owners: BTreeMap::new(),
+        pixels: BTreeMap::new(),
     };
+    service.register_windows(server);
+    // The keyboard comes here only if it can be handed on to the console.
+    match console.map(|_| oceans_rt::display_keyboard(display, notification, KEYS)) {
+        Some(Ok(())) => {}
+        Some(Err(error)) => say(
+            log,
+            format_args!("display: cannot take the keyboard: {error:?}"),
+        ),
+        None => say(
+            log,
+            format_args!("display: no console-input; the keyboard stays with the console"),
+        ),
+    }
     service.refresh_apps();
     service.refresh_clock();
     service.refresh_terminal();
-    service.desktop.draw(&mut canvas, oceans_rt::clock_ms());
-    canvas.present();
+    service.draw(&mut canvas);
     say(
         log,
         format_args!(
@@ -163,11 +215,25 @@ fn main(start: Start) -> i64 {
 
     let mut last_apps = oceans_rt::clock_ms();
     let _ = oceans_rt::timer_set(notification, TICK, TICK_MS);
+    // The largest message the kernel carries inline.
+    let mut data = [0u8; 256];
+    let mut handles = [Handle(0); 4];
     loop {
-        let Ok(bits) = oceans_rt::notification_wait(notification) else {
-            return EXIT_BAD_START;
+        let got = match oceans_rt::ipc_receive_msg(server, &mut data, &mut handles) {
+            Ok(got) => got,
+            Err(error) => {
+                say(log, format_args!("display: receive failed: {error:?}"));
+                return EXIT_BAD_START;
+            }
         };
         let mut dirty = false;
+        if got.closed {
+            // An app's window end is gone (it exited): its windows go.
+            dirty = service.forget_owner(got.badge);
+        } else if got.signals == 0 {
+            dirty = service.window_request(&got, &data, &handles[..got.handles_len]);
+        }
+        let bits = got.signals;
         if bits & INPUT != 0
             && let Some(subscription) = &subscription
         {
@@ -179,6 +245,9 @@ fn main(start: Start) -> i64 {
                     dirty |= service.pointer(event.kind, &canvas);
                 }
             }
+        }
+        if bits & KEYS != 0 {
+            dirty |= service.keys();
         }
         if bits & TICK != 0 {
             let _ = oceans_rt::timer_set(notification, TICK, TICK_MS);
@@ -199,9 +268,9 @@ fn main(start: Start) -> i64 {
                 dirty = true;
             }
         }
+        service.signal_owners();
         if dirty {
-            service.desktop.draw(&mut canvas, oceans_rt::clock_ms());
-            canvas.present();
+            service.draw(&mut canvas);
         }
     }
 }
@@ -213,6 +282,24 @@ impl Service {
             error,
             until_ms: oceans_rt::clock_ms() + TOAST_MS,
         });
+    }
+
+    /// Draws the desktop and the app windows, and shows what changed.
+    fn draw(&mut self, canvas: &mut Canvas) {
+        let focus = self.windows.focus();
+        self.desktop.terminal_focused = focus == Focus::Terminal;
+        let views: Vec<WindowView<'_>> = self
+            .windows
+            .frames()
+            .iter()
+            .map(|frame| WindowView {
+                frame,
+                pixels: self.pixels.get(&frame.id).map(Pixels::pixels),
+                focused: focus == Focus::Window(frame.id),
+            })
+            .collect();
+        self.desktop.draw(canvas, oceans_rt::clock_ms(), &views);
+        canvas.present();
     }
 
     /// A pointer event; `true` if the screen must change.
@@ -229,23 +316,62 @@ impl Service {
                 };
                 self.desktop.pointer = (scale(x, x_max, w), scale(y, y_max, h));
             }
-            Kind::Button {
-                button: 1,
-                pressed: true,
-            } => {
+            Kind::Button { button, pressed } => {
                 let (x, y) = self.desktop.pointer;
-                return self.click(x, y);
+                // A permission dialog is modal: windows get nothing.
+                if self.desktop.dialog.is_none() && self.windows.button(button, pressed, x, y) {
+                    return true;
+                }
+                return button == 1 && pressed && self.click(x, y, w, h);
             }
             _ => return false,
+        }
+        if self.desktop.dialog.is_none() {
+            let (x, y) = self.desktop.pointer;
+            self.windows.pointer_moved(x, y);
         }
         true
     }
 
-    fn click(&mut self, x: i32, y: i32) -> bool {
-        match self.desktop.hit(x, y) {
+    /// Keys from the keyboard (`DISPLAY_KEYS`): to the focused window, or
+    /// to the console for the Terminal. While a permission dialog asks,
+    /// they go nowhere: typing must not land anywhere unseen.
+    fn keys(&mut self) -> bool {
+        let mut keys = [0u8; 256];
+        let mut dirty = false;
+        loop {
+            let count = match oceans_rt::display_keys(self.display, &mut keys) {
+                Ok(0) | Err(_) => return dirty,
+                Ok(count) => count,
+            };
+            if self.desktop.dialog.is_some() {
+                continue;
+            }
+            let mut terminal = Vec::new();
+            for &byte in &keys[..count] {
+                match self.windows.key(byte) {
+                    KeyRoute::Terminal(byte) => terminal.push(byte),
+                    KeyRoute::Window(_) => {}
+                    KeyRoute::Consumed => dirty = true,
+                }
+            }
+            if let Some(console) = self.console
+                && !terminal.is_empty()
+            {
+                let _ = oceans_rt::console_input(console, &terminal);
+            }
+        }
+    }
+
+    fn click(&mut self, x: i32, y: i32, width: i32, height: i32) -> bool {
+        match self.desktop.hit(x, y, width, height) {
             Hit::App(index) => {
                 let id = self.desktop.apps[index].id.clone();
                 self.launch(&id);
+                true
+            }
+            Hit::Terminal => {
+                self.windows.set_focus(Focus::Terminal);
                 true
             }
             Hit::Allow => {

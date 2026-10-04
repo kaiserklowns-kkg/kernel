@@ -1,0 +1,14 @@
+# The example windowed app's package manifest (ADR-0059). `cargo xtask`
+# packages it with the `notes-app` program as `notes`, signed with the
+# development key (tools/keys), into build/packages/.
+id = app.oceans.notes
+name = Notes
+version = 1.0.0
+publisher = Oceans Examples
+description = The example windowed app: what you type is kept, line by line
+architecture = x86_64
+api = 1
+entry = notes
+permission = window
+permission = storage
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/notes

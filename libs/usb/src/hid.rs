@@ -1,7 +1,8 @@
 //! The HID boot keyboard (HID 1.11 appendix B): 8-byte reports become
 //! console bytes, the same ones the PS/2 keyboard sends (ADR-0029): ASCII
 //! with Shift, Caps Lock and Ctrl, Enter as CR, Backspace as DEL; keys
-//! without an ASCII meaning are ignored.
+//! without an ASCII meaning are ignored. Ctrl+Tab sends the desktop's
+//! "next window" byte (ADR-0059).
 
 const LEFT_CTRL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
@@ -16,6 +17,8 @@ const ERROR_ROLL_OVER: u8 = 0x01;
 /// Usages 0x04–0x38: letters, digits, Enter … `/`.
 const NORMAL: &[u8; 0x35] = b"abcdefghijklmnopqrstuvwxyz1234567890\r\x1b\x7f\t -=[]\\\0;'`,./";
 const SHIFTED: &[u8; 0x35] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()\r\x1b\x7f\t _+{}|\0:\"~<>?";
+/// What Ctrl+Tab sends: `oceans_abi::display::KEY_NEXT_WINDOW` (ADR-0059).
+pub const NEXT_WINDOW: u8 = 0x1e;
 /// Keypad usages 0x54–0x63.
 const KEYPAD: &[u8; 0x10] = b"/*-+\r1234567890.";
 
@@ -82,6 +85,9 @@ impl Keyboard {
         if ctrl && byte.is_ascii_alphabetic() {
             return Some(byte.to_ascii_lowercase() & 0x1f);
         }
+        if ctrl && byte == b'\t' {
+            return Some(NEXT_WINDOW);
+        }
         Some(byte)
     }
 }
@@ -123,6 +129,22 @@ mod tests {
             ],
         );
         assert_eq!(out, b"Hi!\r");
+    }
+
+    #[test]
+    fn ctrl_tab_is_next_window_and_tab_stays_tab() {
+        let mut keyboard = Keyboard::new();
+        let out = feed(
+            &mut keyboard,
+            &[
+                keys(0, [0x2b, 0, 0, 0, 0, 0]),
+                keys(0, [0; 6]),
+                keys(LEFT_CTRL, [0x2b, 0, 0, 0, 0, 0]),
+                keys(0, [0; 6]),
+                keys(RIGHT_CTRL, [0x2b, 0, 0, 0, 0, 0]),
+            ],
+        );
+        assert_eq!(out, [b'\t', NEXT_WINDOW, NEXT_WINDOW]);
     }
 
     #[test]

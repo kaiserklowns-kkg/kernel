@@ -61,7 +61,8 @@ var coreErrors = map[uint64]*apiError{
 }
 
 // The permissions (oceans_package::Permission::ALL, in order) and what
-// the system says they mean (keep in step with libs/package).
+// the system says they mean, as libs/package has them (its tests check
+// this list).
 var permissions = []struct{ name, description string }{
 	{"console", "write to the terminal that started it"},
 	{"storage", "keep its own data"},
@@ -69,6 +70,7 @@ var permissions = []struct{ name, description string }{
 	{"network", "connect to the internet and the local network"},
 	{"files", "read and change your files in /home"},
 	{"pointer", "see your mouse and tablet movements and clicks"},
+	{"window", "show windows, and get what you type into them"},
 }
 
 var decisions = []string{"automatic", "allowed", "denied", "undecided"}

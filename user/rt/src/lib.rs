@@ -412,6 +412,33 @@ pub fn display_text(display: Handle, buffer: &mut [u8]) -> Result<usize, Error> 
     .map(|(len, _)| len as usize)
 }
 
+/// Takes keyboard input from the console (ABI 14, ADR-0059): `bits` is
+/// signalled on `notification` when keys arrive for [`display_keys`]. The
+/// caller must hold the screen.
+pub fn display_keyboard(display: Handle, notification: Handle, bits: u64) -> Result<(), Error> {
+    call(
+        nr::DISPLAY_KEYBOARD,
+        [display.0, notification.0, bits, 0, 0, 0],
+    )
+    .map(drop)
+}
+
+/// Queued key bytes, without waiting; returns how many (0: none).
+pub fn display_keys(display: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    call(
+        nr::DISPLAY_KEYS,
+        [
+            display.0,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+        ],
+    )
+    .map(|(count, _)| count as usize)
+}
+
 /// Blocks until any bit is set; returns and clears them (needs `WAIT`).
 pub fn notification_wait(notification: Handle) -> Result<u64, Error> {
     call(nr::NOTIFICATION_WAIT, [notification.0, 0, 0, 0, 0, 0]).map(|(bits, _)| bits)

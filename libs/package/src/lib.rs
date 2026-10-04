@@ -64,16 +64,20 @@ pub enum Permission {
     Files,
     /// Pointer input: mice and tablets.
     Pointer,
+    /// Its own windows on the screen (ADR-0059), with the keyboard and
+    /// pointer while the user gives one the focus.
+    Window,
 }
 
 impl Permission {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Console,
         Self::Storage,
         Self::SystemInfo,
         Self::Network,
         Self::Files,
         Self::Pointer,
+        Self::Window,
     ];
 
     pub fn name(self) -> &'static str {
@@ -84,6 +88,7 @@ impl Permission {
             Self::Network => "network",
             Self::Files => "files",
             Self::Pointer => "pointer",
+            Self::Window => "window",
         }
     }
 
@@ -100,13 +105,19 @@ impl Permission {
             Self::Network => "connect to the internet and the local network",
             Self::Files => "read and change your files in /home",
             Self::Pointer => "see your mouse and tablet movements and clicks",
+            Self::Window => "show windows, and get what you type into them",
         }
     }
 
     /// Granted without asking: it reaches nothing beyond the app itself
-    /// and read-only information (ADR-0020's low-risk grants).
+    /// and read-only information (ADR-0020's low-risk grants). A window
+    /// gets keys and clicks only while the user gives it the focus, and
+    /// the frame the system draws around it names the app (ADR-0059).
     pub fn automatic(self) -> bool {
-        matches!(self, Self::Console | Self::Storage | Self::SystemInfo)
+        matches!(
+            self,
+            Self::Console | Self::Storage | Self::SystemInfo | Self::Window
+        )
     }
 }
 

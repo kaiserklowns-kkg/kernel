@@ -242,6 +242,7 @@ dependencies = [
  "oceans-input-proto",
  "oceans-package",
  "oceans-rt",
+ "oceans-window",
 ]
 
 [[package]]
@@ -504,6 +505,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "notes-app"
+version = "0.1.0"
+dependencies = [
+ "noto-sans-mono-bitmap",
+ "oceans-display-proto",
+ "oceans-fs-proto",
+ "oceans-rt",
+]
+
+[[package]]
 name = "noto-sans-mono-bitmap"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -584,6 +595,14 @@ name = "oceans-core-proto"
 version = "0.1.0"
 dependencies = [
  "oceans-rt",
+]
+
+[[package]]
+name = "oceans-display-proto"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
+ "oceans-window",
 ]
 
 [[package]]
@@ -708,6 +727,10 @@ dependencies = [
 
 [[package]]
 name = "oceans-volume"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-window"
 version = "0.1.0"
 
 [[package]]

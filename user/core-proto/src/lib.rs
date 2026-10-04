@@ -60,6 +60,15 @@ pub mod op {
     pub const ENABLE: u64 = 12;
     /// data = id: stops the service and no longer starts it at boot.
     pub const DISABLE: u64 = 13;
+    /// handles = `[windows]`: the display service's window endpoint
+    /// (ADR-0059), a server end with only `MANAGE`, so Core can mint a
+    /// badged client end for each app given `window` (replacing an earlier
+    /// one).
+    pub const WINDOWS: u64 = 14;
+    /// data = `[badge u64]` → `ID\0VERSION\0NAME` of the running app whose
+    /// window end carries that badge; `NotFound` once it has ended. The
+    /// display service asks before showing a window (ADR-0059).
+    pub const WINDOW_OWNER: u64 = 15;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -99,9 +108,11 @@ pub mod access {
     pub fn needed(op: u64) -> Option<u8> {
         use super::op;
         Some(match op {
-            op::LIST | op::INFO | op::PERMISSION => QUERY,
+            op::LIST | op::INFO | op::PERMISSION | op::WINDOW_OWNER => QUERY,
             op::RUN | op::STOP => RUN,
-            op::INSTALL | op::REMOVE | op::ROLLBACK | op::ENABLE | op::DISABLE => MANAGE,
+            op::INSTALL | op::REMOVE | op::ROLLBACK | op::ENABLE | op::DISABLE | op::WINDOWS => {
+                MANAGE
+            }
             op::DECIDE => DECIDE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

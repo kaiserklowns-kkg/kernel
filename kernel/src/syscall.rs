@@ -78,6 +78,8 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DISPLAY_INFO => display_info(&process, a0, a1),
         nr::DISPLAY_CLAIM => display_claim(&process, a0),
         nr::DISPLAY_TEXT => display_text(&process, a0, a1, a2),
+        nr::DISPLAY_KEYBOARD => display_keyboard(&process, a0, a1, a2),
+        nr::DISPLAY_KEYS => display_keys(&process, a0, a1, a2),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
         nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
@@ -663,6 +665,39 @@ fn display_text(process: &Process, raw: u64, ptr: u64, capacity: u64) -> Syscall
     Ok((len as u64, 0))
 }
 
+// ---- ABI 14: the keyboard to the desktop (ADR-0059) -----------------------
+
+fn display_keyboard(process: &Process, raw: u64, notification: u64, bits: u64) -> SyscallResult {
+    check_display(process, raw, Rights::MANAGE)?;
+    if bits == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    let notification = arch::without_interrupts(|| {
+        object::notification(
+            &mut process.capabilities().lock(),
+            handle(notification),
+            Rights::SIGNAL,
+        )
+    })
+    .map_err(object_error)?;
+    if !crate::display::held_by(process) {
+        return Err(Error::Busy);
+    }
+    console::take_keyboard(process, notification, bits);
+    Ok((0, 0))
+}
+
+fn display_keys(process: &Process, raw: u64, ptr: u64, capacity: u64) -> SyscallResult {
+    check_display(process, raw, Rights::READ)?;
+    let capacity = usize::try_from(capacity)
+        .unwrap_or(usize::MAX)
+        .min(oceans_abi::display::MAX_KEYS);
+    let mut buffer = [0u8; oceans_abi::display::MAX_KEYS];
+    let count = console::read_keys(process, &mut buffer[..capacity]).ok_or(Error::Busy)?;
+    process.copy_to_user(ptr, &buffer[..count])?;
+    Ok((count as u64, 0))
+}
+
 /// `PROCESS_KILL` (ADR-0044): ends `raw`'s process; needs `MANAGE`.
 fn process_kill(process: &Process, raw: u64) -> SyscallResult {
     let child = arch::without_interrupts(|| {
@@ -783,7 +818,7 @@ fn console_input(process: &Process, raw: u64, ptr: u64, len: u64) -> SyscallResu
     let len = len_arg(len, CONSOLE_IO_MAX)?;
     let mut buffer = [0u8; CONSOLE_IO_MAX];
     process.copy_from_user(ptr, &mut buffer[..len])?;
-    console::inject(&buffer[..len]);
+    console::inject(process, &buffer[..len]);
     Ok((len as u64, 0))
 }
 

@@ -1,0 +1,11 @@
+[package]
+name = "oceans-display-proto"
+description = "The Oceans window protocol and client API: windows apps draw into, framed by the display service (ADR-0059)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-window.workspace = true

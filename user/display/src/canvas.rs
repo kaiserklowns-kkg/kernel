@@ -24,23 +24,7 @@ impl Rgb {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-}
-
-impl Rect {
-    pub const fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
-        Self { x, y, w, h }
-    }
-
-    pub fn contains(&self, x: i32, y: i32) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
-    }
-}
+pub use oceans_window::Rect;
 
 /// Text styles.
 #[derive(Clone, Copy)]
@@ -116,6 +100,28 @@ impl Canvas {
         for y in y0..y1 {
             let row = (y * self.width) as usize;
             self.pixels[row + x0 as usize..row + x1 as usize].fill(color.0);
+        }
+    }
+
+    /// Copies an app's pixels (`width` per row, `0x00RRGGBB`) into `to`,
+    /// clipped to the screen. `pixels` is shared memory the app may be
+    /// writing: a frame may tear, nothing worse.
+    pub fn blit(&mut self, to: Rect, pixels: *const u32, width: usize) {
+        let Some((x0, y0, x1, y1)) = self.clip(to) else {
+            return;
+        };
+        for y in y0..y1 {
+            let source = (y - to.y) as usize * width + (x0 - to.x) as usize;
+            let row = (y * self.width) as usize;
+            for (i, pixel) in self.pixels[row + x0 as usize..row + x1 as usize]
+                .iter_mut()
+                .enumerate()
+            {
+                // SAFETY: `to` is no larger than the window's `width ×
+                // height` pixels, all mapped; volatile, as another process
+                // writes them.
+                *pixel = unsafe { pixels.add(source + i).read_volatile() } & 0x00ff_ffff;
+            }
         }
     }
 

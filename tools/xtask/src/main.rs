@@ -109,6 +109,9 @@ const HELLO_MANIFEST: &str = include_str!("../../../user/apps/hello/manifest");
 /// The example service (user/apps/heartbeat, ADR-0049).
 const HEARTBEAT_PROGRAM: &str = "heartbeat-app";
 const HEARTBEAT_MANIFEST: &str = include_str!("../../../user/apps/heartbeat/manifest");
+/// The example windowed app (ADR-0059).
+const NOTES_PROGRAM: &str = "notes-app";
+const NOTES_MANIFEST: &str = include_str!("../../../user/apps/notes/manifest");
 /// The example Go app (go/apps/greeter, ADR-0052): a `wasm` program.
 const GREETER_PROGRAM: &str = "greeter.wasm";
 const GREETER_MANIFEST: &str = include_str!("../../../go/apps/greeter/manifest");
@@ -304,6 +307,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // dialog asks, and Allow is clicked. The screen is captured twice for
     // the host to check. Positions are fixed (the layout is anchored at
     // the top left): Hello is the fourth app.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
+    b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     b"@monitor screendump build/smoke-desktop.ppm",
@@ -315,8 +320,25 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move 630 108",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
+    // App windows and the keyboard focus (ADR-0059): Notes (the fifth app)
+    // is clicked and opens a window, which takes the focus; what the USB
+    // keyboard types goes to it, not to the shell, and Enter keeps the
+    // line in its storage. Ctrl+Tab gives the keyboard back to the
+    // Terminal; the close button ends Notes. The screen is captured with
+    // each focus.
+    b"@monitor mouse_move -630 -68",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor screendump build/smoke-window.ppm",
+    b"@keys note\r",
+    b"@monitor sendkey ctrl-tab",
+    b"@monitor screendump build/smoke-focus.ppm",
+    b"@monitor mouse_move 638 -184",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
     b"app info app.oceans.hello\r\n",
+    b"cat /apps/app.oceans.notes/data/notes.txt\r\n",
     // The web experience (ADR-0058): the bridge serves nothing but the
     // login until the shell pairs it; the host then uses the System API
     // with the code `ui pair` printed, and loses it with `ui unpair`.
@@ -461,8 +483,9 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("kept on a usb stick"),
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
-    // Hello, Heartbeat, Greeter and Greeter Service (ADR-0052).
-    Expect::Contains("core: ready, 4 apps installed"),
+    // Hello, Heartbeat, Greeter, Greeter Service (ADR-0052) and Notes
+    // (ADR-0059).
+    Expect::Contains("core: ready, 5 apps installed"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
     Expect::Line("greeter: 3 arguments: \"after\" \"a\" \"reboot\""),
@@ -485,7 +508,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 13)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 14)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -523,7 +546,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 13)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 14)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -604,6 +627,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("desktop: network allowed for app.oceans.hello in the dialog"),
     Expect::Contains("allowed app.oceans.hello network (in a permission dialog)"),
     Expect::Contains("desktop: started app.oceans.hello"),
+    // App windows and the keyboard focus (ADR-0059).
+    Expect::Contains("core: apps given `window` now get a window end"),
+    Expect::Contains("desktop: started app.oceans.notes"),
+    Expect::Contains("display: windows for app.oceans.notes (Notes)"),
+    Expect::Contains("core: app.oceans.notes exited with code 0"),
+    Expect::Line("note"),
     // The web experience (ADR-0058).
     Expect::Contains("bridge: serving the Oceans web experience on TCP port 8080 ("),
     Expect::Line("ui: not paired; listening on port 8080"),
@@ -785,7 +814,9 @@ impl Expect {
         }
     }
 }
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(180);
+/// Each smoke boot, start to finish. Boot 1 runs ~150 scripted steps, many
+/// with QEMU monitor pauses; CI runners without KVM are slow.
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long the last command waits for the host's echo probes.
 const PROBE_WAIT: Duration = Duration::from_secs(30);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
@@ -1835,6 +1866,13 @@ fn build_packages(user: &Path, go_apps: &[(String, Vec<u8>)]) -> Result {
         &seed,
     )
     .map_err(|e| format!("cannot build a package: {e:?}"))?;
+    let notes = fs::read(user.join(NOTES_PROGRAM))
+        .map_err(|e| format!("cannot read {NOTES_PROGRAM}: {e}"))?;
+    let notes = oceans_package::build(
+        &[("manifest", NOTES_MANIFEST.as_bytes()), ("notes", &notes)],
+        &seed,
+    )
+    .map_err(|e| format!("cannot build a package: {e:?}"))?;
     let greeter = go_apps
         .iter()
         .find(|(name, _)| name == GREETER_PROGRAM)
@@ -1860,6 +1898,7 @@ fn build_packages(user: &Path, go_apps: &[(String, Vec<u8>)]) -> Result {
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (name, bytes) in [
         ("heartbeat-1.0.0.opk", heartbeat),
+        ("notes-1.0.0.opk", notes),
         ("hello-1.0.0.opk", v1),
         ("hello-2.0.0.opk", sign(&v2, &seed)?),
         ("untrusted.opk", sign(HELLO_MANIFEST, &UNTRUSTED_SEED)?),
@@ -1952,7 +1991,47 @@ fn check_smoke_screens() -> Result {
     if pixel(&dialog, 5, 5) == SURFACE {
         return Err("dialog capture: the desktop behind the dialog is not dimmed".into());
     }
-    println!("the desktop and its permission dialog are on the screen captures");
+    // A window, and the keyboard focus (ADR-0059): Notes' frame is at the
+    // top left of the Terminal's area, its paper inside; the focused title
+    // bar has the focus colour, first Notes', then (Ctrl+Tab) the
+    // Terminal's.
+    const FOCUS_TITLE: u32 = 0x1f_3a_5f;
+    const IDLE_TITLE: u32 = 0x18_23_3a;
+    const PAPER: u32 = 0xf4_ef_e1;
+    let notes_title = (700, 82);
+    let notes_paper = (787, 334);
+    let terminal_title = (w - 40, 60);
+    for (file, checks) in [
+        (
+            "build/smoke-window.ppm",
+            [
+                ("Notes' title bar", notes_title, FOCUS_TITLE),
+                ("Notes' paper", notes_paper, PAPER),
+                ("the Terminal's title bar", terminal_title, IDLE_TITLE),
+            ],
+        ),
+        (
+            "build/smoke-focus.ppm",
+            [
+                ("Notes' title bar", notes_title, IDLE_TITLE),
+                ("Notes' paper", notes_paper, PAPER),
+                ("the Terminal's title bar", terminal_title, FOCUS_TITLE),
+            ],
+        ),
+    ] {
+        let image = read_ppm(&root().join(file))?;
+        for (what, (x, y), want) in checks {
+            let got = pixel(&image, x, y);
+            if got != want {
+                return Err(format!(
+                    "{file}: {what} at {x},{y} is {got:06x}, not {want:06x}"
+                ));
+            }
+        }
+    }
+    println!(
+        "the desktop, its permission dialog, an app window and the keyboard focus are on the screen captures"
+    );
     Ok(())
 }
 
@@ -2212,6 +2291,11 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                     loop {
                         if let Some(line) = command.strip_prefix(b"@monitor ") {
                             monitor_command(monitor_port, line)?;
+                            thread::sleep(MONITOR_SETTLE);
+                        } else if let Some(text) = command.strip_prefix(b"@keys ") {
+                            // `@keys TEXT`: pressed on the USB keyboard for
+                            // a window (ADR-0059); no prompt follows.
+                            press_usb_keys(monitor_port, text)?;
                             thread::sleep(MONITOR_SETTLE);
                         } else if let Some(step) = command.strip_prefix(b"@bridge ") {
                             if let Err(error) =

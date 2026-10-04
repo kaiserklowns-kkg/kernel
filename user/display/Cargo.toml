@@ -16,4 +16,5 @@ oceans-rt = { workspace = true, features = ["alloc"] }
 oceans-core-proto.workspace = true
 oceans-package.workspace = true
 oceans-input-proto.workspace = true
+oceans-window.workspace = true
 noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "bold", "size_16", "size_20", "unicode-basic-latin"] }

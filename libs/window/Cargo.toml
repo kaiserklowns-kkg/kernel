@@ -1,0 +1,9 @@
+[package]
+name = "oceans-window"
+description = "Oceans windows: the window protocol's wire format and the window manager (stacking, focus, dragging, event queues), host-tested (ADR-0059)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

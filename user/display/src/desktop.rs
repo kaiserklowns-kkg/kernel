@@ -2,11 +2,16 @@
 //! hits. Drawing is a pure function of this state.
 //!
 //! The layout is anchored at the top left, so the launcher and dialogs sit
-//! in the same place on every screen size.
+//! in the same place on every screen size. App windows (ADR-0059) float
+//! over the Terminal, each in a frame the system draws: its title bar names
+//! the app as Oceans Core verified it, and the window with the keyboard
+//! focus (or the Terminal) has the focus colour.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
+
+use oceans_window::{CLOSE_SIZE, Frame};
 
 use crate::canvas::{Canvas, Font, Rect, Rgb};
 
@@ -23,6 +28,8 @@ pub const SUCCESS: Rgb = Rgb(0x3f_b9_50);
 pub const DANGER: Rgb = Rgb(0xf0_52_4f);
 pub const TERMINAL_BACKGROUND: Rgb = Rgb(0x07_0b_14);
 pub const DIALOG_SURFACE: Rgb = Rgb(0x1b_26_3f);
+/// The title bar of the window (or Terminal) with the keyboard focus.
+pub const FOCUS_TITLE: Rgb = Rgb(0x1f_3a_5f);
 
 pub const BAR_HEIGHT: i32 = 36;
 pub const LAUNCHER_X: i32 = 16;
@@ -78,11 +85,22 @@ pub struct Desktop {
     pub clock: String,
     pub status: String,
     pub terminal: Terminal,
+    /// The keyboard types into the Terminal (no window has the focus).
+    pub terminal_focused: bool,
+}
+
+/// An app window to draw.
+pub struct WindowView<'a> {
+    pub frame: &'a Frame,
+    /// Its pixels, once the app has presented them.
+    pub pixels: Option<*const u32>,
+    pub focused: bool,
 }
 
 /// What a click landed on.
 pub enum Hit {
     App(usize),
+    Terminal,
     Allow,
     Deny,
     Nothing,
@@ -106,13 +124,16 @@ fn launcher(height: i32) -> Rect {
     )
 }
 
-fn terminal(width: i32, height: i32) -> Rect {
+/// The Terminal window, which is also where app windows are placed.
+pub fn terminal(width: i32, height: i32) -> Rect {
     let x = LAUNCHER_X + LAUNCHER_WIDTH + 16;
     Rect::new(x, BAR_HEIGHT + 16, width - x - 16, height - BAR_HEIGHT - 32)
 }
 
 impl Desktop {
-    pub fn hit(&self, x: i32, y: i32) -> Hit {
+    /// What a click on the desktop itself (behind every app window) hits,
+    /// on a `width × height` screen.
+    pub fn hit(&self, x: i32, y: i32, width: i32, height: i32) -> Hit {
         if self.dialog.is_some() {
             // A modal question: only its buttons answer.
             return if ALLOW.contains(x, y) {
@@ -123,12 +144,16 @@ impl Desktop {
                 Hit::Nothing
             };
         }
-        (0..self.apps.len())
-            .find(|&i| item_rect(i).contains(x, y))
-            .map_or(Hit::Nothing, Hit::App)
+        if let Some(app) = (0..self.apps.len()).find(|&i| item_rect(i).contains(x, y)) {
+            return Hit::App(app);
+        }
+        if terminal(width, height).contains(x, y) {
+            return Hit::Terminal;
+        }
+        Hit::Nothing
     }
 
-    pub fn draw(&self, canvas: &mut Canvas, now_ms: u64) {
+    pub fn draw(&self, canvas: &mut Canvas, now_ms: u64, windows: &[WindowView<'_>]) {
         let (w, h) = (canvas.width, canvas.height);
         let screen = Rect::new(0, 0, w, h);
         canvas.fill(screen, BACKGROUND);
@@ -184,7 +209,14 @@ impl Desktop {
         canvas.fill(window, TERMINAL_BACKGROUND);
         canvas.outline(window, BORDER);
         let title = Rect::new(window.x, window.y, window.w, 28);
-        canvas.fill(title, SURFACE_RAISED);
+        canvas.fill(
+            title,
+            if self.terminal_focused {
+                FOCUS_TITLE
+            } else {
+                SURFACE_RAISED
+            },
+        );
         canvas.text(
             window.x + 12,
             window.y + 6,
@@ -212,6 +244,11 @@ impl Desktop {
                     );
                 }
             }
+        }
+
+        // App windows, bottom to top.
+        for view in windows {
+            draw_window(canvas, view, self.pointer);
         }
 
         // A notification.
@@ -262,5 +299,64 @@ impl Desktop {
         }
 
         canvas.cursor(self.pointer.0, self.pointer.1, TEXT, BACKGROUND);
+    }
+}
+
+/// An app window: the frame the system draws, and the app's pixels inside.
+fn draw_window(canvas: &mut Canvas, view: &WindowView<'_>, pointer: (i32, i32)) {
+    let frame = view.frame;
+    let outer = frame.outer();
+    canvas.fill(outer, TERMINAL_BACKGROUND);
+    canvas.outline(outer, if view.focused { ACCENT } else { BORDER });
+    let bar = frame.title_bar();
+    let bar_inside = Rect::new(bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 1);
+    canvas.fill(
+        bar_inside,
+        if view.focused {
+            FOCUS_TITLE
+        } else {
+            SURFACE_RAISED
+        },
+    );
+    // The app's verified name first, then its own title.
+    let close = frame.close_button();
+    let text_clip = Rect::new(bar.x, bar.y, close.x - bar.x - 4, bar.h);
+    let end = canvas.text(
+        bar.x + 10,
+        bar.y + 6,
+        &frame.app,
+        Font::Strong,
+        TEXT,
+        text_clip,
+    );
+    if !frame.title.is_empty() {
+        canvas.text(
+            end + 8,
+            bar.y + 6,
+            &frame.title,
+            Font::Body,
+            MUTED,
+            text_clip,
+        );
+    }
+    let hovered = close.contains(pointer.0, pointer.1);
+    if hovered {
+        canvas.fill(close, DANGER);
+    }
+    let glyph_x = close.x + (CLOSE_SIZE - Font::Strong.advance()) / 2;
+    canvas.text(
+        glyph_x,
+        close.y + (CLOSE_SIZE - Font::Strong.height()) / 2,
+        "x",
+        Font::Strong,
+        if hovered { TEXT } else { MUTED },
+        close,
+    );
+    let content = frame.content();
+    match view.pixels {
+        Some(pixels) if frame.presented => {
+            canvas.blit(content, pixels, frame.width as usize);
+        }
+        _ => canvas.fill(content, BACKGROUND),
     }
 }

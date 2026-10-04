@@ -93,6 +93,7 @@ shell), `use = input` and `sysinfo`.
   - the web layer on the device (ADR-0056).
 
   The protocol for app surfaces comes with the first graphical app.
+  (Both keyboard focus and app windows came with ADR-0059.)
 - **Speed:** every change redraws the back buffer, and only changed
   pixels reach the screen. A full first frame of 1280×800 is about 1 M
   uncached writes; later frames write what changed.
