@@ -1,0 +1,270 @@
+//! Release images and the keys images trust (ADR-0072).
+//!
+//! Development images trust the development key (tools/keys), whose seed
+//! is public: anyone can sign apps and system updates for them. A release
+//! image trusts the **release key** instead, for apps (`trust.keys`) and
+//! for system updates (`update.keys`). Its private half is a key file made
+//! with `oceans keygen` and kept outside the repository; `cargo xtask
+//! release` reads it from `OCEANS_RELEASE_KEY`.
+
+use std::fmt::Write as _;
+
+use oceans_dev::DeveloperKey;
+use sha2::Digest;
+
+use super::*;
+
+/// Where `cargo xtask release` puts what it publishes.
+const RELEASE_DIR: &str = "build/release";
+
+/// The keys an image trusts, for apps and for system updates.
+pub struct ImageKeys {
+    publisher: String,
+    public: String,
+    release: bool,
+}
+
+impl ImageKeys {
+    /// The development key (tools/keys): QEMU, the smoke tests, `usb`.
+    pub fn development() -> Result<Self> {
+        Ok(Self {
+            publisher: DEV_PUBLISHER.to_string(),
+            public: oceans_package::public_key_hex(&dev_seed()?),
+            release: false,
+        })
+    }
+
+    /// A release key: the only key such an image trusts.
+    pub fn release(key: &DeveloperKey) -> Self {
+        Self {
+            publisher: key.publisher.clone(),
+            public: key.public_hex(),
+            release: true,
+        }
+    }
+
+    fn which(&self) -> &'static str {
+        if self.release {
+            "The release key (ADR-0072)."
+        } else {
+            "The development key (tools/keys): never in a release image."
+        }
+    }
+
+    /// The image's `trust.keys` (ADR-0046): publishers of apps.
+    pub fn trust_list(&self) -> String {
+        format!(
+            "# Publisher keys Oceans Core trusts (ADR-0046): `KEY-HEX PUBLISHER`.\n\
+             # {}\n{} {}\n",
+            self.which(),
+            self.public,
+            self.publisher
+        )
+    }
+
+    /// The image's `update.keys` (ADR-0071): publishers of systems.
+    pub fn update_keys(&self) -> String {
+        format!(
+            "# Keys Oceans accepts system updates from (ADR-0071): `KEY-HEX PUBLISHER`.\n\
+             # {}\n{} {}\n",
+            self.which(),
+            self.public,
+            self.publisher
+        )
+    }
+}
+
+/// The hardware smoke test's release key: a test key, public like the
+/// development key, so that the test boots an image that trusts a key
+/// other than the development key (ADR-0072).
+pub fn test_release_key() -> DeveloperKey {
+    DeveloperKey {
+        publisher: "Oceans Test Release".to_string(),
+        seed: [0x0c; 32],
+    }
+}
+
+/// Reads the release key, refusing one that cannot be private: inside
+/// the repository, or the development key.
+fn load_release_key(path: &Path, repository: &Path) -> Result<DeveloperKey> {
+    let full = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let repository = fs::canonicalize(repository).map_err(|e| e.to_string())?;
+    if full.starts_with(&repository) {
+        return Err(format!(
+            "{} is inside the repository: keep the release key elsewhere, \
+             where it is never committed",
+            path.display()
+        ));
+    }
+    let text = fs::read_to_string(&full).map_err(|e| format!("{}: {e}", path.display()))?;
+    let key = DeveloperKey::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    if key.seed == dev_seed()? {
+        return Err("that is the development key, whose seed is public".into());
+    }
+    if key.publisher == DEV_PUBLISHER {
+        return Err(format!(
+            "the release key's publisher must not be \"{DEV_PUBLISHER}\" (the development key's)"
+        ));
+    }
+    Ok(key)
+}
+
+/// The SHA-256 of `bytes`, in hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hex = String::new();
+    for byte in sha2::Sha256::digest(bytes) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn git(args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(root())
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// `cargo xtask release`: the files of a release, in `build/release`:
+///
+/// ```text
+/// oceans-VERSION-CHANNEL-usb.img   the USB image (release build, release key)
+/// oceans-VERSION-CHANNEL.opk       the same release as a system update
+/// release.keys                     the release key's public half
+/// BUILD-INFO                       the commit it was built from
+/// SHA256SUMS
+/// ```
+pub fn release() -> Result {
+    let path = env::var_os("OCEANS_RELEASE_KEY").ok_or(
+        "set OCEANS_RELEASE_KEY to the release key file: make one with \
+         `oceans keygen \"Oceans\" --out PATH`, outside the repository, and keep it secret",
+    )?;
+    let key = load_release_key(Path::new(&path), &root())?;
+    let changes = git(&["status", "--porcelain"])?;
+    if !changes.is_empty() {
+        return Err(format!(
+            "the working tree has changes: a release is built from a commit\n{changes}"
+        ));
+    }
+    let commit = git(&["rev-parse", "HEAD"])?;
+    let release = format!("{RELEASE_VERSION} {RELEASE_CHANNEL}");
+    let stem = format!("oceans-{RELEASE_VERSION}-{RELEASE_CHANNEL}");
+
+    let esp = build_image_for(
+        Profile::Release,
+        None,
+        Setup::Hardware,
+        &ImageKeys::release(&key),
+    )?;
+    hardware::write_usb_image(&esp)?;
+    let update = hardware::system_package(&esp, RELEASE_VERSION, &key, "Oceans")?;
+
+    let dir = root().join(RELEASE_DIR);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("cannot clear {}: {e}", dir.display()))?;
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let image = fs::read(root().join(hardware::USB_IMAGE)).map_err(|e| e.to_string())?;
+    let files: [(String, Vec<u8>); 4] = [
+        (format!("{stem}-usb.img"), image),
+        (format!("{stem}.opk"), update),
+        (
+            "release.keys".to_string(),
+            ImageKeys::release(&key).update_keys().into_bytes(),
+        ),
+        (
+            "BUILD-INFO".to_string(),
+            format!(
+                "Oceans {release}\ncommit {commit}\nkey {}\n",
+                key.public_hex()
+            )
+            .into_bytes(),
+        ),
+    ];
+    let mut sums = String::new();
+    for (name, bytes) in &files {
+        fs::write(dir.join(name), bytes).map_err(|e| format!("cannot write {name}: {e}"))?;
+        let _ = writeln!(sums, "{}  {name}", sha256_hex(bytes));
+    }
+    fs::write(dir.join("SHA256SUMS"), &sums).map_err(|e| e.to_string())?;
+    println!(
+        "Oceans {release} is in {RELEASE_DIR} (commit {commit}), signed by \"{}\" ({}):\n{sums}",
+        key.publisher,
+        key.public_hex()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("oceans-release-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn release_images_trust_only_the_release_key() {
+        let key = test_release_key();
+        let keys = ImageKeys::release(&key);
+        let dev = oceans_package::public_key_hex(&dev_seed().unwrap());
+        for text in [keys.trust_list(), keys.update_keys()] {
+            let trusted: Vec<_> = oceans_package::trusted_keys(&text).collect();
+            assert_eq!(trusted.len(), 1);
+            assert_eq!(trusted[0].publisher, key.publisher);
+            assert!(!text.contains(&dev));
+        }
+        let development = ImageKeys::development().unwrap();
+        assert!(development.trust_list().contains(&dev));
+    }
+
+    #[test]
+    fn release_keys_must_be_private() {
+        let outside = scratch("outside");
+        let repository = scratch("repository");
+        let good = DeveloperKey {
+            publisher: "Oceans".to_string(),
+            seed: [9; 32],
+        };
+        let path = outside.join("release.key");
+        fs::write(&path, good.to_file()).unwrap();
+        assert_eq!(load_release_key(&path, &repository).unwrap(), good);
+        // Inside the repository.
+        let inside = repository.join("release.key");
+        fs::write(&inside, good.to_file()).unwrap();
+        assert!(load_release_key(&inside, &repository).is_err());
+        // The development key, or its publisher.
+        let dev = DeveloperKey {
+            publisher: "Oceans".to_string(),
+            seed: dev_seed().unwrap(),
+        };
+        fs::write(&path, dev.to_file()).unwrap();
+        assert!(load_release_key(&path, &repository).is_err());
+        let examples = DeveloperKey {
+            publisher: DEV_PUBLISHER.to_string(),
+            seed: [9; 32],
+        };
+        fs::write(&path, examples.to_file()).unwrap();
+        assert!(load_release_key(&path, &repository).is_err());
+    }
+
+    #[test]
+    fn sha256_is_standard() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}

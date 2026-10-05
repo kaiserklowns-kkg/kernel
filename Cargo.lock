@@ -629,6 +629,7 @@ name = "oceans-xtask"
 version = "0.1.0"
 dependencies = [
  "oceans-archive",
+ "oceans-dev",
  "oceans-dns",
  "oceans-fat",
  "oceans-package",

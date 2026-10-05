@@ -5,4 +5,5 @@ go 1.26
 require github.com/kaiserklowns-kkg/kernel/go v0.0.0
 
 // The Oceans SDK's Go packages (ADR-0062), from the SDK on this machine.
-replace github.com/kaiserklowns-kkg/kernel/go => {{SDK}}/go
+// Quoted: the SDK path may contain spaces.
+replace github.com/kaiserklowns-kkg/kernel/go => "{{SDK}}/go"

@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod hardware;
+mod release;
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_PACKAGE: &str = "oceans-kernel";
@@ -955,6 +956,8 @@ commands:
   smoke     boot Oceans headless in QEMU and verify it comes online
   usb       build/oceans-usb.img: the image a real machine boots from (ADR-0068)
   smoke-hw  boot that image in QEMU as a real PC would (no virtio)
+  release   build/release: a release's USB image, update and checksums,
+            trusting only the release key (ADR-0072)
 
 environment:
   OCEANS_QEMU   path to qemu-system-x86_64
@@ -963,7 +966,9 @@ environment:
   OCEANS_QEMU_EXTRA extra QEMU arguments, e.g. \"-cpu max\"
   OCEANS_NIC    the network card for `run`: virtio (default) or e1000e
   OCEANS_BUN    path to bun, which builds the web experience (ui/)
-  OCEANS_BRIDGE_PORT the host port `run` forwards to the web experience (8080)";
+  OCEANS_BRIDGE_PORT the host port `run` forwards to the web experience (8080)
+  OCEANS_RELEASE_KEY the release key file for `release` (`oceans keygen`;
+                kept outside the repository)";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -988,6 +993,7 @@ fn main() -> ExitCode {
         Some("smoke") => smoke(profile),
         Some("usb") => hardware::usb(profile),
         Some("smoke-hw") => hardware::smoke_hw(profile),
+        Some("release") => release::release(),
         Some("help" | "--help" | "-h") | None => {
             println!("{USAGE}");
             Ok(())
@@ -1154,10 +1160,15 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
     } else {
         Setup::Normal
     };
-    build_image_for(profile, cmdline, setup)
+    build_image_for(profile, cmdline, setup, &release::ImageKeys::development()?)
 }
 
-fn build_image_for(profile: Profile, cmdline: Option<&str>, setup: Setup) -> Result<PathBuf> {
+fn build_image_for(
+    profile: Profile,
+    cmdline: Option<&str>,
+    setup: Setup,
+    keys: &release::ImageKeys,
+) -> Result<PathBuf> {
     let kernel = build_kernel(profile)?;
     let user = build_user()?;
 
@@ -1206,14 +1217,14 @@ fn build_image_for(profile: Profile, cmdline: Option<&str>, setup: Setup) -> Res
     }
     // Oceans Core's trusted publisher keys (ADR-0046): the root of trust
     // for apps comes with the boot image.
-    files.push(("trust.keys".to_string(), trust_list()?.into_bytes()));
+    files.push(("trust.keys".to_string(), keys.trust_list().into_bytes()));
     // The release, and the keys system updates are accepted from
     // (ADR-0071): `update` reads them as /bin/release and /bin/update.keys.
     files.push((
         "release".to_string(),
         format!("{RELEASE_VERSION} {RELEASE_CHANNEL}\n").into_bytes(),
     ));
-    files.push(("update.keys".to_string(), update_keys()?.into_bytes()));
+    files.push(("update.keys".to_string(), keys.update_keys().into_bytes()));
     // The trusted roots for TLS in Go services (ADR-0054): the AI's model
     // gateway gets them as a module.
     files.push(("ca-roots.pem".to_string(), ca_roots_pem()?.into_bytes()));
@@ -1981,27 +1992,6 @@ fn dev_seed() -> Result<[u8; 32]> {
             .map_err(|_| "tools/keys/oceans-dev.seed is not hex".to_string())?;
     }
     Ok(seed)
-}
-
-/// The image's `trust.keys`: the development key only (ADR-0046).
-fn trust_list() -> Result<String> {
-    Ok(format!(
-        "# Publisher keys Oceans Core trusts (ADR-0046): `KEY-HEX PUBLISHER`.\n\
-         # The development key (tools/keys): never in a release image.\n\
-         {} {DEV_PUBLISHER}\n",
-        oceans_package::public_key_hex(&dev_seed()?)
-    ))
-}
-
-/// The image's `update.keys` (ADR-0071): the keys system updates are
-/// accepted from. Apps' publisher keys are never among them.
-fn update_keys() -> Result<String> {
-    Ok(format!(
-        "# Keys Oceans accepts system updates from (ADR-0071): `KEY-HEX PUBLISHER`.\n\
-         # The development key (tools/keys): never in a release image.\n\
-         {} {DEV_PUBLISHER}\n",
-        oceans_package::public_key_hex(&dev_seed()?)
-    ))
 }
 
 /// The example packages in `build/packages`: Hello 1.0.0 and 2.0.0, two

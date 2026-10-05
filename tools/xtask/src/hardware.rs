@@ -160,8 +160,17 @@ pub fn gpt_disk(sectors: u64, esp_sectors: u64, seed: &[u8]) -> Vec<u8> {
 /// `cargo xtask usb`: the image to write to a USB stick for a real machine
 /// (the hardware profile).
 pub fn usb(profile: Profile) -> Result {
-    let esp = build_image_for(profile, None, Setup::Hardware)?;
+    let esp = build_image_for(
+        profile,
+        None,
+        Setup::Hardware,
+        &release::ImageKeys::development()?,
+    )?;
     write_usb_image(&esp)?;
+    println!(
+        "{USB_IMAGE} is a development image: it trusts the development key, whose seed is \
+         public (`cargo xtask release` builds one that trusts only a release key, ADR-0072)"
+    );
     println!(
         "{USB_IMAGE} is ready: write it to a USB stick (Rufus, dd, balenaEtcher) and boot a \
          UEFI machine from it (docs/hardware/compatibility.md)"
@@ -171,7 +180,7 @@ pub fn usb(profile: Profile) -> Result {
 
 /// Packs `esp` into [`USB_IMAGE`]: GPT, then FAT32 in the partition (with
 /// mkfs.fat and mtools, as `pack_esp`).
-fn write_usb_image(esp: &Path) -> Result {
+pub fn write_usb_image(esp: &Path) -> Result {
     let used: u64 = walk_size(esp)?;
     // Room for the second slot and an update file beside it (ADR-0071).
     let esp_mib = (used / (1 << 20) * 3 + 48).max(64);
@@ -258,10 +267,14 @@ fn boot_configuration(entries: &[(&str, char)]) -> String {
     conf
 }
 
-/// The smoke test's system update (ADR-0071): this image's kernel and boot
-/// archive as release `version`, signed with the development key (an
-/// update key); and the same signed with a key nobody trusts.
-fn update_packages(esp: &Path, version: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+/// A system update (ADR-0071): this image's kernel and boot archive as
+/// release `version`, signed with `key`.
+pub fn system_package(
+    esp: &Path,
+    version: &str,
+    key: &oceans_dev::DeveloperKey,
+    description: &str,
+) -> Result<Vec<u8>> {
     let slot = esp.join("boot").join("a");
     let kernel = fs::read(slot.join(KERNEL_PACKAGE)).map_err(|e| format!("kernel: {e}"))?;
     let initrd = fs::read(slot.join("initrd")).map_err(|e| format!("initrd: {e}"))?;
@@ -282,26 +295,42 @@ fn update_packages(esp: &Path, version: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     oceans_archive::write(&entries, &mut new_initrd)
         .map_err(|e| format!("cannot build the boot archive: {e:?}"))?;
     let manifest = format!(
-        "id = system.oceans\nname = Oceans\nversion = {version}\npublisher = {DEV_PUBLISHER}\n\
-         description = A system update (the hardware smoke test's)\narchitecture = x86_64\n\
-         api = 1\nchannel = {RELEASE_CHANNEL}\nentry = {KERNEL_PACKAGE}\n"
+        "id = system.oceans\nname = Oceans\nversion = {version}\npublisher = {}\n\
+         description = {description}\narchitecture = x86_64\n\
+         api = 1\nchannel = {RELEASE_CHANNEL}\nentry = {KERNEL_PACKAGE}\n",
+        key.publisher
     );
     let files: [(&str, &[u8]); 3] = [
         ("manifest", manifest.as_bytes()),
         (KERNEL_PACKAGE, &kernel),
         ("initrd", &new_initrd),
     ];
-    let sign = |files: &[(&str, &[u8])], seed: &[u8; 32]| {
-        oceans_package::build(files, seed).map_err(|e| format!("cannot sign the update: {e:?}"))
-    };
-    // The untrusted one is refused before its files are looked at: a
-    // placeholder kernel and boot archive keep it small.
+    oceans_package::build(&files, &key.seed).map_err(|e| format!("cannot sign the update: {e:?}"))
+}
+
+/// The hardware smoke test's updates: one signed with its release key,
+/// and one signed with the development key, which a release image does
+/// not trust (refused before its files are looked at: a placeholder
+/// kernel and boot archive keep it small).
+fn smoke_updates(esp: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+    let update = system_package(
+        esp,
+        "0.1.1",
+        &release::test_release_key(),
+        "A system update (the hardware smoke test's)",
+    )?;
+    let manifest = format!(
+        "id = system.oceans\nname = Oceans\nversion = 0.1.1\npublisher = {DEV_PUBLISHER}\n\
+         architecture = x86_64\napi = 1\nentry = {KERNEL_PACKAGE}\n"
+    );
     let placeholder: [(&str, &[u8]); 3] = [
         ("manifest", manifest.as_bytes()),
         (KERNEL_PACKAGE, b"placeholder"),
         ("initrd", b"placeholder"),
     ];
-    Ok((sign(&files, &dev_seed()?)?, sign(&placeholder, &[7; 32])?))
+    let untrusted = oceans_package::build(&placeholder, &dev_seed()?)
+        .map_err(|e| format!("cannot sign: {e:?}"))?;
+    Ok((update, untrusted))
 }
 
 /// Copies `files` (name, bytes) to the root of [`USB_IMAGE`]'s partition.
@@ -350,8 +379,9 @@ const HW_SCRIPT: &[&[u8]] = &[
     b"ls /usb\r\n",
     b"run ifconfig out use:net\r\n",
     b"run sysreport out devices sysinfo use:net use:usb\r\n",
-    // System updates (ADR-0071): one signed with a key nobody trusts is
-    // refused; the signed one goes into slot b.
+    // System updates (ADR-0071): one signed with the development key is
+    // refused, since a release image trusts only its release key
+    // (ADR-0072); the release-signed one goes into slot b.
     b"run update out use:fs -- status\r\n",
     b"run update out use:fs -- apply /usb/untrusted.opk\r\n",
     b"run update out use:fs -- apply /usb/update.opk\r\n",
@@ -381,6 +411,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Line("update: starts first: slot a (0.1.0 alpha)"),
     Expect::Line("update: slot b is empty"),
     Expect::Line("update: refused: signed with a key this system does not trust"),
+    Expect::Line("update: Oceans 0.1.1 alpha from Oceans Test Release, verified; writing slot b"),
     Expect::Contains("update: Oceans 0.1.1 alpha installed in slot b"),
 ];
 /// The second boot: the root filesystem and the SATA disk's files are
@@ -408,9 +439,11 @@ const HW_REBOOT_EXPECT: &[Expect] = &[
 
 /// `cargo xtask smoke-hw`: the USB image booted as a real PC would.
 pub fn smoke_hw(profile: Profile) -> Result {
-    let esp = build_image_for(profile, None, Setup::Hardware)?;
+    // A release image's keys (ADR-0072), with the test's release key.
+    let keys = release::ImageKeys::release(&release::test_release_key());
+    let esp = build_image_for(profile, None, Setup::Hardware, &keys)?;
     write_usb_image(&esp)?;
-    let (update, untrusted) = update_packages(&esp, "0.1.1")?;
+    let (update, untrusted) = smoke_updates(&esp)?;
     copy_to_usb(&[("update.opk", &update), ("untrusted.opk", &untrusted)])?;
     prepare_blank(HW_NVME_IMAGE, HW_NVME_SIZE, true)?;
     prepare_blank(HW_SATA_IMAGE, HW_SATA_SIZE, true)?;

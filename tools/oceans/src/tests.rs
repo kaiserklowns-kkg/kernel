@@ -147,3 +147,23 @@ fn sveltekit_builds_become_web_bundles() {
     assert!(oceans_package::Runtime::Web.accepts(&bundle));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The SDK may live under a path with spaces (`E:\Model Business\os`):
+/// the Go template quotes it, since go.mod splits words at spaces.
+#[test]
+fn sdk_paths_with_spaces_stay_one_word() {
+    let p = Project {
+        sdk: "E:/Model Business/os".into(),
+        ..project()
+    };
+    let go_mod = Template::Go
+        .files()
+        .iter()
+        .find(|(path, _)| *path == "go.mod")
+        .map(|(_, text)| p.fill(text))
+        .unwrap();
+    assert!(
+        go_mod.contains("=> \"E:/Model Business/os/go\""),
+        "{go_mod}"
+    );
+}
