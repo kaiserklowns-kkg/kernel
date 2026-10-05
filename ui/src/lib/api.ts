@@ -74,6 +74,27 @@ export interface ModelSetting {
 	note: string;
 }
 
+export const storeStates = ['available', 'installed', 'update'] as const;
+export type StoreState = (typeof storeStates)[number];
+
+/** An app a store lists (ADR-0061), and its state on this system. */
+export interface StoreApp {
+	id: string;
+	name: string;
+	version: string;
+	publisher: string;
+	description: string;
+	permissions: string[];
+	size: number;
+	state: StoreState;
+}
+
+export interface StoreView {
+	/** The store's URL; empty if none is set. */
+	source: string;
+	apps: StoreApp[];
+}
+
 /** A failed request: the HTTP status and the system's explanation. */
 export class ApiError extends Error {
 	readonly status: number;
@@ -164,7 +185,23 @@ export const checks = {
 	lines: list(string),
 	ai: object<AISession>({ session: number, state: oneOf(aiStates), text: string }),
 	model: object<ModelSetting>({ url: string, model: string, note: string }),
-	changed: object<{ id: string; state: string }>({ id: string, state: string })
+	changed: object<{ id: string; state: string }>({ id: string, state: string }),
+	store: object<StoreView>({
+		source: string,
+		apps: list(
+			object<StoreApp>({
+				id: string,
+				name: string,
+				version: string,
+				publisher: string,
+				description: string,
+				permissions: (value, where) => (value === null || value === undefined ? [] : list(string)(value, where)),
+				size: number,
+				state: oneOf(storeStates)
+			})
+		)
+	}),
+	source: object<{ source: string }>({ source: string })
 };
 
 // ---- The client -----------------------------------------------------------
@@ -237,7 +274,14 @@ export function createClient(fetchImpl: Fetch, base = '') {
 			request('POST', '/api/ai/continue', checks.ai, { session, approve }),
 		activity: () => request('GET', '/api/ai/activity', checks.lines),
 		setModel: (url: string, model: string) =>
-			request('POST', '/api/ai/model', checks.model, { url: url.trim(), model: model.trim() })
+			request('POST', '/api/ai/model', checks.model, { url: url.trim(), model: model.trim() }),
+		store: () => request('GET', '/api/store', checks.store),
+		setStoreSource: (url: string) => request('POST', '/api/store/source', checks.source, { url: url.trim() }),
+		/** Proposes the install: Oceans asks the user on the device before anything is installed. */
+		install: async (id: string) => {
+			if (!appId.test(id)) throw new ApiError(0, `not an app id: ${id}`);
+			return request('POST', '/api/store/install', checks.changed, { id });
+		}
 	};
 }
 

@@ -181,3 +181,10 @@ func MemoryWrite(memory Handle, offset uint64, buf []byte) error {
 	_, err := result(hostMemoryWrite(uint64(memory), offset, ptr(buf), uint32(len(buf))))
 	return err
 }
+
+// MemoryCreate makes a zero-filled memory object of at least `size` bytes
+// (at most 16 MiB): a shared buffer to attach to a service (ADR-0030).
+func MemoryCreate(size uint64) (Handle, error) {
+	h, err := result(hostMemoryCreate(size))
+	return Handle(h), err
+}

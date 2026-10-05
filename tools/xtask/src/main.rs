@@ -315,8 +315,6 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // the top left): Hello is the fourth app.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
-    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/tiles-1.0.0.opk /keep/tiles.opk\r\n",
-    b"app install /keep/tiles.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     b"@monitor screendump build/smoke-desktop.ppm",
@@ -347,6 +345,24 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor device_del deskmouse",
     b"app info app.oceans.hello\r\n",
     b"cat /apps/app.oceans.notes/data/notes.txt\r\n",
+    // The web experience (ADR-0058): the bridge serves nothing but the
+    // login until the shell pairs it; the host then uses the System API
+    // with the code `ui pair` printed, and loses it with `ui unpair`.
+    b"ui status\r\n",
+    b"ui pair\r\n",
+    b"@bridge paired",
+    // The Store (ADR-0061): the browser proposes Tiles; the desktop asks
+    // in its own dialog, and Install is clicked with a mouse plugged in
+    // again. Nothing is installed before that.
+    b"@bridge store",
+    b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
+    b"@monitor mouse_move -3000 -3000",
+    b"@monitor mouse_move 776 342",
+    b"@screen 308 220 1b263f the install dialog",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor device_del deskmouse",
+    b"app list\r\n",
     // A Go app's window (ADR-0060): Tiles, started in the background,
     // shows its first colour; a key typed into it (it has the focus) moves
     // it to the next. Its window is the second opened: 32 pixels further.
@@ -355,12 +371,6 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey x",
     b"@screen 509 236 c75b39 Tiles' next colour, after a key",
     b"app stop app.oceans.tiles\r\n",
-    // The web experience (ADR-0058): the bridge serves nothing but the
-    // login until the shell pairs it; the host then uses the System API
-    // with the code `ui pair` printed, and loses it with `ui unpair`.
-    b"ui status\r\n",
-    b"ui pair\r\n",
-    b"@bridge paired",
     b"ui unpair\r\n",
     b"@bridge unpaired",
     b"ui unpair\r\n",
@@ -649,7 +659,16 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("display: windows for app.oceans.notes (Notes)"),
     Expect::Contains("core: app.oceans.notes exited with code 0"),
     Expect::Line("note"),
-    // A Go app's window (ADR-0060).
+    // A Go app's window (ADR-0060), installed from the Store (ADR-0061).
+    Expect::Contains("bridge: the paired browser set the Store's source to http://10.0.2.2:"),
+    Expect::Contains(
+        "core: audit: proposed installing app.oceans.tiles 1.0.0 from Oceans Examples",
+    ),
+    Expect::Contains("bridge: proposed installing app.oceans.tiles 1.0.0 from the Store"),
+    Expect::Contains("desktop: install dialog for app.oceans.tiles 1.0.0"),
+    Expect::Contains("core: audit: install of app.oceans.tiles 1.0.0 confirmed on the device"),
+    Expect::Contains("desktop: installed Tiles from the Store"),
+    Expect::Line("  app.oceans.tiles  1.0.0  Tiles"),
     Expect::Contains("display: windows for app.oceans.tiles (Tiles)"),
     Expect::Contains("core: audit: stopped app.oceans.tiles"),
     // The web experience (ADR-0058).
@@ -800,14 +819,14 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("usb-hid: port 6.1: tablet, "),
     Expect::Contains(", 0..32767 x 0..32767, pointer 1"),
     Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) tablet (pointer input)"),
-    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 3"),
+    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 4"),
     Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (pointer input)"),
     Expect::Contains("mouse: requests `use:input`"),
-    Expect::Contains("pointer 3: motion dx=10 dy=-5"),
-    Expect::Contains("pointer 3: button 1 (left) down"),
-    Expect::Contains("pointer 3: button 1 (left) up"),
-    Expect::Contains("pointer 3: wheel vertical=1 horizontal=0"),
-    Expect::Contains("usb-hid: port 6.2: pointer 3 removed"),
+    Expect::Contains("pointer 4: motion dx=10 dy=-5"),
+    Expect::Contains("pointer 4: button 1 (left) down"),
+    Expect::Contains("pointer 4: button 1 (left) up"),
+    Expect::Contains("pointer 4: wheel vertical=1 horizontal=0"),
+    Expect::Contains("usb-hid: port 6.2: pointer 4 removed"),
     Expect::Contains("pointer 1: absolute x=0 y=0 (of 32767 x 32767)"),
     Expect::Contains("pointer 1: button 2 (right) down"),
     Expect::Contains("pointer 1: button 2 (right) up"),
@@ -1925,12 +1944,14 @@ fn build_packages(user: &Path, go_apps: &[(String, Vec<u8>)]) -> Result {
         &seed,
     )
     .map_err(|e| format!("cannot build a package: {e:?}"))?;
+    let store_index = store_index(&tiles);
     let dir = root().join(PACKAGES_DIR);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (name, bytes) in [
         ("heartbeat-1.0.0.opk", heartbeat),
         ("notes-1.0.0.opk", notes),
         ("tiles-1.0.0.opk", tiles),
+        ("index.json", store_index.into_bytes()),
         ("hello-1.0.0.opk", v1),
         ("hello-2.0.0.opk", sign(&v2, &seed)?),
         ("untrusted.opk", sign(HELLO_MANIFEST, &UNTRUSTED_SEED)?),
@@ -1958,6 +1979,18 @@ fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
 }
 
 /// A PPM (P6) screen capture: width, height, RGB bytes.
+/// The Store's catalog (ADR-0061) the smoke test's HTTP server serves at
+/// `/store/index.json`: Tiles, with the size and SHA-256 of its package.
+fn store_index(tiles: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(tiles);
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        r#"{{"apps":[{{"id":"app.oceans.tiles","name":"Tiles","version":"1.0.0","publisher":"Oceans Examples","description":"The example windowed Go app: a colour that changes with every key","permissions":["window"],"package":"tiles-1.0.0.opk","size":{},"sha256":"{hex}"}}]}}"#,
+        tiles.len()
+    )
+}
+
 fn read_ppm(path: &Path) -> std::result::Result<(usize, usize, Vec<u8>), String> {
     let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut fields = Vec::new();
@@ -2337,7 +2370,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                             thread::sleep(MONITOR_SETTLE);
                         } else if let Some(step) = command.strip_prefix(b"@bridge ") {
                             if let Err(error) =
-                                check_bridge(step, bridge_port, pairing_code.as_deref())
+                                check_bridge(step, bridge_port, http_port, pairing_code.as_deref())
                             {
                                 let _ = child.kill();
                                 let _ = child.wait();
@@ -2879,6 +2912,18 @@ fn expect_pixel(port: u16, probe: &[u8]) -> Result {
                 | u32::from(image.2[at + 1]) << 8
                 | u32::from(image.2[at + 2]);
             if pixel == want {
+                // Kept for a look: build/smoke-screen-<what>.ppm.
+                let slug: String = what
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+                let _ = fs::copy(&path, root().join(format!("build/smoke-screen-{slug}.ppm")));
                 println!("screen: {what} at {x},{y}");
                 return Ok(());
             }
@@ -3122,7 +3167,10 @@ fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
         }
         // The example packages (ADR-0046), by plain file name.
         package
-            if package.strip_prefix("/packages/").is_some_and(|name| {
+            if package
+                .strip_prefix("/packages/")
+                .or_else(|| package.strip_prefix("/store/"))
+                .is_some_and(|name| {
                 !name.is_empty()
                     && name
                         .bytes()
@@ -3130,7 +3178,10 @@ fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
                     && !name.contains("..")
             }) =>
         {
-            let name = &package["/packages/".len()..];
+            let name = package
+                .strip_prefix("/packages/")
+                .or_else(|| package.strip_prefix("/store/"))
+                .unwrap_or_default();
             match fs::read(root().join(PACKAGES_DIR).join(name)) {
                 Ok(bytes) => fixed("200 OK", &bytes),
                 Err(_) => fixed("404 Not Found", b"no such package\n"),
@@ -3194,7 +3245,7 @@ impl HttpReply {
 }
 
 /// How long one request to the bridge may take (it runs interpreted Go).
-const BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One HTTP/1.1 request to the guest's bridge through QEMU's forwarding:
 /// `headers` are extra lines (`Name: value`); a body is sent as JSON.
@@ -3275,7 +3326,7 @@ fn expect_reply(reply: &HttpReply, what: &str, status: u16, contains: &[&str]) -
 /// `paired` after `ui pair` (the page, refusals without the code, the
 /// System API with it, apps started and stopped, an AI action approved
 /// from the browser), `unpaired` after `ui unpair` (the code is dead).
-fn check_bridge(step: &[u8], port: u16, code: Option<&str>) -> Result {
+fn check_bridge(step: &[u8], port: u16, http_port: u16, code: Option<&str>) -> Result {
     let code = code.ok_or("bridge: `ui pair` printed no pairing code")?;
     let bearer = format!("Authorization: Bearer {code}");
     let auth = [bearer.as_str()];
@@ -3436,6 +3487,47 @@ fn check_bridge(step: &[u8], port: u16, code: Option<&str>) -> Result {
             )?;
             let cleanup = post(&format!("{hello}/stop"), &auth, "{}")?;
             expect_reply(&cleanup, "stop after the AI", 200, &[])?;
+            Ok(())
+        }
+        // The Store (ADR-0061): the host's server is the store; Tiles is
+        // listed as available, and installing it only proposes: the
+        // desktop asks next.
+        b"store" => {
+            expect_reply(
+                &get("/api/store", &auth)?,
+                "the Store with no source",
+                200,
+                &["\"source\":\"\"", "\"apps\":[]"],
+            )?;
+            let source = format!(r#"{{"url":"http://10.0.2.2:{http_port}/store"}}"#);
+            expect_reply(
+                &post("/api/store/source", &auth, &source)?,
+                "the Store's source",
+                200,
+                &["/store"],
+            )?;
+            expect_reply(
+                &get("/api/store", &auth)?,
+                "the Store",
+                200,
+                &["\"id\":\"app.oceans.tiles\"", "\"state\":\"available\""],
+            )?;
+            expect_reply(
+                &post(
+                    "/api/store/install",
+                    &auth,
+                    r#"{"id":"app.oceans.nothing"}"#,
+                )?,
+                "an app the Store does not list",
+                404,
+                &[],
+            )?;
+            expect_reply(
+                &post("/api/store/install", &auth, r#"{"id":"app.oceans.tiles"}"#)?,
+                "installing Tiles",
+                202,
+                &["confirm on the device"],
+            )?;
             Ok(())
         }
         b"unpaired" => {

@@ -191,6 +191,19 @@ func (t *Transport) Post(path string, body []byte) (int, []byte, error) {
 	return httpc.Post(idle{conn, or(t.IdleTimeout, DefaultIdleTimeout)}, t.Endpoint.Host, path, body)
 }
 
+// Get fetches `path`, a response of up to `limit` bytes.
+func (t *Transport) Get(path string, limit int) (int, []byte, error) {
+	conn, err := t.connect()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer conn.Close()
+	return httpc.Get(idle{conn, or(t.IdleTimeout, DefaultIdleTimeout)}, t.Endpoint.Host, path, limit)
+}
+
+// sharedBuffer: the size of the buffer each connection reads through.
+const sharedBuffer = 256 << 10
+
 func or(d, fallback time.Duration) time.Duration {
 	if d > 0 {
 		return d
@@ -221,6 +234,9 @@ func (t *Transport) connect() (net.Conn, error) {
 			}
 			// Deadlines (idle, the handshake's) bound the waits.
 			c.Timeout = time.Hour
+			// Bulk reads (a package from the Store) through a shared
+			// buffer; without one, a message's worth at a time.
+			_ = c.UseSharedBuffer(sharedBuffer)
 			return oceansConn{c}, nil
 		}
 	}

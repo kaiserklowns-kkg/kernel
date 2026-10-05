@@ -181,6 +181,17 @@ struct Launch<'a> {
     window: Option<u64>,
 }
 
+/// An install waiting for the user's confirmation (ADR-0061).
+struct Proposal {
+    number: u32,
+    /// The package as verified: what is installed if the user agrees.
+    bytes: Vec<u8>,
+    id: String,
+    version: Version,
+    /// What `PENDING` answers after the number.
+    summary: String,
+}
+
 struct Running {
     id: String,
     process: Handle,
@@ -238,6 +249,9 @@ struct Core {
     /// Rights of the client ends minted by `MINT` (ADR-0048), by badge.
     minted: BTreeMap<u64, u8>,
     next_badge: u64,
+    /// The install waiting for the user (ADR-0061), and the last number.
+    proposal: Option<Proposal>,
+    next_proposal: u32,
     /// Services started at boot (ADR-0049), kept in `/system/services`.
     enabled: BTreeSet<String>,
     /// Restarts so far this boot, and those waiting for their time.
@@ -286,6 +300,8 @@ impl Core {
             sysinfo: directory.find("sysinfo", "sysinfo"),
             windows: None,
             next_window_badge: 1,
+            proposal: None,
+            next_proposal: 0,
             gohost: directory.find("module", "gohost"),
             trusted,
             apps: BTreeMap::new(),
@@ -672,6 +688,15 @@ impl Core {
                 node.close();
                 result
             }
+            op::PROPOSE => {
+                let [memory] = received else {
+                    close_all(received);
+                    return Err(Status::BadRequest.into());
+                };
+                let bytes = read_memory(*memory, data);
+                let _ = oceans_rt::close(*memory);
+                self.propose(bytes?, reply)
+            }
             op::WINDOWS => {
                 let [windows] = received else {
                     close_all(received);
@@ -718,6 +743,8 @@ impl Core {
                     op::ENABLE => self.enable(data),
                     op::DISABLE => self.disable(data),
                     op::WINDOW_OWNER => self.window_owner(data, reply),
+                    op::PENDING => self.pending(reply),
+                    op::ACCEPT => self.accept(data, reply),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;
@@ -783,27 +810,30 @@ impl Core {
     // ---- Packages (ADR-0046) ------------------------------------------------
 
     fn install(&mut self, file: &Node, reply: &mut Vec<u8>) -> Result<(), Refusal> {
-        let size = file.stat().map_err(io)?.size;
-        if size > MAX_PACKAGE {
-            return Err(Refusal {
-                status: Status::Invalid,
-                text: Some("the package is larger than 32 MiB".to_owned()),
-            });
+        let bytes = read_package(file)?;
+        self.install_bytes(&bytes, reply)
+    }
+
+    /// Whether `package` may be installed over what is there: by the same
+    /// key, and newer. Returns the version it replaces.
+    fn installable(&self, package: &Package<'_>) -> Result<Option<Version>, Refusal> {
+        let Some(installed) = self.apps.get(package.manifest.id) else {
+            return Ok(None);
+        };
+        if installed.key != package.key {
+            return Err(Status::KeyChanged.into());
         }
-        let bytes = read_node(file, size).map_err(io)?;
+        if package.manifest.version <= installed.version {
+            return Err(Status::NotNewer.into());
+        }
+        Ok(Some(installed.version))
+    }
+
+    fn install_bytes(&mut self, bytes: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
         let trust = self.trust();
-        let package = Package::open(&bytes, &trust).map_err(invalid)?;
+        let package = Package::open(bytes, &trust).map_err(invalid)?;
         let id = package.manifest.id.to_owned();
-        let installed = self.apps.get(&id);
-        if let Some(installed) = installed {
-            if installed.key != package.key {
-                return Err(Status::KeyChanged.into());
-            }
-            if package.manifest.version <= installed.version {
-                return Err(Status::NotNewer.into());
-            }
-        }
-        let previous = installed.map(|app| app.version);
+        let previous = self.installable(&package)?;
 
         // Written beside the installed version, then renamed into place:
         // the swap is one atomic commit on the Oceans volume.
@@ -812,7 +842,7 @@ impl Core {
             .open(&id, flags::CREATE_DIRECTORY | flags::WRITE)
             .map_err(io)?;
         let placed = (|| {
-            write_file(&dir, "incoming.opk", &bytes)?;
+            write_file(&dir, "incoming.opk", bytes)?;
             if previous.is_some() {
                 dir.rename("package.opk", "previous.opk")?;
             }
@@ -847,6 +877,88 @@ impl Core {
             previous.map(|v| alloc::format!("{v}")).unwrap_or_default()
         );
         Ok(())
+    }
+
+    // ---- The Store (ADR-0061) --------------------------------------------------
+
+    /// `PROPOSE`: a verified package waits for the user's confirmation on
+    /// the device. Its bytes are kept, so what is installed is exactly
+    /// what the user was shown.
+    fn propose(&mut self, bytes: Vec<u8>, reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        if self.proposal.is_some() {
+            return Err(Status::Pending.into());
+        }
+        let trust = self.trust();
+        let package = Package::open(&bytes, &trust).map_err(invalid)?;
+        let previous = self.installable(&package)?;
+        let manifest = &package.manifest;
+        let mut permissions = String::new();
+        for (i, request) in manifest.requests().enumerate() {
+            if i > 0 {
+                permissions.push(',');
+            }
+            permissions.push_str(request.permission.name());
+        }
+        // The description last: a long one is what gets cut.
+        let summary = alloc::format!(
+            "{}\0{}\0{}\0{}\0{permissions}\0{}\0{}",
+            manifest.id,
+            manifest.version,
+            manifest.name,
+            manifest.publisher,
+            previous.map(|v| alloc::format!("{v}")).unwrap_or_default(),
+            manifest.description,
+        );
+        let id = manifest.id.to_owned();
+        let version = manifest.version;
+        let publisher = manifest.publisher.to_owned();
+        self.next_proposal = self.next_proposal.wrapping_add(1).max(1);
+        let number = self.next_proposal;
+        self.proposal = Some(Proposal {
+            number,
+            bytes,
+            id: id.clone(),
+            version,
+            summary,
+        });
+        self.record(format_args!(
+            "proposed installing {id} {version} from {publisher} (waiting for the user on the device)"
+        ));
+        reply.extend_from_slice(&number.to_le_bytes());
+        Ok(())
+    }
+
+    /// `PENDING`: the proposal waiting, if any.
+    fn pending(&self, reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        let proposal = self.proposal.as_ref().ok_or(Status::NotFound)?;
+        reply.extend_from_slice(&proposal.number.to_le_bytes());
+        reply.extend_from_slice(proposal.summary.as_bytes());
+        Ok(())
+    }
+
+    /// `ACCEPT`: the user's answer to proposal `number`.
+    fn accept(&mut self, data: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        let &[a, b, c, d, install] = data else {
+            return Err(Status::BadRequest.into());
+        };
+        let number = u32::from_le_bytes([a, b, c, d]);
+        if self.proposal.as_ref().is_none_or(|p| p.number != number) {
+            return Err(Status::NotFound.into());
+        }
+        let Some(proposal) = self.proposal.take() else {
+            return Err(Status::NotFound.into());
+        };
+        let (id, version) = (&proposal.id, proposal.version);
+        if install != 1 {
+            self.record(format_args!(
+                "install of {id} {version} declined on the device"
+            ));
+            return Ok(());
+        }
+        self.record(format_args!(
+            "install of {id} {version} confirmed on the device"
+        ));
+        self.install_bytes(&proposal.bytes, reply)
     }
 
     fn rollback(&mut self, data: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
@@ -1491,4 +1603,41 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let year = yoe + era * 400 + i64::from(month <= 2);
     (year, month, day)
+}
+
+/// A package file's bytes, refused past 32 MiB.
+fn read_package(file: &Node) -> Result<Vec<u8>, Refusal> {
+    let size = file.stat().map_err(io)?.size;
+    if size > MAX_PACKAGE {
+        return Err(Refusal {
+            status: Status::Invalid,
+            text: Some("the package is larger than 32 MiB".to_owned()),
+        });
+    }
+    read_node(file, size).map_err(io)
+}
+
+/// The `length` bytes (`data`, a u64) of a memory object holding a
+/// package; refused past 32 MiB or past the object's end.
+fn read_memory(memory: Handle, data: &[u8]) -> Result<Vec<u8>, Refusal> {
+    let length = data
+        .try_into()
+        .map(u64::from_le_bytes)
+        .map_err(|_| Status::BadRequest)?;
+    let size = oceans_rt::memory_size(memory).map_err(|_| Status::BadRequest)?;
+    if length == 0 || length > size {
+        return Err(Status::BadRequest.into());
+    }
+    if length > MAX_PACKAGE {
+        return Err(Refusal {
+            status: Status::Invalid,
+            text: Some("the package is larger than 32 MiB".to_owned()),
+        });
+    }
+    let base = oceans_rt::memory_map(memory, 0, prot::READ).map_err(|_| Status::BadRequest)?;
+    // SAFETY: the object (`size` bytes, `length <= size`) is mapped
+    // readable at `base` until the unmap below.
+    let bytes = unsafe { core::slice::from_raw_parts(base, length as usize) }.to_vec();
+    let _ = oceans_rt::memory_unmap(base);
+    Ok(bytes)
 }

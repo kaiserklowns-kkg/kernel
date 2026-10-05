@@ -52,7 +52,7 @@ use oceans_rt::{Buffer, Directory, Handle, Start, prot, rights};
 use oceans_window::{Focus, KeyRoute, Manager};
 
 use canvas::Canvas;
-use desktop::{App, Desktop, Dialog, Hit, Terminal, Toast, WindowView};
+use desktop::{App, Desktop, Dialog, Hit, Question, Terminal, Toast, WindowView};
 use windows::{Owner, Pixels};
 
 oceans_rt::entry!(main);
@@ -257,6 +257,7 @@ fn main(start: Start) -> i64 {
             if now.saturating_sub(last_apps) >= APPS_EVERY_MS {
                 last_apps = now;
                 dirty |= service.refresh_apps();
+                dirty |= service.refresh_pending();
             }
             if service
                 .desktop
@@ -468,11 +469,21 @@ impl Service {
             format_args!("desktop: permission dialog for {id}: {}", catalog.name()),
         );
         self.desktop.dialog = Some(Dialog {
-            id: id.to_string(),
+            question: Question::Permission {
+                id: id.to_string(),
+                permission,
+            },
+            title: "Permission request",
             app,
-            permission,
-            description: catalog.description(),
-            reason,
+            ask: "asks to:",
+            description: catalog.description().to_string(),
+            note: if reason.is_empty() {
+                String::new()
+            } else {
+                alloc::format!("Reason given by the app: \"{reason}\"")
+            },
+            deny: "Deny",
+            allow: "Allow",
         });
     }
 
@@ -480,11 +491,17 @@ impl Service {
         let (Some(core), Some(dialog)) = (self.core, self.desktop.dialog.take()) else {
             return;
         };
+        let (id, permission) = match dialog.question {
+            Question::Permission { id, permission } => (id, permission),
+            Question::Install { number, name } => {
+                return self.answer_install(core, number, &name, allow);
+            }
+        };
         let name = Permission::ALL
-            .get(usize::from(dialog.permission))
+            .get(usize::from(permission))
             .map_or("?", |p| p.name());
         let request = [
-            dialog.permission,
+            permission,
             if allow {
                 decision::ALLOW
             } else {
@@ -493,13 +510,13 @@ impl Service {
             source::DIALOG,
         ];
         let mut reply = [0u8; 8];
-        match core.about(op::DECIDE, &request, &dialog.id, &mut reply) {
+        match core.about(op::DECIDE, &request, &id, &mut reply) {
             Ok(_) => say(
                 self.log,
                 format_args!(
                     "desktop: {name} {} for {} in the dialog",
                     if allow { "allowed" } else { "denied" },
-                    dialog.id
+                    id
                 ),
             ),
             Err((error, _)) => {
@@ -510,7 +527,83 @@ impl Service {
                 );
             }
         }
-        self.next_question(core, &dialog.id);
+        self.next_question(core, &id);
+    }
+
+    /// A Store install waiting for the user (ADR-0061): asked in a dialog.
+    /// `true` if one is now shown.
+    fn refresh_pending(&mut self) -> bool {
+        let Some(core) = self.core else {
+            return false;
+        };
+        if self.desktop.dialog.is_some() || !self.pending.is_empty() {
+            return false;
+        }
+        let mut reply = [0u8; 256];
+        let Ok(got) = core.call(op::PENDING, &[], &[], &mut reply) else {
+            return false;
+        };
+        if got.len < 4 {
+            return false;
+        }
+        let number = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]);
+        let mut fields = parts(&reply[4..got.len]);
+        let mut next = || fields.next().unwrap_or("?").to_string();
+        let (id, version, name, publisher) = (next(), next(), next(), next());
+        let (permissions, previous, description) = (next(), next(), next());
+        say(
+            self.log,
+            format_args!("desktop: install dialog for {id} {version}"),
+        );
+        let permissions = if permissions.is_empty() {
+            String::from("nothing")
+        } else {
+            permissions.replace(',', ", ")
+        };
+        self.desktop.dialog = Some(Dialog {
+            question: Question::Install {
+                number,
+                name: name.clone(),
+            },
+            title: if previous.is_empty() {
+                "Install an app"
+            } else {
+                "Update an app"
+            },
+            app: if previous.is_empty() {
+                alloc::format!("{name} {version} ({id}, from {publisher})")
+            } else {
+                alloc::format!("{name} {previous} -> {version} ({id}, from {publisher})")
+            },
+            ask: "from the Store, which may ask for:",
+            description: permissions,
+            note: description,
+            deny: "Cancel",
+            allow: "Install",
+        });
+        true
+    }
+
+    fn answer_install(&mut self, core: Core, number: u32, name: &str, install: bool) {
+        let mut request = [0u8; 5];
+        request[..4].copy_from_slice(&number.to_le_bytes());
+        request[4] = u8::from(install);
+        let mut reply = [0u8; 128];
+        match core.call(op::ACCEPT, &request, &[], &mut reply) {
+            Ok(_) if install => {
+                say(
+                    self.log,
+                    format_args!("desktop: installed {name} from the Store"),
+                );
+                self.toast(alloc::format!("Installed {name}"), false);
+                self.refresh_apps();
+            }
+            Ok(_) => say(
+                self.log,
+                format_args!("desktop: install of {name} cancelled"),
+            ),
+            Err((error, _)) => self.toast(alloc::format!("{name}: {}", error.message()), true),
+        }
     }
 
     /// The app list; `true` if it changed.

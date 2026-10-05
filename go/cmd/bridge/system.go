@@ -30,10 +30,13 @@ const (
 	coreStop       = 6
 	coreAudit      = 10
 	coreMint       = 11
+	corePropose    = 16
 
 	accessQuery = 1 << 0
 	accessRun   = 1 << 1
 	accessAudit = 1 << 4
+	// accessPropose: installs the user confirms on the device (ADR-0061).
+	accessPropose = 1 << 5
 
 	runDetach = 1 << 0
 
@@ -44,20 +47,25 @@ const (
 )
 
 // What the paired capability may do: look, run and stop installed apps,
-// read the audit log. Never install, remove or decide permissions.
-const pairedRights = accessQuery | accessRun | accessAudit
+// read the audit log, propose installs the user confirms on the device
+// (ADR-0061). Never install, remove or decide permissions.
+const pairedRights = accessQuery | accessRun | accessAudit | accessPropose
 
 // coreErrors: Core statuses as HTTP statuses and the user's words.
 var coreErrors = map[uint64]*apiError{
 	1:  {404, "that app is not installed"},
 	2:  {400, "Oceans Core refused the request"},
+	3:  {422, "the package was refused: not signed by a publisher this system trusts, or damaged"},
 	4:  {409, "the app needs a permission you have not decided yet: run it once on the Oceans console to answer"},
 	5:  {409, "the app is not running"},
+	6:  {409, "that version is not newer than the one installed"},
+	7:  {409, "the update is signed with another key than the installed version"},
 	9:  {409, "the app is already running"},
 	10: {500, "storage failed"},
 	11: {500, "the app cannot be started"},
 	12: {403, "pairing does not allow this"},
 	13: {409, "not a service"},
+	14: {409, "another install is waiting for confirmation on the device"},
 }
 
 // The permissions (oceans_package::Permission::ALL, in order) and what
@@ -437,4 +445,34 @@ func (s *oceansSystem) SetModel(url, model string) (string, error) {
 		return "", &apiError{400, note}
 	}
 	return note, nil
+}
+
+// Propose hands the package to Core (PROPOSE) as a read-only memory
+// object; Core verifies it and keeps a copy until the user answers on the
+// device.
+func (s *oceansSystem) Propose(pkg []byte) error {
+	core := s.core()
+	if core == 0 {
+		return errNoCore
+	}
+	memory, err := oceans.PublishText(string(pkg))
+	if err != nil {
+		return &apiError{500, "cannot hand the download over: " + err.Error()}
+	}
+	// The handle moves to Core with the call.
+	length := binary.LittleEndian.AppendUint64(nil, uint64(len(pkg)))
+	reply, err := oceans.Call(core, corePropose, length, []oceans.Handle{memory})
+	if err != nil {
+		return err
+	}
+	for _, h := range reply.Handles {
+		_ = oceans.Close(h)
+	}
+	if reply.Label != 0 {
+		if e, ok := coreErrors[reply.Label]; ok {
+			return e
+		}
+		return &apiError{502, "Oceans Core failed the request"}
+	}
+	return nil
 }

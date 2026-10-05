@@ -31,6 +31,9 @@ type system interface {
 	Continue(session uint32, approve bool) (AISession, error)
 	Activity() ([]string, error)
 	SetModel(url, model string) (string, error)
+	// Propose hands a downloaded package to Core, to install once the
+	// user confirms on the device (ADR-0061).
+	Propose(pkg []byte) error
 }
 
 type SystemInfo struct {
@@ -106,6 +109,8 @@ type bridge struct {
 	sessions map[uint32]string
 	site     *site
 	log      func(string)
+	// The Store (nil: none on this system).
+	store storeClient
 }
 
 func newBridge(sys system, site *site, log func(string)) *bridge {
@@ -218,6 +223,8 @@ func (b *bridge) api(req *request) *response {
 		return get(req, func() (any, error) { return b.sys.Activity() })
 	case req.path == "/api/ai/model":
 		return b.model(req)
+	case segments[0] == "store":
+		return b.storeAPI(req, segments)
 	}
 	return failure(&apiError{404, "no such API"})
 }

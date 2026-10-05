@@ -57,6 +57,11 @@ func (f *fake) Continue(session uint32, approve bool) (AISession, error) {
 	return AISession{Session: session, State: stateDone, Text: "left it"}, nil
 }
 func (f *fake) Activity() ([]string, error) { return []string{"asked: hi"}, nil }
+func (f *fake) Propose(pkg []byte) error {
+	f.calls = append(f.calls, "propose "+string(pkg))
+	return nil
+}
+
 func (f *fake) SetModel(url, model string) (string, error) {
 	f.calls = append(f.calls, "model "+url+" "+model)
 	return "", nil

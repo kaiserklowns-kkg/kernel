@@ -6,11 +6,14 @@
 // device today (and on Oceans once it has an HTML engine). The UI is never
 // needed for the system to work: everything here is also a shell command.
 //
-// Its own authority is small: a log, the network (to listen), read-only
-// system information and the AI runtime's endpoint. It holds **no
-// authority over apps** of its own. The user's agent pairs it (`ui pair`
-// in the shell): it sends a Core capability limited to querying, running
-// and auditing apps, with a fresh random token the browser must present.
+// Its own authority is small: a log, the network (to listen, and to reach
+// the Store), read-only system information, the AI runtime's endpoint, its
+// own storage (Store downloads, the Store's URL) and the system's root
+// certificates. It holds **no authority over apps** of its own. The user's
+// agent pairs it (`ui pair` in the shell): it sends a Core capability
+// limited to querying, running and auditing apps and proposing installs
+// (ADR-0061: Core installs only once the user confirms on the device),
+// with a fresh random token the browser must present.
 // `ui unpair` closes that capability; without it every API but the
 // login answers 401.
 //
@@ -28,6 +31,7 @@ import (
 	"time"
 
 	"github.com/kaiserklowns-kkg/kernel/go/oceans"
+	"github.com/kaiserklowns-kkg/kernel/go/oceans/fs"
 	"github.com/kaiserklowns-kkg/kernel/go/oceans/tcp"
 )
 
@@ -83,6 +87,12 @@ func main() {
 	}
 	sys := &oceansSystem{sysinfo: sysinfo, ai: ai, core: func() oceans.Handle { return s.core }}
 	s.bridge = newBridge(sys, web, s.say)
+	// The Store (ADR-0061): the network, and storage for its URL.
+	if storage, ok := oceans.Find("use", "storage"); ok && s.net != 0 {
+		s.bridge.store = newOceansStore(s.net, fs.FromHandle(storage), s.say)
+	} else {
+		s.say("no storage or network: the Store is not available")
+	}
 	if !web.built() {
 		s.say("the web app was not built in; only the API is served")
 	}
@@ -165,7 +175,7 @@ func (s *service) handle(msg oceans.Message) (uint64, []byte) {
 			_ = oceans.Close(s.core)
 		}
 		s.core = msg.Handles[0]
-		s.say("paired: a browser presenting the new code may query, run and stop apps and read the audit log")
+		s.say("paired: a browser presenting the new code may query, run and stop apps, read the audit log and propose installs")
 		if s.listener == nil {
 			return statusUnavailable, nil
 		}

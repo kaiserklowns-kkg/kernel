@@ -69,6 +69,20 @@ pub mod op {
     /// window end carries that badge; `NotFound` once it has ended. The
     /// display service asks before showing a window (ADR-0059).
     pub const WINDOW_OWNER: u64 = 15;
+    /// data = `[length u64]`, handles = `[package]` (a memory object
+    /// holding the package's `length` bytes): proposes installing it for
+    /// the user to confirm on the device (the Store, ADR-0061). Core
+    /// verifies it as `INSTALL` would and keeps a copy → `[number u32]`.
+    /// One proposal waits at a time (`Pending` otherwise).
+    pub const PROPOSE: u64 = 16;
+    /// → `[number u32]` + `ID\0VERSION\0NAME\0PUBLISHER\0PERMISSIONS\0
+    /// PREVIOUS\0DESCRIPTION` of the waiting proposal (permissions joined
+    /// by `,`; previous: the installed version it updates, or empty; the
+    /// description last, cut if long); `NotFound` if none waits.
+    pub const PENDING: u64 = 17;
+    /// data = `[number u32][install u8]`: the user's answer. 1 installs
+    /// exactly the bytes proposed; 0 discards them. → as `INSTALL`.
+    pub const ACCEPT: u64 = 18;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -83,7 +97,9 @@ pub mod access {
     pub const DECIDE: u8 = 1 << 3;
     /// `AUDIT`.
     pub const AUDIT: u8 = 1 << 4;
-    pub const ALL: u8 = QUERY | RUN | MANAGE | DECIDE | AUDIT;
+    /// `PROPOSE`: installing only once the user confirms (ADR-0061).
+    pub const PROPOSE: u8 = 1 << 5;
+    pub const ALL: u8 = QUERY | RUN | MANAGE | DECIDE | AUDIT | PROPOSE;
 
     /// Rights from names joined by `+` (`query+run`); `None` for an
     /// unknown name.
@@ -97,6 +113,7 @@ pub mod access {
                         "manage" => MANAGE,
                         "decide" => DECIDE,
                         "audit" => AUDIT,
+                        "propose" => PROPOSE,
                         "all" => ALL,
                         _ => return None,
                     },
@@ -108,12 +125,13 @@ pub mod access {
     pub fn needed(op: u64) -> Option<u8> {
         use super::op;
         Some(match op {
-            op::LIST | op::INFO | op::PERMISSION | op::WINDOW_OWNER => QUERY,
+            op::LIST | op::INFO | op::PERMISSION | op::WINDOW_OWNER | op::PENDING => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL | op::REMOVE | op::ROLLBACK | op::ENABLE | op::DISABLE | op::WINDOWS => {
                 MANAGE
             }
-            op::DECIDE => DECIDE,
+            op::DECIDE | op::ACCEPT => DECIDE,
+            op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.
             op::MINT => 0,
@@ -235,6 +253,8 @@ pub enum Status {
     Denied = 12,
     /// `ENABLE` of an app that is not a service.
     NotAService = 13,
+    /// Another proposed install waits for the user (ADR-0061).
+    Pending = 14,
 }
 
 impl Status {
@@ -253,6 +273,7 @@ impl Status {
             11 => Self::CannotStart,
             12 => Self::Denied,
             13 => Self::NotAService,
+            14 => Self::Pending,
             _ => Self::BadRequest,
         }
     }
@@ -273,6 +294,7 @@ impl Status {
             Self::CannotStart => "cannot be started",
             Self::Denied => "not allowed by this capability",
             Self::NotAService => "not a service (only services start at boot)",
+            Self::Pending => "another install is waiting for confirmation on the device",
         }
     }
 }

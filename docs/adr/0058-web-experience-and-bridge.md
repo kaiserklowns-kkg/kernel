@@ -1,6 +1,6 @@
 # ADR-0058: The Oceans web experience: SvelteKit apps and the Go service bridge
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0061: pairing may also propose installs, which the user confirms on the device)
 - Date: 2026-10-04
 - Depends on: ADR-0001 (apps reach the system through a local service
   bridge), ADR-0045 to ADR-0049 (Oceans Core, packages, permissions,

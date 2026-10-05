@@ -23,6 +23,8 @@ const (
 	OpTCPRecv     = 10
 	OpTCPShutdown = 11
 	OpTCPStatus   = 12
+	OpTCPAttach   = 13
+	OpTCPRecvBuf  = 15
 	OpSendTo6     = 16
 	OpRecv6       = 17
 	OpTCPConnect6 = 18

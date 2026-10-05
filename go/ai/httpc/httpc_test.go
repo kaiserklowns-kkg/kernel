@@ -76,3 +76,18 @@ func TestParseResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestGetAndItsLimit(t *testing.T) {
+	c := &conn{reply: strings.NewReader("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nopk")}
+	status, body, err := Get(c, "h:1", "/store/t.opk", 1000)
+	if err != nil || status != 200 || string(body) != "opk" {
+		t.Fatalf("%d %q %v", status, body, err)
+	}
+	if !strings.HasPrefix(c.written.String(), "GET /store/t.opk HTTP/1.1\r\nHost: h:1\r\n") {
+		t.Errorf("request: %q", c.written.String())
+	}
+	c = &conn{reply: strings.NewReader("HTTP/1.1 200 OK\r\n\r\n" + strings.Repeat("x", 100))}
+	if _, _, err := Get(c, "h:1", "/big", 50); err == nil {
+		t.Error("a response past the limit was accepted")
+	}
+}

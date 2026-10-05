@@ -28,8 +28,9 @@ mod status {
     pub const UNAVAILABLE: u64 = 3;
 }
 
-/// What a paired browser may do with Oceans Core.
-const PAIRED_RIGHTS: u8 = access::QUERY | access::RUN | access::AUDIT;
+/// What a paired browser may do with Oceans Core: propose installs from
+/// the Store too (ADR-0061), which the user confirms on the device.
+const PAIRED_RIGHTS: u8 = access::QUERY | access::RUN | access::AUDIT | access::PROPOSE;
 /// Random bytes in a pairing code (128 bits, 32 hex digits).
 const CODE_BYTES: usize = 16;
 
@@ -140,8 +141,9 @@ impl Shell {
         }
         self.print(format_args!(
             "ui: paired. In a browser, open http://{}:{port}/ and enter the code below.\r\n\
-             ui: it may list, start and stop apps, read the audit log and ask Oceans AI;\r\n\
-             ui: it cannot install apps or decide permissions. `ui unpair` ends it.\r\n",
+             ui: it may list, start and stop apps, read the audit log, ask Oceans AI\r\n\
+             ui: and propose installs from the Store, which you confirm on this device;\r\n\
+             ui: it cannot install apps itself or decide permissions. `ui unpair` ends it.\r\n",
             address.as_str()
         ));
         self.print(format_args!("ui: pairing code: {}\r\n", code.as_str()));

@@ -7,8 +7,8 @@
 //!   receive, reply, mint), notifications and timers, published text
 //!   (making it, and reading it: `read_text`, ADR-0052), system
 //!   information, and reading memory objects the process holds (a boot
-//!   module, or one handed over IPC; ADR-0054) and writing them (a
-//!   window's pixels, ADR-0060). Each checks every pointer
+//!   module, or one handed over IPC; ADR-0054), writing them (a window's
+//!   pixels, ADR-0060) and making them (shared buffers, ADR-0061). Each checks every pointer
 //!   range against the
 //!   module's memory and passes the call to the kernel for the process's
 //!   own capabilities. This is the binding `go/oceans` wraps.
@@ -556,6 +556,17 @@ fn define_oceans(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
     )?;
     linker.func_wrap(
         M,
+        "memory_create",
+        |_: Caller<'_, Host>, size: u64| -> i64 {
+            // A shared buffer (ADR-0030), not a heap: 16 MiB at most.
+            if size == 0 || size > MAX_MEMORY_CREATE {
+                return Error::InvalidArgument.code();
+            }
+            oceans_rt::memory_create(size).map_or_else(code, |h| h.0 as i64)
+        },
+    )?;
+    linker.func_wrap(
+        M,
         "memory_write",
         |caller: Caller<'_, Host>, memory: u64, offset: u64, buf: u32, len: u32| -> i64 {
             memory_write(&caller, Handle(memory), offset, buf, len)
@@ -665,6 +676,9 @@ fn memory_write(caller: &Caller<'_, Host>, object: Handle, offset: u64, buf: u32
     let _ = oceans_rt::memory_unmap(base);
     i64::from(len)
 }
+
+/// Largest memory object `memory_create` makes.
+const MAX_MEMORY_CREATE: u64 = 16 << 20;
 
 fn define_wasi(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
     const W: &str = "wasi_snapshot_preview1";

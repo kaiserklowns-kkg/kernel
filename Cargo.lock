@@ -618,6 +618,7 @@ dependencies = [
  "oceans-tls",
  "oceans-volume",
  "rustls",
+ "sha2",
  "webpki-root-certs",
 ]
 

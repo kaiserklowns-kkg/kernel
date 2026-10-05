@@ -136,3 +136,42 @@ describe('the client', () => {
 		expect(error.message).toContain('did not answer');
 	});
 });
+
+describe('the Store', () => {
+	const view = {
+		source: 'http://10.0.2.2:8000/store',
+		apps: [
+			{
+				id: 'app.oceans.tiles',
+				name: 'Tiles',
+				version: '1.0.0',
+				publisher: 'Oceans Examples',
+				description: 'A colour',
+				permissions: ['window'],
+				package: 'tiles-1.0.0.opk',
+				size: 2048,
+				sha256: '00',
+				state: 'available'
+			}
+		]
+	};
+
+	test('reads the catalog with each app state', async () => {
+		const { fetch } = fake(200, view);
+		const store = await createClient(fetch).store();
+		expect(store.apps[0]?.state).toBe('available');
+		expect(store.apps[0]?.permissions).toEqual(['window']);
+	});
+
+	test('refuses an unknown state', async () => {
+		const { fetch } = fake(200, { ...view, apps: [{ ...view.apps[0], state: 'hacked' }] });
+		expect((await failure(createClient(fetch).store())).message).toContain('state');
+	});
+
+	test('proposes installs by id only', async () => {
+		const { fetch, seen } = fake(202, { id: 'app.oceans.tiles', state: 'confirm on the device' });
+		await createClient(fetch).install('app.oceans.tiles');
+		expect(seen[0]).toMatchObject({ url: '/api/store/install', method: 'POST', body: { id: 'app.oceans.tiles' } });
+		expect((await failure(createClient(fetch).install('../x'))).message).toContain('not an app id');
+	});
+});

@@ -21,5 +21,6 @@ oceans-fat.workspace = true
 oceans-random.workspace = true
 oceans-tls = { workspace = true, features = ["server"] }
 oceans-volume.workspace = true
+sha2 = { version = "0.10.9", default-features = false }
 rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12"] }
 webpki-root-certs = "1.0.9"

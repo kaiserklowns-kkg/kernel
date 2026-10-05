@@ -41,6 +41,64 @@ type Conn struct {
 	writeDeadline time.Time
 	pending       []byte
 	eof           bool
+	// A shared buffer attached to the connection (ADR-0030; 0: none):
+	// received data arrives through it, not in messages.
+	shared     oceans.Handle
+	sharedSize int
+}
+
+// UseSharedBuffer attaches a shared buffer of `size` bytes (4 KiB to
+// 1 MiB): reads then take up to that much per call instead of a message's
+// worth, for bulk transfers (a package from the Store, ADR-0061).
+func (c *Conn) UseSharedBuffer(size int) error {
+	if size < 4<<10 || size > 1<<20 {
+		return netproto.StatusBadRequest
+	}
+	memory, err := oceans.MemoryCreate(uint64(size))
+	if err != nil {
+		return err
+	}
+	theirs, err := oceans.Duplicate(memory, oceans.RightRead|oceans.RightWrite|oceans.RightMap|oceans.RightTransfer)
+	if err == nil {
+		var reply oceans.Message
+		reply, err = oceans.Call(c.handle, netproto.OpTCPAttach, nil, []oceans.Handle{theirs})
+		if err == nil {
+			err = netproto.Status(reply.Label)
+		}
+	}
+	if err != nil {
+		_ = oceans.Close(memory)
+		return err
+	}
+	c.shared, c.sharedSize = memory, size
+	return nil
+}
+
+// receive takes what the stack has for us: through the shared buffer if
+// one is attached, else in the reply.
+func (c *Conn) receive() (oceans.Message, []byte, error) {
+	if c.shared == 0 {
+		reply, err := oceans.Call(c.handle, netproto.OpTCPRecv, nil, nil)
+		return reply, reply.Data, err
+	}
+	request := make([]byte, 8)
+	binary.LittleEndian.PutUint32(request[4:], uint32(c.sharedSize))
+	reply, err := oceans.Call(c.handle, netproto.OpTCPRecvBuf, request, nil)
+	if err != nil || Error(reply.Label) != netproto.StatusOK {
+		return reply, nil, err
+	}
+	if len(reply.Data) < 4 {
+		return reply, nil, netproto.StatusBadRequest
+	}
+	n := int(binary.LittleEndian.Uint32(reply.Data))
+	if n > c.sharedSize {
+		return reply, nil, netproto.StatusBadRequest
+	}
+	data := make([]byte, n)
+	if _, err := oceans.MemoryRead(c.shared, 0, data); err != nil {
+		return reply, nil, err
+	}
+	return reply, data, nil
 }
 
 // Dial connects to IPv4 `address:port` through the network service
@@ -201,13 +259,13 @@ func (c *Conn) Read(b []byte) (int, error) {
 			return 0, err
 		}
 		err = netproto.Wait(c.notification, limit, func() (bool, error) {
-			reply, err := oceans.Call(c.handle, netproto.OpTCPRecv, nil, nil)
+			reply, data, err := c.receive()
 			if err != nil {
 				return false, err
 			}
 			switch Error(reply.Label) {
 			case netproto.StatusOK:
-				c.pending = append(c.pending, reply.Data...)
+				c.pending = append(c.pending, data...)
 				return true, nil
 			case netproto.StatusEmpty:
 				return false, nil
@@ -242,5 +300,8 @@ func (c *Conn) CloseWrite() error {
 func (c *Conn) Close() error {
 	err := oceans.Close(c.handle)
 	_ = oceans.Close(c.notification)
+	if c.shared != 0 {
+		_ = oceans.Close(c.shared)
+	}
 	return err
 }

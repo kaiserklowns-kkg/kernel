@@ -12,6 +12,11 @@
 		{ href: '/', label: 'Control Center', icon: 'M4 13h6V4H4zm0 7h6v-5H4zm10 0h6v-9h-6zm0-16v5h6V4z' },
 		{ href: '/apps', label: 'Apps', icon: 'M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z' },
 		{
+			href: '/store',
+			label: 'Store',
+			icon: 'M5 8h14l-1.2 11.2a1 1 0 0 1-1 .8H7.2a1 1 0 0 1-1-.8zm4 0V6a3 3 0 0 1 6 0v2'
+		},
+		{
 			href: '/ai',
 			label: 'AI Center',
 			icon: 'M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z'

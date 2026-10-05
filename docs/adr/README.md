@@ -65,8 +65,9 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0055](0055-sensitive-reads.md) | Sensitive reads by AI agents | Accepted |
 | [0056](0056-ui-architecture.md) | UI architecture: a native desktop, and SvelteKit apps through a bridge | Accepted |
 | [0057](0057-display-and-desktop.md) | The display service and the desktop (ABI 13) | Accepted |
-| [0058](0058-web-experience-and-bridge.md) | The Oceans web experience: SvelteKit apps and the Go bridge | Accepted |
+| [0058](0058-web-experience-and-bridge.md) | The Oceans web experience: SvelteKit apps and the Go bridge | Accepted (amended by 0061) |
 | [0059](0059-keyboard-focus-and-app-windows.md) | Keyboard focus and app windows (ABI 14) | Accepted |
 | [0060](0060-go-windows.md) | Windows for Go apps | Accepted |
+| [0061](0061-store.md) | The Store, and the end of Phase 7 | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

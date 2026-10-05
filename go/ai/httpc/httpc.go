@@ -163,14 +163,27 @@ func Post(conn io.ReadWriter, host, path string, body []byte) (int, []byte, erro
 	fmt.Fprintf(&request, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n"+
 		"Accept: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", path, host, len(body))
 	request.Write(body)
-	if _, err := conn.Write(request.Bytes()); err != nil {
+	return exchange(conn, request.Bytes(), MaxResponse)
+}
+
+// Get fetches `path` over `conn`; the response may be up to `limit` bytes
+// (a package from the Store, ADR-0061).
+func Get(conn io.ReadWriter, host, path string, limit int) (int, []byte, error) {
+	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nAccept: */*\r\nConnection: close\r\n\r\n", path, host)
+	return exchange(conn, []byte(request), limit)
+}
+
+// exchange sends a request and reads the whole response (the server
+// closes the connection after it).
+func exchange(conn io.ReadWriter, request []byte, limit int) (int, []byte, error) {
+	if _, err := conn.Write(request); err != nil {
 		return 0, nil, fmt.Errorf("sending the request: %w", err)
 	}
-	data, err := io.ReadAll(io.LimitReader(conn, MaxResponse+1))
+	data, err := io.ReadAll(io.LimitReader(conn, int64(limit)+1))
 	if err != nil {
 		return 0, nil, fmt.Errorf("reading the response: %w", err)
 	}
-	if len(data) > MaxResponse {
+	if len(data) > limit {
 		return 0, nil, errors.New("the response is too large")
 	}
 	return ParseResponse(data)

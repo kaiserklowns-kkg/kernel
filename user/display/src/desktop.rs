@@ -9,7 +9,6 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::Write;
 
 use oceans_window::{CLOSE_SIZE, Frame};
 
@@ -55,14 +54,28 @@ pub struct Toast {
     pub until_ms: u64,
 }
 
-/// A permission question (ADR-0047), drawn by the system.
+/// What a dialog's answer goes to.
+pub enum Question {
+    /// A permission of app `id` (ADR-0047).
+    Permission { id: String, permission: u8 },
+    /// Installing a package proposed through the Store (ADR-0061).
+    Install { number: u32, name: String },
+}
+
+/// A question to the user, drawn by the system.
 pub struct Dialog {
-    pub id: String,
+    pub question: Question,
+    pub title: &'static str,
     /// "Hello (app.oceans.hello 1.0.0, from Oceans Examples)"
     pub app: String,
-    pub permission: u8,
-    pub description: &'static str,
-    pub reason: String,
+    /// "asks to:"
+    pub ask: &'static str,
+    /// What is asked, in the system's words.
+    pub description: String,
+    /// One more line, muted (the app's reason, quoted; a description).
+    pub note: String,
+    pub deny: &'static str,
+    pub allow: &'static str,
 }
 
 /// The console's text, mirrored in the Terminal window.
@@ -269,20 +282,20 @@ impl Desktop {
             canvas.fill(DIALOG, DIALOG_SURFACE);
             canvas.outline(DIALOG, ACCENT);
             let (x, mut y) = (DIALOG.x + 24, DIALOG.y + 20);
-            canvas.text(x, y, "Permission request", Font::Title, TEXT, DIALOG);
+            canvas.text(x, y, dialog.title, Font::Title, TEXT, DIALOG);
             y += 36;
             canvas.text(x, y, &dialog.app, Font::Body, MUTED, DIALOG);
             y += 26;
-            canvas.text(x, y, "asks to:", Font::Body, TEXT, DIALOG);
+            canvas.text(x, y, dialog.ask, Font::Body, TEXT, DIALOG);
             y += 22;
-            canvas.text(x + 16, y, dialog.description, Font::Strong, TEXT, DIALOG);
-            if !dialog.reason.is_empty() {
+            canvas.text(x + 16, y, &dialog.description, Font::Strong, TEXT, DIALOG);
+            if !dialog.note.is_empty() {
                 y += 30;
-                let mut quoted = String::new();
-                let _ = write!(quoted, "Reason given by the app: \"{}\"", dialog.reason);
-                canvas.text(x, y, &quoted, Font::Body, MUTED, DIALOG);
+                canvas.text(x, y, &dialog.note, Font::Body, MUTED, DIALOG);
             }
-            for (button, label, primary) in [(DENY, "Deny", false), (ALLOW, "Allow", true)] {
+            for (button, label, primary) in
+                [(DENY, dialog.deny, false), (ALLOW, dialog.allow, true)]
+            {
                 let hovered = button.contains(self.pointer.0, self.pointer.1);
                 let fill = match (primary, hovered) {
                     (true, false) => ACCENT,
