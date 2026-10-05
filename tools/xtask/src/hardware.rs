@@ -173,10 +173,11 @@ pub fn usb(profile: Profile) -> Result {
 /// mkfs.fat and mtools, as `pack_esp`).
 fn write_usb_image(esp: &Path) -> Result {
     let used: u64 = walk_size(esp)?;
-    let esp_mib = (used / (1 << 20) * 5 / 4 + 16).max(64);
+    // Room for the second slot and an update file beside it (ADR-0071).
+    let esp_mib = (used / (1 << 20) * 3 + 48).max(64);
     let esp_sectors = esp_mib * 2048;
     let sectors = FIRST_LBA + esp_sectors + 2048;
-    let kernel = fs::read(esp.join("boot").join(KERNEL_PACKAGE)).unwrap_or_default();
+    let kernel = fs::read(esp.join("boot").join("a").join(KERNEL_PACKAGE)).unwrap_or_default();
     let image = root().join(USB_IMAGE);
     fs::write(&image, gpt_disk(sectors, esp_sectors, &kernel))
         .map_err(|e| format!("cannot write {}: {e}", image.display()))?;
@@ -199,6 +200,7 @@ fn write_usb_image(esp: &Path) -> Result {
         .args(["-s", "-i", &at])
         .arg(host_path_for_tool(&esp.join("EFI")))
         .arg(host_path_for_tool(&esp.join("boot")))
+        .arg(host_path_for_tool(&esp.join("limine.conf")))
         .arg("::/")
         .output()
         .map_err(|e| format!("cannot run mcopy (mtools): {e}"))?;
@@ -212,6 +214,115 @@ fn write_usb_image(esp: &Path) -> Result {
         "{USB_IMAGE}: GPT, an EFI system partition of {esp_mib} MiB ({} MiB of files)",
         used >> 20
     );
+    Ok(())
+}
+
+/// The hardware image's boot partition (ADR-0071): the release in slot
+/// `boot/a`, and Limine's configuration in both places it looks
+/// (`/limine.conf` first, then `/boot/limine/limine.conf`).
+pub fn slot_layout(esp: &Path, release: &str) -> Result {
+    let boot = esp.join("boot");
+    let slot = boot.join("a");
+    fs::create_dir_all(&slot).map_err(|e| format!("cannot create {}: {e}", slot.display()))?;
+    for name in [KERNEL_PACKAGE, "initrd"] {
+        fs::rename(boot.join(name), slot.join(name))
+            .map_err(|e| format!("cannot move {name} into slot a: {e}"))?;
+    }
+    fs::write(slot.join("release"), format!("{release}\n"))
+        .map_err(|e| format!("cannot write the release: {e}"))?;
+    let conf = boot_configuration(&[(&format!("Oceans {release}"), 'a')]);
+    for path in [
+        esp.join("limine.conf"),
+        boot.join("limine").join("limine.conf"),
+    ] {
+        fs::write(&path, &conf).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Limine's configuration for the slots, first entry first: the same text
+/// `update` writes (user/utils/src/bin/update.rs).
+fn boot_configuration(entries: &[(&str, char)]) -> String {
+    let mut conf = String::from(
+        "# Oceans boot configuration (ADR-0071), written by `update`.\ntimeout: 3\n\n",
+    );
+    for (i, (name, slot)) in entries.iter().enumerate() {
+        if i > 0 {
+            conf.push('\n');
+        }
+        conf.push_str(&format!(
+            "/{name}\n    protocol: limine\n    path: boot():/boot/{slot}/{KERNEL_PACKAGE}\n    \
+             module_path: boot():/boot/{slot}/initrd\n"
+        ));
+    }
+    conf
+}
+
+/// The smoke test's system update (ADR-0071): this image's kernel and boot
+/// archive as release `version`, signed with the development key (an
+/// update key); and the same signed with a key nobody trusts.
+fn update_packages(esp: &Path, version: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let slot = esp.join("boot").join("a");
+    let kernel = fs::read(slot.join(KERNEL_PACKAGE)).map_err(|e| format!("kernel: {e}"))?;
+    let initrd = fs::read(slot.join("initrd")).map_err(|e| format!("initrd: {e}"))?;
+    let archive = oceans_archive::Archive::parse(&initrd)
+        .map_err(|e| format!("the boot archive does not parse: {e:?}"))?;
+    let release = format!("{version} {RELEASE_CHANNEL}\n");
+    let entries: Vec<(&str, &[u8])> = archive
+        .files()
+        .map(|file| {
+            if file.name == "release" {
+                (file.name, release.as_bytes())
+            } else {
+                (file.name, file.data)
+            }
+        })
+        .collect();
+    let mut new_initrd = vec![0u8; oceans_archive::archive_len(&entries)];
+    oceans_archive::write(&entries, &mut new_initrd)
+        .map_err(|e| format!("cannot build the boot archive: {e:?}"))?;
+    let manifest = format!(
+        "id = system.oceans\nname = Oceans\nversion = {version}\npublisher = {DEV_PUBLISHER}\n\
+         description = A system update (the hardware smoke test's)\narchitecture = x86_64\n\
+         api = 1\nchannel = {RELEASE_CHANNEL}\nentry = {KERNEL_PACKAGE}\n"
+    );
+    let files: [(&str, &[u8]); 3] = [
+        ("manifest", manifest.as_bytes()),
+        (KERNEL_PACKAGE, &kernel),
+        ("initrd", &new_initrd),
+    ];
+    let sign = |files: &[(&str, &[u8])], seed: &[u8; 32]| {
+        oceans_package::build(files, seed).map_err(|e| format!("cannot sign the update: {e:?}"))
+    };
+    // The untrusted one is refused before its files are looked at: a
+    // placeholder kernel and boot archive keep it small.
+    let placeholder: [(&str, &[u8]); 3] = [
+        ("manifest", manifest.as_bytes()),
+        (KERNEL_PACKAGE, b"placeholder"),
+        ("initrd", b"placeholder"),
+    ];
+    Ok((sign(&files, &dev_seed()?)?, sign(&placeholder, &[7; 32])?))
+}
+
+/// Copies `files` (name, bytes) to the root of [`USB_IMAGE`]'s partition.
+fn copy_to_usb(files: &[(&str, &[u8])]) -> Result {
+    let at = format!("{}@@1M", host_path_for_tool(&root().join(USB_IMAGE)));
+    for (name, bytes) in files {
+        let path = root().join("build").join(name);
+        fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        let copied = fat_tool("usr/bin/mcopy")
+            .args(["-i", &at])
+            .arg(host_path_for_tool(&path))
+            .arg(format!("::/{name}"))
+            .output()
+            .map_err(|e| format!("cannot run mcopy (mtools): {e}"))?;
+        if !copied.status.success() {
+            return Err(format!(
+                "mcopy failed: {}",
+                String::from_utf8_lossy(&copied.stderr)
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -239,6 +350,11 @@ const HW_SCRIPT: &[&[u8]] = &[
     b"ls /usb\r\n",
     b"run ifconfig out use:net\r\n",
     b"run sysreport out devices sysinfo use:net use:usb\r\n",
+    // System updates (ADR-0071): one signed with a key nobody trusts is
+    // refused; the signed one goes into slot b.
+    b"run update out use:fs -- status\r\n",
+    b"run update out use:fs -- apply /usb/untrusted.opk\r\n",
+    b"run update out use:fs -- apply /usb/update.opk\r\n",
 ];
 const HW_EXPECT: &[Expect] = &[
     Expect::Contains("(ABI 15)"),
@@ -261,21 +377,41 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("QEMU USB Keyboard"),
     Expect::Contains("network: 10.0.2.15/24"),
     Expect::Line("tier 1 baseline: met"),
+    Expect::Line("update: running Oceans 0.1.0 alpha (slot a)"),
+    Expect::Line("update: starts first: slot a (0.1.0 alpha)"),
+    Expect::Line("update: slot b is empty"),
+    Expect::Line("update: refused: signed with a key this system does not trust"),
+    Expect::Contains("update: Oceans 0.1.1 alpha installed in slot b"),
 ];
 /// The second boot: the root filesystem and the SATA disk's files are
 /// still there.
-const HW_REBOOT_SCRIPT: &[&[u8]] = &[b"cat /hw-note.txt\r\n", b"cat /sata/hw-sata.txt\r\n"];
+/// The second boot: the update started (slot b), with the previous
+/// release in the boot menu.
+const HW_REBOOT_SCRIPT: &[&[u8]] = &[
+    b"cat /hw-note.txt\r\n",
+    b"cat /sata/hw-sata.txt\r\n",
+    b"cat /bin/release\r\n",
+    b"run update out use:fs -- status\r\n",
+    b"run update out use:fs -- apply /usb/update.opk\r\n",
+];
 const HW_REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept on the nvme root"),
     Expect::Contains("fs (satafs): mounted the disk: generation"),
     Expect::Line("kept on the sata disk"),
+    Expect::Line("0.1.1 alpha"),
+    Expect::Line("update: running Oceans 0.1.1 alpha (slot b)"),
+    Expect::Line("update: starts first: slot b (0.1.1 alpha)"),
+    Expect::Line("update: previous: slot a (0.1.0 alpha)"),
+    Expect::Line("update: refused: 0.1.1 is not newer than the running 0.1.1"),
 ];
 
 /// `cargo xtask smoke-hw`: the USB image booted as a real PC would.
 pub fn smoke_hw(profile: Profile) -> Result {
     let esp = build_image_for(profile, None, Setup::Hardware)?;
     write_usb_image(&esp)?;
+    let (update, untrusted) = update_packages(&esp, "0.1.1")?;
+    copy_to_usb(&[("update.opk", &update), ("untrusted.opk", &untrusted)])?;
     prepare_blank(HW_NVME_IMAGE, HW_NVME_SIZE, true)?;
     prepare_blank(HW_SATA_IMAGE, HW_SATA_SIZE, true)?;
     println!("hardware boot 1 of 2: from the USB image, a blank NVMe SSD and SATA disk");
@@ -283,7 +419,8 @@ pub fn smoke_hw(profile: Profile) -> Result {
     println!("hardware boot 2 of 2: the same disks");
     hw_boot(HW_REBOOT_SCRIPT, HW_REBOOT_EXPECT)?;
     println!(
-        "hardware smoke test passed: booted from the USB image; root on NVMe; SATA; e1000e; xHCI"
+        "hardware smoke test passed: booted from the USB image; root on NVMe; SATA; e1000e; xHCI; \
+         updated to slot b"
     );
     Ok(())
 }
@@ -421,6 +558,19 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_configurations_list_slots_in_order() {
+        let conf = boot_configuration(&[
+            ("Oceans 0.1.1 alpha", 'b'),
+            ("Oceans 0.1.0 alpha (previous)", 'a'),
+        ]);
+        let first = conf.find("path: boot():/boot/b/oceans-kernel").unwrap();
+        let second = conf.find("path: boot():/boot/a/oceans-kernel").unwrap();
+        assert!(first < second);
+        assert!(conf.contains("timeout: 3\n"));
+        assert!(conf.contains("module_path: boot():/boot/b/initrd\n"));
+    }
 
     #[test]
     fn crc32_is_ieee() {

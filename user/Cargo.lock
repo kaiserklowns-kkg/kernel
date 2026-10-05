@@ -1149,6 +1149,7 @@ dependencies = [
  "oceans-input",
  "oceans-input-proto",
  "oceans-net-proto",
+ "oceans-package",
  "oceans-rt",
  "oceans-tls",
  "oceans-usb",

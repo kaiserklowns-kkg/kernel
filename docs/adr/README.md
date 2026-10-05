@@ -78,5 +78,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0068](0068-hardware-validation.md) | Hardware validation and the Tier 1 list | Accepted |
 | [0069](0069-ahci.md) | AHCI (SATA) | Accepted |
 | [0070](0070-diagnostics.md) | Diagnostics: the kept log and `diag` (ABI 15) | Accepted |
+| [0071](0071-system-updates.md) | System updates: signed, two slots, the previous release kept | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

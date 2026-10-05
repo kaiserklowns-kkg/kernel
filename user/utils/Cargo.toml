@@ -88,6 +88,11 @@ test = false
 bench = false
 
 [[bin]]
+name = "update"
+test = false
+bench = false
+
+[[bin]]
 name = "sysreport"
 test = false
 bench = false
@@ -99,6 +104,7 @@ oceans-block-proto.workspace = true
 oceans-net-proto.workspace = true
 oceans-http.workspace = true
 oceans-fs-proto.workspace = true
+oceans-package.workspace = true
 oceans-tls.workspace = true
 oceans-usb.workspace = true
 oceans-input.workspace = true

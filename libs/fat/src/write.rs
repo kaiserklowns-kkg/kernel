@@ -182,11 +182,22 @@ impl<D: Disk> Fat<D> {
             let at = offset + done as u64;
             let index = (at / cb) as u32;
             let within = at % cb;
-            let take = ((cb - within) as usize).min(data.len() - done);
+            let mut take = ((cb - within) as usize).min(data.len() - done);
             let cluster = if index < have {
                 self.cluster_at(id, index)?
             } else {
-                new[(index - have) as usize]
+                // New clusters next to each other on the disk are written
+                // in one go (`write_bytes` sends up to 64 KiB at a time).
+                let first = (index - have) as usize;
+                let mut run = 1;
+                while first + run < new.len()
+                    && new[first + run] == new[first] + run as u32
+                    && done + take < data.len()
+                {
+                    take += (cb as usize).min(data.len() - done - take);
+                    run += 1;
+                }
+                new[first]
             };
             let base = self.cluster_offset(cluster)?;
             self.write_bytes(base + within, &data[done..done + take])?;

@@ -567,3 +567,67 @@ fn reference_tools_accept(name: &str, offset: u64, bytes: &[u8], expected: &[(&s
         let _ = std::fs::remove_file(&file);
     }
 }
+
+/// A large write into new clusters goes to the disk in runs (up to 64 KiB
+/// per request), not a request per cluster, and reads back.
+#[test]
+fn large_writes_go_out_in_runs() {
+    for (name, _) in IMAGES {
+        let mut fat = Fat::open(Recorder {
+            live: Overlay::new(image(name)),
+            epochs: vec![Vec::new()],
+        })
+        .unwrap();
+        fat.enable_writes().unwrap();
+        let file = create_kept(&mut fat, ROOT, "big.bin", false);
+        let data = pattern(200 * 1024, 7);
+        assert_eq!(fat.write_file(file, 0, &data), Ok(data.len()));
+        assert_eq!(read_all(&mut fat, file), data);
+        let requests: usize = fat
+            .into_disk()
+            .epochs
+            .iter()
+            .flatten()
+            .filter(|(_, bytes)| !bytes.is_empty())
+            .count();
+        // 200 KiB is 50 to 400 clusters here; in runs, a few requests
+        // for the data and a few for the FAT and the entry.
+        assert!(requests < 40, "{name}: {requests} write requests");
+    }
+}
+
+/// Reading a file whose clusters follow each other takes few requests.
+#[test]
+fn large_reads_go_out_in_runs() {
+    struct Counting(Overlay, usize);
+    impl Disk for Counting {
+        fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), IoError> {
+            self.1 += 1;
+            self.0.read_at(offset, out)
+        }
+        fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), IoError> {
+            self.0.write_at(offset, data)
+        }
+        fn flush(&mut self) -> Result<(), IoError> {
+            Ok(())
+        }
+        fn writable(&self) -> bool {
+            true
+        }
+        fn size(&self) -> u64 {
+            self.0.size()
+        }
+    }
+    for (name, _) in IMAGES {
+        let mut fat = Fat::open(Counting(Overlay::new(image(name)), 0)).unwrap();
+        fat.enable_writes().unwrap();
+        let file = create_kept(&mut fat, ROOT, "big.bin", false);
+        let data = pattern(200 * 1024, 9);
+        assert_eq!(fat.write_file(file, 0, &data), Ok(data.len()));
+        let before = fat.disk().1;
+        assert_eq!(read_all(&mut fat, file), data);
+        let reads = fat.disk().1 - before;
+        // The data in a few runs, plus the FAT sectors that chain them.
+        assert!(reads < 40, "{name}: {reads} read requests");
+    }
+}

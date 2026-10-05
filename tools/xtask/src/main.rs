@@ -54,6 +54,7 @@ const USER_PROGRAMS: &[&str] = &[
     "lsusb",
     "sysreport",
     "diag",
+    "update",
     "apps",
     "mouse",
     "ipc-test",
@@ -85,6 +86,9 @@ const NVME_TEXT: &str = "kept on nvme";
 /// public, for examples and tests only. Images trust it as `DEV_PUBLISHER`.
 const DEV_SEED: &str = include_str!("../../keys/oceans-dev.seed");
 const DEV_PUBLISHER: &str = "Oceans Examples";
+/// The release an image is (ADR-0071): `/bin/release`.
+const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const RELEASE_CHANNEL: &str = "alpha";
 /// A key no image trusts (the smoke test's refused package).
 const UNTRUSTED_SEED: [u8; 32] = [0x55; 32];
 /// Go programs (ADR-0050), built for wasip1 and run by `gohost`: the
@@ -1203,6 +1207,13 @@ fn build_image_for(profile: Profile, cmdline: Option<&str>, setup: Setup) -> Res
     // Oceans Core's trusted publisher keys (ADR-0046): the root of trust
     // for apps comes with the boot image.
     files.push(("trust.keys".to_string(), trust_list()?.into_bytes()));
+    // The release, and the keys system updates are accepted from
+    // (ADR-0071): `update` reads them as /bin/release and /bin/update.keys.
+    files.push((
+        "release".to_string(),
+        format!("{RELEASE_VERSION} {RELEASE_CHANNEL}\n").into_bytes(),
+    ));
+    files.push(("update.keys".to_string(), update_keys()?.into_bytes()));
     // The trusted roots for TLS in Go services (ADR-0054): the AI's model
     // gateway gets them as a module.
     files.push(("ca-roots.pem".to_string(), ca_roots_pem()?.into_bytes()));
@@ -1218,6 +1229,17 @@ fn build_image_for(profile: Profile, cmdline: Option<&str>, setup: Setup) -> Res
     fs::write(&archive_path, &archive)
         .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
 
+    if setup == Setup::Hardware {
+        // Two slots for updates (ADR-0071).
+        hardware::slot_layout(&esp, &format!("{RELEASE_VERSION} {RELEASE_CHANNEL}"))?;
+        println!(
+            "image ready in {} (boot archive: {} files, {} KiB; slot a)",
+            esp.display(),
+            entries.len(),
+            archive.len() / 1024
+        );
+        return Ok(esp);
+    }
     let mut conf = String::from("timeout: 0\n\n/Oceans\n    protocol: limine\n");
     conf.push_str(&format!("    path: boot():/boot/{KERNEL_PACKAGE}\n"));
     if let Some(cmdline) = cmdline {
@@ -1965,6 +1987,17 @@ fn dev_seed() -> Result<[u8; 32]> {
 fn trust_list() -> Result<String> {
     Ok(format!(
         "# Publisher keys Oceans Core trusts (ADR-0046): `KEY-HEX PUBLISHER`.\n\
+         # The development key (tools/keys): never in a release image.\n\
+         {} {DEV_PUBLISHER}\n",
+        oceans_package::public_key_hex(&dev_seed()?)
+    ))
+}
+
+/// The image's `update.keys` (ADR-0071): the keys system updates are
+/// accepted from. Apps' publisher keys are never among them.
+fn update_keys() -> Result<String> {
+    Ok(format!(
+        "# Keys Oceans accepts system updates from (ADR-0071): `KEY-HEX PUBLISHER`.\n\
          # The development key (tools/keys): never in a release image.\n\
          {} {DEV_PUBLISHER}\n",
         oceans_package::public_key_hex(&dev_seed()?)

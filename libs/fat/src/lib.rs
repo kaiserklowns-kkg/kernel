@@ -106,6 +106,8 @@ pub const ROOT: NodeId = 0;
 /// Longest name served, in bytes (as `oceans-fs-proto`).
 pub const MAX_NAME: usize = 128;
 
+/// The most a file read asks the disk for at once.
+const READ_RUN: usize = 64 * 1024;
 const SECTOR: u64 = 512;
 const ENTRY: usize = 32;
 const ATTR_VOLUME: u8 = 0x08;
@@ -780,7 +782,17 @@ impl<D: Disk> Fat<D> {
             let index = u32::try_from(at / cluster_bytes).map_err(|_| Error::Corrupt)?;
             let cluster = self.cluster_at(id, index)?;
             let within = at % cluster_bytes;
-            let take = ((cluster_bytes - within) as usize).min(len - done);
+            let mut take = ((cluster_bytes - within) as usize).min(len - done);
+            // Clusters that follow each other on the disk are read in one
+            // request, up to 64 KiB.
+            let mut run = 1;
+            while done + take < len
+                && take + cluster_bytes as usize <= READ_RUN
+                && self.cluster_at(id, index + run)? == cluster + run
+            {
+                take += (cluster_bytes as usize).min(len - done - take);
+                run += 1;
+            }
             let base = self.cluster_offset(cluster)?;
             self.read(base + within, &mut out[done..done + take])?;
             done += take;

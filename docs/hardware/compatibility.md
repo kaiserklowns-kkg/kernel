@@ -92,3 +92,18 @@ Real machines are added here from their reports.
    - `run ping out use:net -- 1.1.1.1 3`;
    - `app list`.
 7. **Send the report and results** to be added to the table above.
+
+## Updating the stick
+
+The stick keeps two releases (ADR-0071). Copy an update (`.opk`) to the
+stick, then, from the shell:
+
+```text
+run update out use:fs -- apply /usb/oceans-VERSION.opk
+run update out use:fs -- status
+```
+
+The update is checked against the update keys of the release that is
+running, and it starts at the next boot. If it does not start, choose the
+"(previous)" entry in the boot menu. `run diag out logs sysinfo use:fs --
+save /usb/diag.txt` saves what went wrong, to attach to a report (ADR-0070).
