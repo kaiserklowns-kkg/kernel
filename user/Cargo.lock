@@ -38,6 +38,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahci"
+version = "0.1.0"
+dependencies = [
+ "oceans-ahci",
+ "oceans-block-proto",
+ "oceans-rt",
+ "oceans-virtio",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -577,6 +587,10 @@ dependencies = [
 
 [[package]]
 name = "oceans-abi"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-ahci"
 version = "0.1.0"
 
 [[package]]

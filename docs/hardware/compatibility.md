@@ -16,7 +16,7 @@ A machine is a **Tier 1 candidate** when it has:
 | x86-64 CPU meeting **x86-64-v2** (SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, CMPXCHG16B, LAHF in long mode), with **NX** and an **APIC** | the kernel's assumptions (ADR-0005) |
 | **UEFI 2.x** firmware with **ACPI** (RSDP, MADT, MCFG) and a **GOP** framebuffer of 32 bits per pixel | boot (Limine), interrupts, PCIe, the screen |
 | At least **256 MiB** of RAM | the system and its services |
-| An **NVMe SSD** for storage, or a USB stick | the root filesystem |
+| An **NVMe SSD**, a **SATA disk (AHCI)**, or a USB stick | storage: the root filesystem on NVMe, a SATA disk at `/sata` |
 | A **USB 3 (xHCI)** controller, or a PS/2 keyboard | input |
 | An **Intel 82574L** network adapter (for networking) | the one Ethernet family driven today |
 
@@ -29,6 +29,7 @@ procedure below passes on it.
 | Device | Oceans | Validation |
 |---|---|---|
 | NVMe SSD (any vendor) | nvme (ADR-0040) | Tier 0 (QEMU `nvme`) in CI; real SSDs: awaiting reports |
+| SATA AHCI controller (any vendor) | ahci (ADR-0069) | Tier 0 (QEMU q35's ICH9 AHCI with `ide-hd` disks) in CI; real controllers and disks: awaiting reports |
 | USB 3 xHCI controller (any vendor) | xhci (ADR-0032): keyboards, mice, tablets, hubs, mass storage | Tier 0 (QEMU `qemu-xhci`) in CI; real controllers: awaiting reports |
 | Intel 82574L Ethernet | e1000e (ADR-0041) | Tier 0 (QEMU `e1000e`) in CI; real adapters: awaiting reports |
 | virtio-net (modern) | virtio-net (ADR-0023) | Tier 0 (virtual machines) |
@@ -43,7 +44,6 @@ Also driven, outside PCI: the 16550 UART (COM1), the PS/2 keyboard
 - Realtek Ethernet;
 - other Intel Ethernet (I219, I225, I226);
 - Wi-Fi;
-- SATA (AHCI);
 - audio (Intel HDA);
 - GPUs;
 - USB 2-only controllers.
@@ -68,13 +68,15 @@ Real machines are added here from their reports.
    ```
 
    This writes `build/oceans-usb.img` (GPT, one EFI system partition). It
-   is the hardware profile: the root filesystem goes on the NVMe SSD.
+   is the hardware profile: the root filesystem goes on the NVMe SSD, and
+   the first SATA disk (AHCI mode) is shown as `/sata`.
 2. **Write the image to a USB stick** (Rufus, `dd`, balenaEtcher).
-3. **Boot the machine from the stick** (UEFI; Secure Boot off).
-4. **What happens to the NVMe SSD:** Oceans formats it **only if its start
-   is blank**. An SSD holding anything (a partition table, Windows, Linux)
-   is left untouched, and files stay in memory. To keep files across
-   reboots, use a blank SSD.
+3. **Boot the machine from the stick** (UEFI; Secure Boot off; SATA in
+   AHCI mode, not RAID or legacy IDE).
+4. **What happens to the NVMe SSD and the SATA disk:** Oceans formats a
+   disk **only if its start is blank**. A disk holding anything (a
+   partition table, Windows, Linux) is left untouched, and files stay in
+   memory. To keep files across reboots, use a blank disk.
 5. **In the shell**, run:
 
    ```text

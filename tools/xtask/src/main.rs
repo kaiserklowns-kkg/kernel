@@ -34,6 +34,7 @@ const USER_PROGRAMS: &[&str] = &[
     "disk",
     "virtio-blk",
     "nvme",
+    "ahci",
     "virtio-net",
     "e1000e",
     "xhci",
@@ -682,6 +683,15 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("nvme: namespace 1: 32768 sectors (16 MiB), 512-byte blocks"),
     Expect::Contains("fs (nvmefs): formatted a blank disk: "),
     Expect::Contains("fs: /nvme: a mounted filesystem"),
+    // SATA (ADR-0069): q35's AHCI controller holds the boot disk (the
+    // ESP, attached without `if=`); the driver identifies it, and the fs
+    // instance on it leaves it untouched (it is not blank).
+    Expect::Contains("ahci: AHCI 1.0, 6 ports implemented, 32 command slots, polling"),
+    Expect::Contains("ahci: port 0: QEMU HARDDISK (serial QM0000"),
+    Expect::Contains(
+        "fs (satafs): disk not mounted (it holds something other than an Oceans volume), left untouched",
+    ),
+    Expect::Contains("fs: /sata: a mounted filesystem"),
     Expect::Line("disk: 32768 sectors of 512 bytes (16 MiB)"),
     Expect::Line("  note.txt"),
     Expect::Line("  big.bin"),

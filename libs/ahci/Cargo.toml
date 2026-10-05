@@ -1,0 +1,9 @@
+[package]
+name = "oceans-ahci"
+description = "AHCI and ATA for Oceans: registers, FISes, command tables, identify data and transfer splitting, without allocation (ADR-0069)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

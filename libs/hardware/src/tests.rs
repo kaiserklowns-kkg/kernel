@@ -54,6 +54,17 @@ fn devices_get_the_most_specific_row() {
         support(0x144d, 0xa808, 0x01, 0x08, 0x02),
         Support::Driver("nvme (ADR-0040)")
     );
+    // QEMU's ICH9 AHCI, and an Intel 300-series one.
+    assert_eq!(
+        support(0x8086, 0x2922, 0x01, 0x06, 0x01),
+        Support::Driver("ahci (ADR-0069)")
+    );
+    assert!(matches!(
+        support(0x8086, 0xa352, 0x01, 0x06, 0x01),
+        Support::Driver(_)
+    ));
+    // A SATA controller in RAID mode (class 01.04): not driven.
+    assert_eq!(support(0x8086, 0x2822, 0x01, 0x04, 0x00), Support::None);
     assert!(matches!(
         support(0x8086, 0xa36d, 0x0c, 0x03, 0x30),
         Support::Driver(_)

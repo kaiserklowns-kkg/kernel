@@ -44,8 +44,8 @@ oceans_rt::entry!(main);
 
 const MANIFEST: &str = "services.conf";
 const MAX_SERVICES: usize = 32;
-const MAX_GRANTS: usize = 24;
-const MAX_ENDPOINTS: usize = 16;
+const MAX_GRANTS: usize = 28;
+const MAX_ENDPOINTS: usize = 24;
 const DEFAULT_MAX_RESTARTS: u32 = 5;
 const BACKOFF_BASE_MS: u64 = 100;
 const BACKOFF_MAX_MS: u64 = 2000;
