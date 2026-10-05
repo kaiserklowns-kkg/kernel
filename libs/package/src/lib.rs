@@ -464,6 +464,12 @@ fn oceans_archive_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// The ids of system packages (ADR-0071): `system.oceans` is a system
+/// update, applied by `update`, never installed as an app.
+pub fn system_id(id: &str) -> bool {
+    id.split('.').next() == Some("system")
+}
+
 /// Reverse-DNS: 2 to 8 labels of lowercase letters, digits and `-`, each
 /// starting with a letter; at most 64 bytes. Ids name directories, so
 /// nothing else is allowed.

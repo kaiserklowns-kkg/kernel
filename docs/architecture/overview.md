@@ -100,5 +100,5 @@ Agent → tool call → Permission broker ─(needs approval)→ User prompt
 | 9 Hardware validation | compatibility matrix | Tier 1 list published |
 | 10 Alpha | all of the above, updates, diagnostics | alpha release |
 
-Phase 2 is next; its first ADR covers the physical frame allocator and the
-kernel address-space layout.
+Phases 1 to 9 are done and Phase 10 is in progress: see the phase table
+in the [README](../../README.md#status).

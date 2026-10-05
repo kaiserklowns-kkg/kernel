@@ -136,6 +136,12 @@ impl Project {
                 self.id
             ));
         }
+        if oceans_package::system_id(&self.id) {
+            return Err(format!(
+                "{}: ids starting with `system.` are system updates, not apps",
+                self.id
+            ));
+        }
         for (what, text) in [("name", &self.name), ("publisher", &self.publisher)] {
             let plain = text
                 .chars()

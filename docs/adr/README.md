@@ -80,5 +80,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0070](0070-diagnostics.md) | Diagnostics: the kept log and `diag` (ABI 15) | Accepted |
 | [0071](0071-system-updates.md) | System updates: signed, two slots, the previous release kept | Accepted |
 | [0072](0072-release-keys.md) | Release keys and release images | Accepted |
+| [0073](0073-alpha-hardening.md) | Alpha hardening: small BARs, reserved system ids | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

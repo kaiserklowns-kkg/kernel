@@ -180,6 +180,14 @@ fn ids() {
 }
 
 #[test]
+fn system_ids_are_reserved() {
+    assert!(system_id("system.oceans"));
+    assert!(system_id("system.anything.else"));
+    assert!(!system_id("app.system.oceans"));
+    assert!(!system_id("systems.example"));
+}
+
+#[test]
 fn trust_lists_parse() {
     let text = std::format!(
         "{}\nnot-hex Someone\n{} \n",

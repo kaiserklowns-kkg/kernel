@@ -49,6 +49,9 @@ oceans_rt::entry!(main);
 
 /// The controller's registers are BAR 5 (`ABAR`).
 const ABAR: u8 = 5;
+/// Its register in the configuration space (BAR 5).
+const ABAR_REGISTER: u16 = 0x24;
+const PAGE_SIZE: usize = 4096;
 /// The most one command moves.
 const BOUNCE_SIZE: usize = 128 * 1024;
 const BOUNCE_SECTORS: u32 = (BOUNCE_SIZE / SECTOR_SIZE) as u32;
@@ -184,9 +187,19 @@ impl Controller {
             oceans_rt::device_bar(device, ABAR).map_err(|_| "cannot get the ABAR (BAR 5)")?;
         let base = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE);
         let _ = oceans_rt::close(memory);
+        let base = base.map_err(|_| "cannot map the ABAR")?;
+        // The object is whole pages; a 2 KiB ABAR need not start one. Its
+        // registers are at the BAR's offset in its page.
+        let raw = oceans_rt::device_config_read(device, ABAR_REGISTER, 4)
+            .map_err(|_| "cannot read the ABAR register")?;
+        let within = (raw as usize) & (PAGE_SIZE - 1) & !0xf;
+        if within >= size as usize {
+            return Err("the ABAR is outside its mapping");
+        }
         let regs = Registers {
-            base: base.map_err(|_| "cannot map the ABAR")?,
-            size: size as usize,
+            // SAFETY: `within` is inside the mapping (checked above).
+            base: unsafe { base.add(within) },
+            size: size as usize - within,
         };
         if regs.size < hba::PORTS {
             return Err("the ABAR is too small");

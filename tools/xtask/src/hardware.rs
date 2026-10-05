@@ -308,11 +308,15 @@ pub fn system_package(
     oceans_package::build(&files, &key.seed).map_err(|e| format!("cannot sign the update: {e:?}"))
 }
 
-/// The hardware smoke test's updates: one signed with its release key,
-/// and one signed with the development key, which a release image does
-/// not trust (refused before its files are looked at: a placeholder
-/// kernel and boot archive keep it small).
-fn smoke_updates(esp: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+/// The hardware smoke test's system packages:
+/// - an update signed with its release key;
+/// - one signed with the development key, which a release image does not
+///   trust (refused before its files are looked at: placeholders keep it
+///   small);
+/// - a small one signed with the release key (the kernel, a placeholder
+///   boot archive), for `app install` to refuse (ADR-0073): the update
+///   itself is larger than the shell's limit for packages.
+fn smoke_updates(esp: &Path) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let update = system_package(
         esp,
         "0.1.1",
@@ -330,7 +334,22 @@ fn smoke_updates(esp: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
     ];
     let untrusted = oceans_package::build(&placeholder, &dev_seed()?)
         .map_err(|e| format!("cannot sign: {e:?}"))?;
-    Ok((update, untrusted))
+    let key = release::test_release_key();
+    let manifest = format!(
+        "id = system.oceans\nname = Oceans\nversion = 0.1.2\npublisher = {}\n\
+         architecture = x86_64\napi = 1\nentry = {KERNEL_PACKAGE}\n",
+        key.publisher
+    );
+    let kernel = fs::read(esp.join("boot").join("a").join(KERNEL_PACKAGE))
+        .map_err(|e| format!("kernel: {e}"))?;
+    let small: [(&str, &[u8]); 3] = [
+        ("manifest", manifest.as_bytes()),
+        (KERNEL_PACKAGE, &kernel),
+        ("initrd", b"placeholder"),
+    ];
+    let system =
+        oceans_package::build(&small, &key.seed).map_err(|e| format!("cannot sign: {e:?}"))?;
+    Ok((update, untrusted, system))
 }
 
 /// Copies `files` (name, bytes) to the root of [`USB_IMAGE`]'s partition.
@@ -424,6 +443,8 @@ const HW_REBOOT_SCRIPT: &[&[u8]] = &[
     b"cat /bin/release\r\n",
     b"run update out use:fs -- status\r\n",
     b"run update out use:fs -- apply /usb/update.opk\r\n",
+    // Core never installs a system package as an app.
+    b"app install /usb/system.opk\r\n",
 ];
 const HW_REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("fs: mounted the disk: generation"),
@@ -435,6 +456,7 @@ const HW_REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("update: starts first: slot b (0.1.1 alpha)"),
     Expect::Line("update: previous: slot a (0.1.0 alpha)"),
     Expect::Line("update: refused: 0.1.1 is not newer than the running 0.1.1"),
+    Expect::Contains("app: /usb/system.opk: a system update, not an app: apply it with `update`"),
 ];
 
 /// `cargo xtask smoke-hw`: the USB image booted as a real PC would.
@@ -443,8 +465,12 @@ pub fn smoke_hw(profile: Profile) -> Result {
     let keys = release::ImageKeys::release(&release::test_release_key());
     let esp = build_image_for(profile, None, Setup::Hardware, &keys)?;
     write_usb_image(&esp)?;
-    let (update, untrusted) = smoke_updates(&esp)?;
-    copy_to_usb(&[("update.opk", &update), ("untrusted.opk", &untrusted)])?;
+    let (update, untrusted, system) = smoke_updates(&esp)?;
+    copy_to_usb(&[
+        ("update.opk", &update),
+        ("untrusted.opk", &untrusted),
+        ("system.opk", &system),
+    ])?;
     prepare_blank(HW_NVME_IMAGE, HW_NVME_SIZE, true)?;
     prepare_blank(HW_SATA_IMAGE, HW_SATA_SIZE, true)?;
     println!("hardware boot 1 of 2: from the USB image, a blank NVMe SSD and SATA disk");

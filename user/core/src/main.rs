@@ -936,6 +936,14 @@ impl Core {
     fn install_bytes(&mut self, bytes: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
         let trust = self.trust();
         let package = Package::open(bytes, &trust).map_err(invalid)?;
+        if oceans_package::system_id(package.manifest.id) {
+            // A system update (ADR-0071): `update` applies it to the boot
+            // partition; it is never an app.
+            return Err(Refusal {
+                status: Status::Invalid,
+                text: Some("a system update, not an app: apply it with `update`".to_owned()),
+            });
+        }
         let id = package.manifest.id.to_owned();
         let previous = self.installable(&package)?;
 

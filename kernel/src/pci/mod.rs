@@ -372,12 +372,21 @@ impl Device {
     pub fn bar(&self, index: u64) -> Result<Arc<MemoryObject>, DeviceError> {
         let index = usize::try_from(index).map_err(|_| DeviceError::BadBar)?;
         let (base, size) = self.function.memory_bar(index).ok_or(DeviceError::BadBar)?;
-        // A BAR smaller than a page would share its page with other
-        // devices' registers.
-        if !base.is_multiple_of(PAGE_SIZE) || !(PAGE_SIZE..=MAX_BAR_SIZE).contains(&size) {
+        if size == 0 || size > MAX_BAR_SIZE {
             return Err(DeviceError::BadBar);
         }
-        if overlaps_ram(base..base + size) {
+        // The object covers whole pages. A BAR smaller than a page, or not
+        // page-aligned (some AHCI controllers' 2 KiB ABAR), takes the pages
+        // around it, so only if no other BAR decodes there: a driver must
+        // never reach another device's registers. The driver finds its
+        // registers at `base % PAGE_SIZE` in the object.
+        let (pages, exact) = oceans_pci::page_span(base, size, PAGE_SIZE);
+        let (start, end) = (pages.start, pages.end);
+        if !exact && shares_pages(&self.function, index, pages) {
+            klog::warn!("refusing BAR at {base:#x}: another device's BAR shares its page");
+            return Err(DeviceError::BadBar);
+        }
+        if overlaps_ram(start..end) {
             klog::warn!("refusing BAR at {base:#x}: overlaps RAM in the memory map");
             return Err(DeviceError::BadBar);
         }
@@ -387,12 +396,14 @@ impl Device {
                 holes.iter_mut().zip([msix.table(), msix.pending_bits()])
             {
                 if usize::from(bar) == index {
-                    let start = offset - offset % PAGE_SIZE;
-                    *hole = start..(offset + len).next_multiple_of(PAGE_SIZE);
+                    // Offsets in the BAR, as offsets in the object.
+                    let offset = offset + (base - start);
+                    let first = offset - offset % PAGE_SIZE;
+                    *hole = first..(offset + len).next_multiple_of(PAGE_SIZE);
                 }
             }
         }
-        Ok(MemoryObject::new_device(base, size, holes))
+        Ok(MemoryObject::new_device(start, end - start, holes))
     }
 
     /// Contiguous DMA memory and the address the device uses for it.
@@ -507,6 +518,21 @@ impl Drop for Device {
 }
 
 /// Whether `range` overlaps RAM (or the kernel) in the boot memory map.
+/// Whether a memory BAR other than `function`'s BAR `index` decodes
+/// anywhere in `pages`.
+fn shares_pages(function: &Arc<Function>, index: usize, pages: Range<u64>) -> bool {
+    functions().iter().any(|other| {
+        (0..other.bars.len()).any(|i| {
+            if Arc::ptr_eq(other, function) && i == index {
+                return false;
+            }
+            other.memory_bar(i).is_some_and(|(base, size)| {
+                size > 0 && base < pages.end && pages.start < base + size
+            })
+        })
+    })
+}
+
 fn overlaps_ram(range: Range<u64>) -> bool {
     boot::info().memory_regions().iter().any(|region| {
         let ram = !matches!(

@@ -301,9 +301,48 @@ pub fn read(config: &impl ConfigSpace, offset: u16, width: u8) -> Option<u32> {
     })
 }
 
+/// The whole pages a memory BAR at `base` of `size` bytes lies in, and
+/// whether it fills them exactly. A BAR that does not (smaller than a page,
+/// or not page-aligned) can be mapped only if nothing else decodes in those
+/// pages (ADR-0021, ADR-0069).
+pub fn page_span(base: u64, size: u64, page: u64) -> (core::ops::Range<u64>, bool) {
+    let start = base - base % page;
+    let end = (base + size).next_multiple_of(page);
+    (start..end, start == base && end == base + size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_spans_cover_small_and_unaligned_bars() {
+        const P: u64 = 4096;
+        // A page-sized, aligned BAR fills its page.
+        assert_eq!(
+            page_span(0xfebf_0000, P, P),
+            (0xfebf_0000..0xfebf_1000, true)
+        );
+        // Larger BARs too.
+        assert_eq!(
+            page_span(0xfe00_0000, 4 * P, P),
+            (0xfe00_0000..0xfe00_4000, true)
+        );
+        // A 2 KiB ABAR at the start or the middle of a page takes the page.
+        assert_eq!(
+            page_span(0xf7d1_a000, 2048, P),
+            (0xf7d1_a000..0xf7d1_b000, false)
+        );
+        assert_eq!(
+            page_span(0xf7d1_a800, 2048, P),
+            (0xf7d1_a000..0xf7d1_b000, false)
+        );
+        // Straddling two pages takes both.
+        assert_eq!(
+            page_span(0xf000_0f00, 512, P),
+            (0xf000_0000..0xf000_2000, false)
+        );
+    }
 
     /// A simulated function: registers plus BAR decoders that ignore the
     /// bits below their size, like hardware.
