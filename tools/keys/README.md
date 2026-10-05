@@ -20,11 +20,24 @@ it once, keeps it secret, and keeps an offline backup:
 cargo run -p oceans-dev -- keygen "Oceans" --out ~/keys/oceans-release.key
 ```
 
-`cargo xtask release` builds a release with it:
+`keygen` creates the folder, and reads a leading `~` as the home folder
+itself (PowerShell passes `~` through unexpanded).
+
+`cargo xtask release` builds a release with it. In a POSIX shell:
 
 ```bash
 OCEANS_RELEASE_KEY=~/keys/oceans-release.key cargo xtask release
 ```
+
+In PowerShell:
+
+```powershell
+$env:OCEANS_RELEASE_KEY = "$HOME\keys\oceans-release.key"; cargo xtask release
+```
+
+On Windows without `mkfs.fat` and `mtools` on the PATH, also set
+`OCEANS_FAT_TOOLS_WSL` to the WSL folder that holds them (`usr/sbin/mkfs.fat`,
+`usr/bin/mcopy`).
 
 It refuses the key if the file is inside the repository, if it is this
 development key, or if the working tree has changes. Losing the release

@@ -161,9 +161,14 @@ fn keygen(args: &[String]) -> Result {
         return Err("keygen needs the publisher's name".into());
     }
     let publisher = positional.join(" ");
-    let out = Path::new(option(&found, "--out").unwrap_or("oceans-developer.key"));
+    let out = home_path(option(&found, "--out").unwrap_or("oceans-developer.key"));
+    let out = out.as_path();
     if out.exists() {
         return Err(format!("{} exists: not overwriting a key", out.display()));
+    }
+    // Keys usually go in a folder of their own, outside any project.
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     let key = DeveloperKey::generate(&publisher)?;
     // Same checks as a project's publisher: it goes into manifests.
@@ -184,8 +189,16 @@ fn keygen(args: &[String]) -> Result {
     Ok(())
 }
 
+/// A path given on the command line, with a leading `~` as the home folder.
+fn home_path(path: &str) -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    oceans_dev::expand_home(path, home.as_deref())
+}
+
 fn read_key(path: &str) -> Result<DeveloperKey> {
-    let text = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let text = fs::read_to_string(home_path(path)).map_err(|e| format!("{path}: {e}"))?;
     DeveloperKey::parse(&text).map_err(|e| format!("{path}: {e}"))
 }
 

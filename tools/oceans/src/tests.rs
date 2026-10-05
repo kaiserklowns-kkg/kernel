@@ -167,3 +167,24 @@ fn sdk_paths_with_spaces_stay_one_word() {
         "{go_mod}"
     );
 }
+
+#[test]
+fn a_leading_tilde_is_the_home_folder() {
+    let home = std::path::Path::new("/home/dev");
+    assert_eq!(
+        expand_home("~/keys/release.key", Some(home)),
+        home.join("keys/release.key")
+    );
+    assert_eq!(
+        expand_home(r"~\keys\release.key", Some(home)),
+        home.join(r"keys\release.key")
+    );
+    assert_eq!(
+        expand_home("keys/release.key", Some(home)),
+        std::path::PathBuf::from("keys/release.key")
+    );
+    assert_eq!(
+        expand_home("~/release.key", None),
+        std::path::PathBuf::from("~/release.key")
+    );
+}

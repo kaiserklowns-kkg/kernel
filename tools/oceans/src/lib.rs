@@ -389,3 +389,15 @@ pub fn sdk_root() -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// `~/…` (or `~\…`) under `home`: shells such as PowerShell pass a leading
+/// `~` through to programs unexpanded.
+pub fn expand_home(path: &str, home: Option<&std::path::Path>) -> std::path::PathBuf {
+    match (
+        path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")),
+        home,
+    ) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => std::path::PathBuf::from(path),
+    }
+}
