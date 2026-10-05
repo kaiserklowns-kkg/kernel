@@ -479,6 +479,7 @@ version = "0.1.0"
 name = "oceans-dev"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "getrandom",
  "oceans-archive",
  "oceans-package",

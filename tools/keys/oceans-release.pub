@@ -1,0 +1,4 @@
+# The Oceans release key's public half (ADR-0072, ADR-0075): `KEY-HEX PUBLISHER`.
+# Releases are signed with its private half, kept outside this repository.
+# Check a download with: oceans verify DIR --key KEY-HEX
+5fcfd97af4fd47b1406b085bd52f0f3da385977b6601c4473efc55c2992f87f0 Oceans

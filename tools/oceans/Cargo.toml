@@ -14,4 +14,6 @@ path = "src/main.rs"
 oceans-archive.workspace = true
 oceans-package = { workspace = true, features = ["build"] }
 getrandom = "0.2"
+# Signing and checking release checksums (ADR-0075).
+ed25519-dalek = { version = "2.2.0", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }

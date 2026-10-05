@@ -7,6 +7,8 @@ use std::path::Path;
 
 use oceans_package::{Manifest, Runtime};
 
+pub mod release;
+
 /// A project template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Template {

@@ -188,3 +188,78 @@ fn a_leading_tilde_is_the_home_folder() {
         std::path::PathBuf::from("~/release.key")
     );
 }
+
+fn release_dir(name: &str, key: &DeveloperKey, files: &[(&str, &[u8])]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("oceans-verify-test-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut sums = String::new();
+    for (file, bytes) in files {
+        std::fs::write(dir.join(file), bytes).unwrap();
+        sums.push_str(&format!("{}  {file}\n", release::sha256_hex(bytes)));
+    }
+    std::fs::write(dir.join(release::SUMS), &sums).unwrap();
+    std::fs::write(
+        dir.join(release::SIGNATURE),
+        release::sign_checksums(key, &sums),
+    )
+    .unwrap();
+    dir
+}
+
+fn release_key() -> DeveloperKey {
+    DeveloperKey {
+        publisher: "Oceans".into(),
+        seed: [5; 32],
+    }
+}
+
+#[test]
+fn signed_releases_verify() {
+    let key = release_key();
+    let dir = release_dir("good", &key, &[("a.img", b"image"), ("a.opk", b"update")]);
+    assert_eq!(
+        release::verify_release(&dir, &key.public_hex()).unwrap(),
+        ["a.img", "a.opk"]
+    );
+}
+
+#[test]
+fn changed_releases_do_not_verify() {
+    let key = release_key();
+    // A file changed after signing.
+    let dir = release_dir("file", &key, &[("a.img", b"image")]);
+    std::fs::write(dir.join("a.img"), b"other image").unwrap();
+    let error = release::verify_release(&dir, &key.public_hex()).unwrap_err();
+    assert!(error.contains("does not match"), "{error}");
+    // The checksums changed to match it: the signature no longer holds.
+    let sums = format!("{}  a.img\n", release::sha256_hex(b"other image"));
+    std::fs::write(dir.join(release::SUMS), sums).unwrap();
+    let error = release::verify_release(&dir, &key.public_hex()).unwrap_err();
+    assert!(error.contains("not signed by that key"), "{error}");
+    // Another key.
+    let dir = release_dir("key", &key, &[("a.img", b"image")]);
+    let other = DeveloperKey {
+        publisher: "Other".into(),
+        seed: [6; 32],
+    };
+    assert!(release::verify_release(&dir, &other.public_hex()).is_err());
+    assert!(release::verify_release(&dir, "not hex").is_err());
+}
+
+#[test]
+fn signed_lists_name_only_files_beside_them() {
+    let key = release_key();
+    for name in ["../escape", "sub/file", "C:file", ".hidden"] {
+        let dir = release_dir("names", &key, &[]);
+        let sums = format!("{}  {name}\n", release::sha256_hex(b"x"));
+        std::fs::write(dir.join(release::SUMS), &sums).unwrap();
+        std::fs::write(
+            dir.join(release::SIGNATURE),
+            release::sign_checksums(&key, &sums),
+        )
+        .unwrap();
+        let error = release::verify_release(&dir, &key.public_hex()).unwrap_err();
+        assert!(error.contains("not a plain file name"), "{name}: {error}");
+    }
+}

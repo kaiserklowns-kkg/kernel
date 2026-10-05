@@ -40,6 +40,16 @@ On Windows without `mkfs.fat` and `mtools` on the PATH, also set
 `usr/bin/mcopy`).
 
 It refuses the key if the file is inside the repository, if it is this
-development key, or if the working tree has changes. Losing the release
-key ends updates for that release line. Leaking it lets anyone sign
-updates.
+development key, if it is not the key published in `oceans-release.pub`,
+or if the working tree has changes. Losing the release key ends updates
+for that release line. Leaking it lets anyone sign updates.
+
+## The published release key (ADR-0075)
+
+`oceans-release.pub` is the release key's public half. Releases sign their
+`SHA256SUMS` with the private half (`SHA256SUMS.sig`), and anyone checks a
+download against this file, never against a key from the download:
+
+```bash
+cargo run -p oceans-dev -- verify DOWNLOADS --key KEY-HEX
+```

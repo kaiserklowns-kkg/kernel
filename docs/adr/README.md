@@ -82,5 +82,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0072](0072-release-keys.md) | Release keys and release images | Accepted |
 | [0073](0073-alpha-hardening.md) | Alpha hardening: small BARs, reserved system ids | Accepted |
 | [0074](0074-kept-logs-on-disk.md) | The log kept on disk across reboots | Accepted |
+| [0075](0075-signed-release-checksums.md) | Signed release checksums and the published release key | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

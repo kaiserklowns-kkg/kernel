@@ -9,10 +9,8 @@
 
 use std::fmt::Write as _;
 
-use oceans_dev::DeveloperKey;
-use sha2::Digest;
-
 use super::*;
+use oceans_dev::DeveloperKey;
 
 /// Where `cargo xtask release` puts what it publishes.
 const RELEASE_DIR: &str = "build/release";
@@ -109,15 +107,6 @@ fn load_release_key(path: &Path, repository: &Path) -> Result<DeveloperKey> {
     Ok(key)
 }
 
-/// The SHA-256 of `bytes`, in hex.
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hex = String::new();
-    for byte in sha2::Sha256::digest(bytes) {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
-}
-
 fn git(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(root())
@@ -134,6 +123,21 @@ fn git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// The release key's public half, in the repository (ADR-0075).
+const PUBLISHED_KEY: &str = "tools/keys/oceans-release.pub";
+
+/// Whether `key` is the one in the published key file (a trust list).
+fn published_key_matches(published: &str, key: &DeveloperKey) -> bool {
+    let public = key.public_hex();
+    oceans_package::trusted_keys(published).any(|trusted| {
+        let mut hex = String::new();
+        for byte in trusted.key {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        hex == public && trusted.publisher == key.publisher
+    })
+}
+
 /// `cargo xtask release`: the files of a release, in `build/release`:
 ///
 /// ```text
@@ -142,6 +146,7 @@ fn git(args: &[&str]) -> Result<String> {
 /// release.keys                     the release key's public half
 /// BUILD-INFO                       the commit it was built from
 /// SHA256SUMS
+/// SHA256SUMS.sig                   the checksums, signed (ADR-0075)
 /// ```
 pub fn release() -> Result {
     let path = env::var_os("OCEANS_RELEASE_KEY").ok_or(
@@ -149,6 +154,14 @@ pub fn release() -> Result {
          `oceans keygen \"Oceans\" --out PATH`, outside the repository, and keep it secret",
     )?;
     let key = load_release_key(Path::new(&path), &root())?;
+    let published = fs::read_to_string(root().join(PUBLISHED_KEY)).unwrap_or_default();
+    if !published_key_matches(&published, &key) {
+        return Err(format!(
+            "that key ({}) is not the release key published in {PUBLISHED_KEY}: \
+             releases are checked against that one (ADR-0075)",
+            key.public_hex()
+        ));
+    }
     let changes = git(&["status", "--porcelain"])?;
     if !changes.is_empty() {
         return Err(format!(
@@ -193,9 +206,15 @@ pub fn release() -> Result {
     let mut sums = String::new();
     for (name, bytes) in &files {
         fs::write(dir.join(name), bytes).map_err(|e| format!("cannot write {name}: {e}"))?;
-        let _ = writeln!(sums, "{}  {name}", sha256_hex(bytes));
+        let _ = writeln!(sums, "{}  {name}", oceans_dev::release::sha256_hex(bytes));
     }
     fs::write(dir.join("SHA256SUMS"), &sums).map_err(|e| e.to_string())?;
+    // Signed with the release key (ADR-0075): `oceans verify` checks a
+    // download against the key, not against checksums from the same page.
+    let signature = oceans_dev::release::sign_checksums(&key, &sums);
+    fs::write(dir.join(oceans_dev::release::SIGNATURE), &signature).map_err(|e| e.to_string())?;
+    let checked = oceans_dev::release::verify_release(&dir, &key.public_hex())?;
+    assert_eq!(checked.len(), files.len(), "every file is in SHA256SUMS");
     println!(
         "Oceans {release} is in {RELEASE_DIR} (commit {commit}), signed by \"{}\" ({}):\n{sums}",
         key.publisher,
@@ -231,6 +250,22 @@ mod tests {
     }
 
     #[test]
+    fn releases_use_the_published_key() {
+        let published = fs::read_to_string(root().join(PUBLISHED_KEY)).unwrap();
+        // The published key is a real key file's public half, not a test's.
+        assert!(!published_key_matches(&published, &test_release_key()));
+        let key = test_release_key();
+        let mine = ImageKeys::release(&key).trust_list();
+        assert!(published_key_matches(&mine, &key));
+        // The same key under another publisher name is not it.
+        let renamed = DeveloperKey {
+            publisher: "Someone Else".to_string(),
+            seed: key.seed,
+        };
+        assert!(!published_key_matches(&mine, &renamed));
+    }
+
+    #[test]
     fn release_keys_must_be_private() {
         let outside = scratch("outside");
         let repository = scratch("repository");
@@ -258,13 +293,5 @@ mod tests {
         };
         fs::write(&path, examples.to_file()).unwrap();
         assert!(load_release_key(&path, &repository).is_err());
-    }
-
-    #[test]
-    fn sha256_is_standard() {
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 }

@@ -29,6 +29,10 @@ usage:
       through a date if given
   oceans serve [DIR] [--port PORT]
       serves DIR/dist/ as a store (index.json and packages) on PORT (8000)
+  oceans verify DIR --key KEY-HEX
+      checks a downloaded Oceans release in DIR: SHA256SUMS signed by the
+      release key KEY-HEX (from the project, not from the download), then
+      every file it lists
 
 environment: OCEANS_SDK (the SDK's root; default: where this tool was built),
 OCEANS_GO (the Go command, default `go`), OCEANS_BUN (Bun, default `bun`)";
@@ -96,6 +100,22 @@ fn run(args: &[String]) -> Result {
             }
         }
         "serve" => serve(rest),
+        "verify" => {
+            let (positional, found) = options(rest, &["--key"])?;
+            let [dir] = positional.as_slice() else {
+                return Err("verify needs the folder of the release".into());
+            };
+            let key = option(&found, "--key").ok_or(
+                "which release key? (--key KEY-HEX: from the project's documentation, \
+                 never from the download itself)",
+            )?;
+            let files = oceans_dev::release::verify_release(Path::new(dir), key)?;
+            println!(
+                "verified: SHA256SUMS is signed by {key}, and these files match it: {}",
+                files.join(", ")
+            );
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())
