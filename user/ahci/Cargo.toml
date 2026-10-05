@@ -1,0 +1,18 @@
+[package]
+name = "ahci"
+description = "AHCI driver: a userspace service holding one SATA controller's device capability, serving its first disk with the block protocol (ADR-0069)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ahci"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-block-proto.workspace = true
+oceans-ahci.workspace = true
+oceans-virtio.workspace = true

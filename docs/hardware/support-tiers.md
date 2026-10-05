@@ -1,6 +1,6 @@
 # Hardware support tiers
 
-Decision records: [ADR-0005](../adr/0005-hardware-targets.md), [ADR-0068](../adr/0068-hardware-validation.md).
+Decision records: [ADR-0005](../adr/0005-hardware-targets.md), [ADR-0068](../adr/0068-hardware-validation.md), [ADR-0069](../adr/0069-ahci.md).
 
 **The Tier 1 list, the device matrix and how to validate a machine:
 [compatibility.md](compatibility.md).**
@@ -27,7 +27,7 @@ value. Exact chipsets are added only after research and a test device.
 | CPU | x86-64 (TCG/KVM) | x86-64-v2+ Intel/AMD; selected AArch64 |
 | Console | 16550 UART (COM1); UEFI GOP framebuffer text console + PS/2 keyboard (ADR-0029) | USB HID keyboards (xHCI) |
 | Buses | PCI Express via ACPI MCFG/ECAM (ADR-0021) | — |
-| Storage | virtio-blk (modern, `1af4:1042`), userspace driver (ADR-0021); NVMe (class `010802`), userspace driver (ADR-0040) | NVMe SSDs (validation on real machines pending) |
+| Storage | virtio-blk (modern, `1af4:1042`), userspace driver (ADR-0021); NVMe (class `010802`), userspace driver (ADR-0040); SATA disks on AHCI (class `010601`, q35's ICH9), userspace driver (ADR-0069) | NVMe SSDs and SATA disks on AHCI controllers (validation on real machines pending) |
 | USB | xHCI (QEMU `qemu-xhci`): keyboards, hubs, mass storage (ADR-0032–0034) | xHCI controllers of the target machines |
 | Network | virtio-net (modern, `1af4:1041`), userspace driver (ADR-0023); Intel 82574L (`8086:10d3`, QEMU `e1000e`), userspace driver (ADR-0041) | Intel 82574L on real hardware; other Intel e1000e-family parts (82583, I217/I218/I219); Realtek Ethernet |
 

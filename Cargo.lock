@@ -464,6 +464,10 @@ name = "oceans-acpi"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-ahci"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-archive"
 version = "0.1.0"
 

@@ -108,6 +108,12 @@ pub const MATRIX: &[Row] = &[
         support: Support::Driver("nvme (ADR-0040)"),
     },
     Row {
+        what: "SATA AHCI controller (any vendor)",
+        id: None,
+        class: class(0x01, 0x06, Some(0x01)),
+        support: Support::Driver("ahci (ADR-0069)"),
+    },
+    Row {
         what: "USB 3 xHCI controller (any vendor)",
         id: None,
         class: class(0x0c, 0x03, Some(0x30)),

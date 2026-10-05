@@ -1,6 +1,6 @@
 //! Real hardware (ADR-0068): the hardware profile of the services, the USB
 //! image a real machine boots from, and the smoke test that boots that
-//! image as a real PC would (no virtio: NVMe, Intel Ethernet, xHCI).
+//! image as a real PC would (no virtio: NVMe, SATA, Intel Ethernet, xHCI).
 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
@@ -15,13 +15,17 @@ pub const USB_IMAGE: &str = "build/oceans-usb.img";
 /// The hardware smoke test's NVMe disk (the root filesystem).
 const HW_NVME_IMAGE: &str = "build/smoke-hw-nvme.img";
 const HW_NVME_SIZE: usize = 64 << 20;
+/// Its SATA disk (ADR-0069), on q35's AHCI controller: mounted at /sata.
+const HW_SATA_IMAGE: &str = "build/smoke-hw-sata.img";
+const HW_SATA_SIZE: usize = 16 << 20;
 /// Each hardware smoke boot, start to finish.
 const HW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The services of a real machine, from `config/services.conf`: the same
 /// system, but the root filesystem lives on the NVMe SSD (formatted only if
 /// its start is blank, else left untouched and files kept in memory), not
-/// on a virtio disk. Generated, never kept as a copy: each change below
+/// on a virtio disk. A SATA disk stays where `services.conf` puts it, at
+/// /sata (ADR-0069). Generated, never kept as a copy: each change below
 /// must find exactly what it changes.
 pub fn hardware_services(text: &str) -> Result<String> {
     let mut text = remove_service(text, "block")?;
@@ -229,6 +233,8 @@ fn walk_size(dir: &Path) -> Result<u64> {
 const HW_SCRIPT: &[&[u8]] = &[
     b"uname\r\n",
     b"write /hw-note.txt kept on the nvme root\r\n",
+    b"write /sata/hw-sata.txt kept on the sata disk\r\n",
+    b"ls /sata\r\n",
     b"app list\r\n",
     b"ls /usb\r\n",
     b"run ifconfig out use:net\r\n",
@@ -237,11 +243,18 @@ const HW_SCRIPT: &[&[u8]] = &[
 const HW_EXPECT: &[Expect] = &[
     Expect::Contains("(ABI 14)"),
     Expect::Contains("fs: formatted a blank disk"),
+    // The SATA disk (ADR-0069): identified, formatted, written.
+    Expect::Contains("ahci: port 0: QEMU HARDDISK (serial oceans-sata, firmware "),
+    Expect::Contains("ahci: port 0: 32768 sectors (16 MiB), 512-byte sectors"),
+    Expect::Contains("fs (satafs): formatted a blank disk: "),
+    Expect::Contains("fs: /sata: a mounted filesystem"),
+    Expect::Line("  hw-sata.txt"),
     Expect::Line("app: no apps installed"),
     // The boot stick itself, as removable media (ADR-0035): its ESP.
     Expect::Line("  EFI/"),
     Expect::Contains("cpu baseline (x86-64-v2, NX, APIC): SSE3 SSSE3"),
     Expect::Contains("NVMe SSD (any vendor): driver nvme (ADR-0040), attached"),
+    Expect::Contains("SATA AHCI controller (any vendor): driver ahci (ADR-0069), attached"),
     Expect::Contains("USB 3 xHCI controller (any vendor): driver xhci (ADR-0032)"),
     Expect::Contains("Intel 82574L Ethernet: driver e1000e (ADR-0041), attached"),
     Expect::Contains("Display controller: UEFI GOP framebuffer"),
@@ -249,11 +262,14 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("network: 10.0.2.15/24"),
     Expect::Line("tier 1 baseline: met"),
 ];
-/// The second boot: the root filesystem is still there.
-const HW_REBOOT_SCRIPT: &[&[u8]] = &[b"cat /hw-note.txt\r\n"];
+/// The second boot: the root filesystem and the SATA disk's files are
+/// still there.
+const HW_REBOOT_SCRIPT: &[&[u8]] = &[b"cat /hw-note.txt\r\n", b"cat /sata/hw-sata.txt\r\n"];
 const HW_REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept on the nvme root"),
+    Expect::Contains("fs (satafs): mounted the disk: generation"),
+    Expect::Line("kept on the sata disk"),
 ];
 
 /// `cargo xtask smoke-hw`: the USB image booted as a real PC would.
@@ -261,11 +277,14 @@ pub fn smoke_hw(profile: Profile) -> Result {
     let esp = build_image_for(profile, None, Setup::Hardware)?;
     write_usb_image(&esp)?;
     prepare_blank(HW_NVME_IMAGE, HW_NVME_SIZE, true)?;
-    println!("hardware boot 1 of 2: from the USB image, a blank NVMe SSD");
+    prepare_blank(HW_SATA_IMAGE, HW_SATA_SIZE, true)?;
+    println!("hardware boot 1 of 2: from the USB image, a blank NVMe SSD and SATA disk");
     hw_boot(HW_SCRIPT, HW_EXPECT)?;
-    println!("hardware boot 2 of 2: the same SSD");
+    println!("hardware boot 2 of 2: the same disks");
     hw_boot(HW_REBOOT_SCRIPT, HW_REBOOT_EXPECT)?;
-    println!("hardware smoke test passed: booted from the USB image; root on NVMe; e1000e; xHCI");
+    println!(
+        "hardware smoke test passed: booted from the USB image; root on NVMe; SATA; e1000e; xHCI"
+    );
     Ok(())
 }
 
@@ -287,6 +306,11 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
         .arg("-drive")
         .arg(format!("if=none,id=nvme0,format=raw,file={HW_NVME_IMAGE}"))
         .args(["-device", "nvme,serial=oceans-hw,drive=nvme0"])
+        // A SATA disk on q35's AHCI controller (its buses are ide.0 to
+        // ide.5, one per port): port 0.
+        .arg("-drive")
+        .arg(format!("if=none,id=sata0,format=raw,file={HW_SATA_IMAGE}"))
+        .args(["-device", "ide-hd,drive=sata0,bus=ide.0,serial=oceans-sata"])
         .args(["-netdev", "user,id=net0", "-device", "e1000e,netdev=net0"])
         .args([
             "-device",
@@ -455,6 +479,9 @@ mod tests {
         let fs = &hw[hw.find("service fs\n").unwrap()..];
         let fs = &fs[..fs.find("\n\n").unwrap()];
         assert!(fs.contains("    use = nvme as block\n"), "{fs}");
+        // The SATA disk stays at /sata (ADR-0069).
+        assert!(fs.contains("    use = satafs as mount:sata\n"), "{fs}");
+        assert!(hw.contains("service sata\n") && hw.contains("service satafs\n"));
         // Everything else is as it was.
         assert!(hw.contains("service display\n") && hw.contains("service core\n"));
         assert!(hardware_services("service fs\n    use = other\n\n").is_err());
