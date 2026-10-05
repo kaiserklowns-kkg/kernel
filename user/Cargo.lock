@@ -629,6 +629,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-hardware"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-heap"
 version = "0.1.0"
 
@@ -1126,6 +1130,7 @@ dependencies = [
  "oceans-block-proto",
  "oceans-core-proto",
  "oceans-fs-proto",
+ "oceans-hardware",
  "oceans-http",
  "oceans-input",
  "oceans-input-proto",

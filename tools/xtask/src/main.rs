@@ -14,6 +14,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod hardware;
+
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_PACKAGE: &str = "oceans-kernel";
 /// User programs (in the `user/` workspace) shipped as boot modules.
@@ -49,6 +51,7 @@ const USER_PROGRAMS: &[&str] = &[
     "fetch",
     "date",
     "lsusb",
+    "sysreport",
     "apps",
     "mouse",
     "ipc-test",
@@ -925,6 +928,8 @@ commands:
   image     build the kernel and assemble the EFI system partition in build/esp
   run       boot Oceans in QEMU with serial output on this terminal
   smoke     boot Oceans headless in QEMU and verify it comes online
+  usb       build/oceans-usb.img: the image a real machine boots from (ADR-0068)
+  smoke-hw  boot that image in QEMU as a real PC would (no virtio)
 
 environment:
   OCEANS_QEMU   path to qemu-system-x86_64
@@ -956,6 +961,8 @@ fn main() -> ExitCode {
         Some("image") => build_image(profile, None).map(drop),
         Some("run") => run(profile),
         Some("smoke") => smoke(profile),
+        Some("usb") => hardware::usb(profile),
+        Some("smoke-hw") => hardware::smoke_hw(profile),
         Some("help" | "--help" | "-h") | None => {
             println!("{USAGE}");
             Ok(())
@@ -1105,7 +1112,27 @@ fn fetch_limine() -> Result {
 /// boot/initrd                 the boot archive: every program and the
 ///                             service manifest (ADR-0025)
 /// ```
+/// Which services an image boots.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Setup {
+    /// `config/services.conf`: QEMU and development.
+    Normal,
+    /// `config/services-smoke.conf`, with the smoke test's command line.
+    Smoke,
+    /// The hardware profile (ADR-0068), made from `services.conf`.
+    Hardware,
+}
+
 fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
+    let setup = if cmdline.is_some() {
+        Setup::Smoke
+    } else {
+        Setup::Normal
+    };
+    build_image_for(profile, cmdline, setup)
+}
+
+fn build_image_for(profile: Profile, cmdline: Option<&str>, setup: Setup) -> Result<PathBuf> {
     let kernel = build_kernel(profile)?;
     let user = build_user()?;
 
@@ -1129,7 +1156,7 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
 
     copy(&limine_efi, &efi_boot.join("BOOTX64.EFI"))?;
     copy(&kernel, &esp.join("boot").join(KERNEL_PACKAGE))?;
-    let manifest = if cmdline.is_some() {
+    let manifest = if setup == Setup::Smoke {
         SMOKE_MANIFEST
     } else {
         MANIFEST
@@ -1141,8 +1168,12 @@ fn build_image(profile: Profile, cmdline: Option<&str>) -> Result<PathBuf> {
         files.push((program.to_string(), bytes));
     }
     let manifest_path = root().join(manifest);
-    let manifest_bytes = fs::read(&manifest_path)
+    let mut manifest_bytes = fs::read(&manifest_path)
         .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
+    if setup == Setup::Hardware {
+        let text = String::from_utf8(manifest_bytes).map_err(|_| "services.conf is not UTF-8")?;
+        manifest_bytes = hardware::hardware_services(&text)?.into_bytes();
+    }
     files.push(("services.conf".to_string(), manifest_bytes));
     build_ui()?;
     for (name, bytes) in build_go(GO_PROGRAMS)? {
@@ -2037,7 +2068,6 @@ fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
     fs::write(&path, vec![0u8; size]).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// A PPM (P6) screen capture: width, height, RGB bytes.
 /// Third-party apps for the smoke test (ADR-0062, the exit criterion of
 /// Phase 8): made, built and signed outside this repository with the SDK
 /// and its developer tool, as a developer would: a new key, a Rust app and
@@ -2129,6 +2159,7 @@ fn store_index(tiles: &[u8]) -> String {
     )
 }
 
+/// A PPM (P6) screen capture: width, height, RGB bytes.
 fn read_ppm(path: &Path) -> std::result::Result<(usize, usize, Vec<u8>), String> {
     let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut fields = Vec::new();
@@ -3344,37 +3375,6 @@ fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
     let _ = stream.write_all(&response);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base64_matches_rfc_4648() {
-        for (input, output) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(base64(input.as_bytes()), output, "{input:?}");
-        }
-    }
-
-    #[test]
-    fn the_roots_bundle_holds_every_root() {
-        let pem = ca_roots_pem().unwrap();
-        let roots = oceans_tls::parse_certificates(pem.as_bytes());
-        assert_eq!(roots.len(), oceans_tls::web_roots().roots.len());
-        assert!(roots.len() > 100);
-        for (parsed, original) in roots.iter().zip(webpki_root_certs::TLS_SERVER_ROOT_CERTS) {
-            assert_eq!(parsed.as_ref(), original.as_ref());
-        }
-    }
-}
-
 /// A response from the bridge, as the smoke test reads it.
 struct HttpReply {
     status: u16,
@@ -3793,5 +3793,36 @@ fn check_bridge(
             "unknown bridge step `{}`",
             String::from_utf8_lossy(other)
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_rfc_4648() {
+        for (input, output) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), output, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn the_roots_bundle_holds_every_root() {
+        let pem = ca_roots_pem().unwrap();
+        let roots = oceans_tls::parse_certificates(pem.as_bytes());
+        assert_eq!(roots.len(), oceans_tls::web_roots().roots.len());
+        assert!(roots.len() > 100);
+        for (parsed, original) in roots.iter().zip(webpki_root_certs::TLS_SERVER_ROOT_CERTS) {
+            assert_eq!(parsed.as_ref(), original.as_ref());
+        }
     }
 }

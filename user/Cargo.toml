@@ -36,6 +36,7 @@ oceans-elf = { path = "../libs/elf" }
 oceans-volume = { path = "../libs/volume" }
 oceans-fat = { path = "../libs/fat" }
 oceans-window = { path = "../libs/window" }
+oceans-hardware = { path = "../libs/hardware" }
 oceans-display-proto = { path = "display-proto" }
 oceans-sdk = { path = "sdk" }
 

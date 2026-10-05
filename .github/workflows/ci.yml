@@ -44,3 +44,5 @@ jobs:
         run: cargo xtask limine
       - name: Boot smoke test
         run: cargo xtask smoke
+      - name: Hardware smoke test (the USB image, booted as a real PC)
+        run: cargo xtask smoke-hw

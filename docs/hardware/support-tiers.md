@@ -1,6 +1,9 @@
 # Hardware support tiers
 
-Decision record: [ADR-0005](../adr/0005-hardware-targets.md).
+Decision records: [ADR-0005](../adr/0005-hardware-targets.md), [ADR-0068](../adr/0068-hardware-validation.md).
+
+**The Tier 1 list, the device matrix and how to validate a machine:
+[compatibility.md](compatibility.md).**
 
 | Tier | Meaning | Engineering commitment |
 |---|---|---|

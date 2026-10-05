@@ -23,6 +23,7 @@ controlled set of modern hardware instead of maximum compatibility.
 | 6 — AI Runtime | Go AI service, model gateway, agent runtime, tools | **Done** — exit criterion (an agent completes a permission-gated task) passes in `cargo xtask smoke`. ADR-0050: Go on Oceans (wasip1 modules in the Rust `gohost`, the `go/oceans` System API binding); ADR-0051: the AI runtime (`ai ask`: tools, approvals worded by the system, per-session capabilities, activity log; OpenAI-compatible model gateway); ADR-0052: Go apps as packages (`runtime = wasm`, run by Core through `gohost`); ADR-0053: directory grants (`storage:/PATH`), Go file binding, persistent AI settings; ADR-0054: model gateway with DNS and https (Go `crypto/tls`, roots from the image, `--ca`); ADR-0055: sensitive reads (`files_read`/`files_list`, approved per call, delegated folder) |
 | 7 — UI | Desktop, launcher, Settings, Store, AI Center, permission dialogs | **Done** — exit criterion (an app installed from the Store, confirmed in a system dialog, used in its window) passes in `cargo xtask smoke`. ADR-0056: UI architecture (native desktop and dialogs; SvelteKit apps through a bridge); ADR-0057: display service and desktop (ABI 13: framebuffer to userspace; launcher, Terminal, system-drawn permission dialogs); ADR-0058: the web experience (SvelteKit + Bun: Control Center, Apps, AI Center, Settings; served by the Go `bridge`, paired with `ui pair`); ADR-0059: keyboard focus and app windows (ABI 14: the keyboard to the desktop; the `window` permission; framed windows apps draw into, Ctrl+Tab; the Notes example); ADR-0060: windows for Go apps (`go/oceans/window`, the Tiles example); ADR-0061: the Store (catalogs over http(s), installs proposed by the browser and confirmed in a system dialog on the device) |
 | 8 — Developer platform | SDK, templates, developer tools, Rust/Go/SvelteKit/Bun support | **Done** — exit criterion (a third-party app built with the SDK) passes in `cargo xtask smoke`. ADR-0062: the SDK (`oceans-sdk` crate, `go/oceans`), templates (`sdk/templates`: rust, go) and the `oceans` developer tool (`new`, `keygen`, `build`, `serve`), guide in [sdk/](sdk/README.md); ADR-0063: trusting developers' keys at the console (`app trust`); ADR-0064: web apps (SvelteKit + Bun: `runtime = web`, the `sveltekit` template, served sandboxed by the bridge on port 8081 with a per-app data API); ADR-0065: notifications for apps (`notifications`, asked); ADR-0066: the network for web apps (https, once allowed); ADR-0067: developer keys that expire (`app trust add … --until`) |
+| 9 — Hardware validation | Tier 1 list, compatibility matrix, validation on real machines | **In progress** — exit criterion (the Tier 1 list published) met: [docs/hardware/compatibility.md](docs/hardware/compatibility.md). ADR-0068: the hardware profile (root on NVMe), the USB image (`cargo xtask usb`), `sysreport`, and `cargo xtask smoke-hw` (the image booted as a real PC: no virtio). Real machines: awaiting reports |
 
 Full roadmap: [docs/architecture/overview.md](docs/architecture/overview.md#roadmap).
 
@@ -36,6 +37,7 @@ cargo xtask limine   # fetch the Limine UEFI bootloader (once)
 cargo xtask run      # boot in QEMU; ends at the interactive `oceans>` shell
 cargo xtask smoke    # headless boot test used by CI
 cargo xtask check    # fmt + clippy + unit tests
+cargo xtask usb      # build/oceans-usb.img, to boot a real machine (docs/hardware)
 ```
 
 Details: [docs/development/getting-started.md](docs/development/getting-started.md).
@@ -59,6 +61,7 @@ libs/capability/    host-testable capability tables, rights, revocation
 libs/scheduler/     host-testable scheduling policy (run queue, sleep, slices)
 libs/abi/           system call ABI (v14) shared by kernel and userspace
 libs/window/        host-testable window protocol and window manager (ADR-0059)
+libs/hardware/      host-testable Tier 1 baseline and device table (ADR-0068)
 libs/acpi/          validating ACPI parser (RSDP, RSDT/XSDT, MADT)
 libs/elf/           strict ELF64 executable parser
 user/               userspace: oceans-rt runtime (+ heap), init, fs (+ fs-proto), shell, utils, services, tests

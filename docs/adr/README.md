@@ -75,5 +75,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0065](0065-notifications.md) | Notifications for apps | Accepted |
 | [0066](0066-web-apps-network.md) | The network for web apps | Accepted |
 | [0067](0067-expiring-developer-keys.md) | Developer keys that expire | Accepted |
+| [0068](0068-hardware-validation.md) | Hardware validation and the Tier 1 list | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

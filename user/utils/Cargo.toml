@@ -81,6 +81,12 @@ name = "apps"
 test = false
 bench = false
 
+
+[[bin]]
+name = "sysreport"
+test = false
+bench = false
+
 [dependencies]
 oceans-abi.workspace = true
 oceans-rt = { workspace = true, features = ["alloc"] }
@@ -93,3 +99,4 @@ oceans-usb.workspace = true
 oceans-input.workspace = true
 oceans-input-proto.workspace = true
 oceans-core-proto.workspace = true
+oceans-hardware.workspace = true

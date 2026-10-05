@@ -1,0 +1,9 @@
+[package]
+name = "oceans-hardware"
+description = "What Oceans supports (ADR-0068): the Tier 1 CPU baseline from CPUID, and what each PCI device gets; host-tested, shared by sysreport and the compatibility matrix"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
