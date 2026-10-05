@@ -31,6 +31,7 @@ const (
 	coreAudit      = 10
 	coreMint       = 11
 	corePropose    = 16
+	coreWebBundle  = 21
 
 	accessQuery = 1 << 0
 	accessRun   = 1 << 1
@@ -475,4 +476,42 @@ func (s *oceansSystem) Propose(pkg []byte) error {
 		return &apiError{502, "Oceans Core failed the request"}
 	}
 	return nil
+}
+
+// WebBundle asks Core for a web app's bundle (WEB_BUNDLE, ADR-0064).
+func (s *oceansSystem) WebBundle(id string) (string, []byte, error) {
+	core := s.core()
+	if core == 0 {
+		return "", nil, errNoCore
+	}
+	reply, err := oceans.Call(core, coreWebBundle, []byte(id), nil)
+	if err != nil {
+		return "", nil, err
+	}
+	if reply.Label != 0 {
+		for _, h := range reply.Handles {
+			_ = oceans.Close(h)
+		}
+		if e, ok := coreErrors[reply.Label]; ok {
+			return "", nil, e
+		}
+		return "", nil, &apiError{502, "Oceans Core failed the request"}
+	}
+	if len(reply.Handles) != 1 || len(reply.Data) < 8 {
+		for _, h := range reply.Handles {
+			_ = oceans.Close(h)
+		}
+		return "", nil, &apiError{502, "Oceans Core sent no bundle"}
+	}
+	defer func() { _ = oceans.Close(reply.Handles[0]) }()
+	// The object is rounded up to pages: the reply says how much is bundle.
+	length := binary.LittleEndian.Uint64(reply.Data)
+	if length > maxBundle {
+		return "", nil, &apiError{502, "the web bundle is too large"}
+	}
+	bundle := make([]byte, length)
+	if n, err := oceans.MemoryRead(reply.Handles[0], 0, bundle); err != nil || uint64(n) != length {
+		return "", nil, &apiError{502, "cannot read the web bundle"}
+	}
+	return string(reply.Data[8:]), bundle, nil
 }

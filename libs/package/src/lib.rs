@@ -18,6 +18,8 @@
 #[cfg(feature = "build")]
 extern crate alloc;
 
+pub mod web;
+
 #[cfg(test)]
 mod tests;
 
@@ -129,6 +131,9 @@ pub enum Runtime {
     /// A WebAssembly module built for wasip1 (a Go program, ADR-0050), run
     /// by the Go host.
     Wasm,
+    /// A web app (ADR-0064): a [`web`] bundle, served to a browser by the
+    /// bridge; nothing runs on Oceans itself.
+    Web,
 }
 
 impl Runtime {
@@ -136,22 +141,25 @@ impl Runtime {
         match self {
             Self::Native => "native",
             Self::Wasm => "wasm",
+            Self::Web => "web",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        [Self::Native, Self::Wasm]
+        [Self::Native, Self::Wasm, Self::Web]
             .into_iter()
             .find(|r| r.name() == name)
     }
 
     /// Whether `program` starts as this runtime's programs must: an ELF
-    /// header, or the WebAssembly magic and binary format version 1. The
-    /// rest is checked by whoever loads it (the kernel, the Go host).
+    /// header, the WebAssembly magic and binary format version 1, or a
+    /// whole web bundle that reads. The rest is checked by whoever loads it
+    /// (the kernel, the Go host, the bridge).
     pub fn accepts(self, program: &[u8]) -> bool {
         match self {
             Self::Native => program.starts_with(b"\x7fELF"),
             Self::Wasm => program.starts_with(b"\0asm\x01\0\0\0"),
+            Self::Web => web::read(program, |_, _| {}).is_ok(),
         }
     }
 }
@@ -355,9 +363,24 @@ impl<'a> Manifest<'a> {
         let runtime = match fields[10] {
             None => Runtime::Native,
             Some(name) => Runtime::from_name(name).ok_or(ManifestError::BadText(
-                "the runtime is neither native nor wasm",
+                "the runtime is not native, wasm or web",
             ))?,
         };
+        if service && runtime == Runtime::Web {
+            return Err(ManifestError::BadText(
+                "a web app cannot be a service: it runs in a browser",
+            ));
+        }
+        // A web app reaches the system only through the bridge's app API:
+        // its own data (ADR-0064).
+        if runtime == Runtime::Web
+            && requests
+                .iter()
+                .flatten()
+                .any(|r| r.permission != Permission::Storage)
+        {
+            return Err(ManifestError::BadText("a web app may ask only for storage"));
+        }
         let checks = [
             (
                 text_ok(name, MAX_NAME),
@@ -550,6 +573,7 @@ impl PackageError {
             Self::ApiTooNew => "needs a newer version of Oceans",
             Self::WrongFormat(Runtime::Native) => "the program is not an ELF executable",
             Self::WrongFormat(Runtime::Wasm) => "the program is not a WebAssembly module",
+            Self::WrongFormat(Runtime::Web) => "the web bundle is not valid",
         }
     }
 }

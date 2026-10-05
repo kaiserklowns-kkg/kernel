@@ -1,0 +1,43 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import adapter from '@sveltejs/adapter-static';
+
+// SvelteKit's route announcer carries a fixed style attribute: the policy
+// allows exactly it, by its hash, read from the installed SvelteKit.
+function announcerStyleHash() {
+	const kit = dirname(createRequire(import.meta.url).resolve('@sveltejs/kit/package.json'));
+	const source = readFileSync(join(kit, 'src/core/sync/write_root.js'), 'utf8');
+	const style = /id="svelte-announcer"[^>]*?style="([^"]+)"/.exec(source)?.[1];
+	if (!style) throw new Error('svelte.config.js: SvelteKit’s announcer style was not found');
+	return `sha256-${createHash('sha256').update(style).digest('base64')}`;
+}
+
+/** @type {import('@sveltejs/kit').Config} */
+const config = {
+	kit: {
+		// A single-page app of static files. The Oceans bridge serves it at
+		// /{{ID}}/ on the web apps' port, sandboxed (ADR-0064).
+		adapter: adapter({ pages: 'build', assets: 'build', fallback: 'index.html', precompress: true }),
+		paths: { base: '/{{ID}}', relative: false },
+		output: { bundleStrategy: 'single' },
+		// The page's policy (the bridge sends it, adding the sandbox): its own
+		// origin only, with the hash of SvelteKit's inline bootstrap script.
+		csp: {
+			mode: 'hash',
+			directives: {
+				'default-src': ['self'],
+				'script-src': ['self'],
+				'style-src': ['self', 'unsafe-hashes', /** @type {`sha256-${string}`} */ (announcerStyleHash())],
+				'img-src': ['self', 'data:'],
+				'connect-src': ['self'],
+				'object-src': ['none'],
+				'base-uri': ['none'],
+				'form-action': ['self']
+			}
+		}
+	}
+};
+
+export default config;

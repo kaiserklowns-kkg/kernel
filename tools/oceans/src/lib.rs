@@ -14,6 +14,8 @@ pub enum Template {
     Rust,
     /// A Go program (`runtime = wasm`) on the SDK's Go packages.
     Go,
+    /// A SvelteKit web app (`runtime = web`, ADR-0064), built with Bun.
+    SvelteKit,
 }
 
 impl Template {
@@ -21,6 +23,7 @@ impl Template {
         match name {
             "rust" => Some(Self::Rust),
             "go" => Some(Self::Go),
+            "sveltekit" => Some(Self::SvelteKit),
             _ => None,
         }
     }
@@ -62,6 +65,45 @@ impl Template {
                 (
                     "main.go",
                     include_str!("../../../sdk/templates/go/main.go.tmpl"),
+                ),
+            ],
+            Self::SvelteKit => &[
+                (
+                    "package.json",
+                    include_str!("../../../sdk/templates/sveltekit/package.json"),
+                ),
+                // Pinned: the same versions every time, never resolved anew.
+                (
+                    "bun.lock",
+                    include_str!("../../../sdk/templates/sveltekit/bun.lock"),
+                ),
+                (
+                    "svelte.config.js",
+                    include_str!("../../../sdk/templates/sveltekit/svelte.config.js.tmpl"),
+                ),
+                (
+                    "vite.config.js",
+                    include_str!("../../../sdk/templates/sveltekit/vite.config.js"),
+                ),
+                (
+                    "manifest",
+                    include_str!("../../../sdk/templates/sveltekit/manifest.tmpl"),
+                ),
+                (
+                    "src/app.html",
+                    include_str!("../../../sdk/templates/sveltekit/src/app.html.tmpl"),
+                ),
+                (
+                    "src/routes/+layout.js",
+                    include_str!("../../../sdk/templates/sveltekit/src/routes/+layout.js"),
+                ),
+                (
+                    "src/routes/+page.svelte",
+                    include_str!("../../../sdk/templates/sveltekit/src/routes/+page.svelte.tmpl"),
+                ),
+                (
+                    "src/lib/oceans.js",
+                    include_str!("../../../sdk/templates/sveltekit/src/lib/oceans.js"),
                 ),
             ],
         }
@@ -217,6 +259,7 @@ pub fn package(manifest_text: &str, program: &[u8], key: &DeveloperKey) -> Resul
             match manifest.runtime {
                 Runtime::Native => "native (ELF)",
                 Runtime::Wasm => "WebAssembly",
+                Runtime::Web => "web bundle",
             }
         ));
     }
@@ -228,6 +271,40 @@ pub fn package(manifest_text: &str, program: &[u8], key: &DeveloperKey) -> Resul
         &key.seed,
     )
     .map_err(|e| format!("cannot build the package: {e:?}"))
+}
+
+/// A web bundle (ADR-0064) of a SvelteKit build: every file under `dir`
+/// (`/`-separated paths), but Brotli copies (the bridge serves gzip).
+pub fn web_bundle(dir: &Path) -> Result<Vec<u8>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let entries = std::fs::read_dir(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "br") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(dir)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            files.push((relative, data));
+        }
+    }
+    files.sort();
+    let named: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, d)| (p.as_str(), d.as_slice()))
+        .collect();
+    oceans_package::web::write(&named).map_err(|e| format!("the web bundle: {e:?}"))
 }
 
 /// The package's file name in `dist/`: `ID-VERSION.opk`.

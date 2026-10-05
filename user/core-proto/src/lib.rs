@@ -92,6 +92,12 @@ pub mod op {
     /// trusted key (added: 1 if the user added it, 0 if from the boot
     /// image); `NotFound` past the last.
     pub const TRUSTED: u64 = 20;
+    /// data = id → handles = `[bundle]` (a read-only memory object holding
+    /// the web app's bundle, verified as for a start), data = `[length
+    /// u64]` (the bundle's bytes; the object is rounded up to pages) + its
+    /// version.
+    /// `CannotStart` if the app is not a web app (ADR-0064).
+    pub const WEB_BUNDLE: u64 = 21;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -134,9 +140,13 @@ pub mod access {
     pub fn needed(op: u64) -> Option<u8> {
         use super::op;
         Some(match op {
-            op::LIST | op::INFO | op::PERMISSION | op::WINDOW_OWNER | op::PENDING | op::TRUSTED => {
-                QUERY
-            }
+            op::LIST
+            | op::INFO
+            | op::PERMISSION
+            | op::WINDOW_OWNER
+            | op::PENDING
+            | op::TRUSTED
+            | op::WEB_BUNDLE => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE

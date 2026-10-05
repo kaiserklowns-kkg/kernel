@@ -13,6 +13,9 @@ type fake struct {
 	calls    []string
 	started  map[string]string
 	sessions uint32
+	// A web app's bundle (ADR-0064), and whether it is installed.
+	bundle []byte
+	webApp bool
 }
 
 func (f *fake) Info() (SystemInfo, error) {
@@ -20,7 +23,11 @@ func (f *fake) Info() (SystemInfo, error) {
 		Processes: []Process{{ID: 1, Name: "init", MemoryKiB: 64}}}, nil
 }
 func (f *fake) Apps() ([]App, error) {
-	return []App{{ID: "app.oceans.hello", Version: "1.0.0", Name: "Hello", Kind: "app", Runtime: "native"}}, nil
+	apps := []App{{ID: "app.oceans.hello", Version: "1.0.0", Name: "Hello", Kind: "app", Runtime: "native"}}
+	if f.webApp {
+		apps = append(apps, App{ID: "app.example.notes", Version: "1.0.0", Name: "Notes", Kind: "app", Runtime: "web"})
+	}
+	return apps, nil
 }
 func (f *fake) Start(id, args string) error {
 	if id != "app.oceans.hello" {
@@ -37,6 +44,10 @@ func (f *fake) Stop(id string) error {
 	return nil
 }
 func (f *fake) Permissions(id string) ([]Permission, error) {
+	if id == "app.example.notes" {
+		storage, _ := parsePermission([]byte{1, 0})
+		return []Permission{storage}, nil
+	}
 	p, _ := parsePermission([]byte{3, 3, 'w', 'h', 'y'})
 	return []Permission{p}, nil
 }
@@ -57,6 +68,14 @@ func (f *fake) Continue(session uint32, approve bool) (AISession, error) {
 	return AISession{Session: session, State: stateDone, Text: "left it"}, nil
 }
 func (f *fake) Activity() ([]string, error) { return []string{"asked: hi"}, nil }
+func (f *fake) WebBundle(id string) (string, []byte, error) {
+	if f.bundle == nil {
+		return "", nil, &apiError{404, "no such web app"}
+	}
+	f.calls = append(f.calls, "bundle "+id)
+	return "1.0.0", f.bundle, nil
+}
+
 func (f *fake) Propose(pkg []byte) error {
 	f.calls = append(f.calls, "propose "+string(pkg))
 	return nil

@@ -8,7 +8,7 @@
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
-	import { decision, kind, runtime } from '$lib/format';
+	import { decision, kind, runtime, webAppURL } from '$lib/format';
 	import { poll } from '$lib/poll';
 	import { describe, pairing } from '$lib/session.svelte';
 
@@ -122,7 +122,10 @@
 							{/if}
 						</div>
 						<div class="controls">
-							{#if app.running}
+							{#if app.runtime === 'web'}
+								<!-- A web app (ADR-0064) runs in the browser, from its own origin. -->
+								<a class="open" href={webAppURL(app.id, location)} target="_blank" rel="noopener noreferrer">Open</a>
+							{:else if app.running}
 								<Button variant="danger" size="s" loading={busy === app.id} disabled={busy !== '' && busy !== app.id} onclick={() => change(app, false)}>Stop</Button>
 							{:else}
 								<Button variant="primary" size="s" loading={busy === app.id} disabled={busy !== '' && busy !== app.id} onclick={() => change(app, true)}>Start</Button>
@@ -263,6 +266,22 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.open {
+		display: inline-flex;
+		align-items: center;
+		min-height: 32px;
+		padding: 0 var(--space-4);
+		border-radius: var(--radius-m);
+		background: var(--accent);
+		color: var(--on-accent);
+		font-weight: 600;
+		text-decoration: none;
+	}
+
+	.open:hover {
+		background: var(--accent-hover);
 	}
 
 	.facts {

@@ -97,6 +97,8 @@ const BRIDGE_WEB: &str = "go/cmd/bridge/web";
 /// The port the bridge listens on in the guest, and the host port `run`
 /// forwards to it (`OCEANS_BRIDGE_PORT`, default the same).
 const BRIDGE_PORT: u16 = 8080;
+/// The bridge's port for web apps (ADR-0064), forwarded beside it.
+const BRIDGE_APP_PORT: u16 = 8081;
 /// Go apps (ADR-0052): built the same way into `build/go`, but shipped as
 /// packages, not in the boot archive.
 const GO_APPS: &[(&str, &str)] = &[
@@ -385,6 +387,12 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app run app.example.counter\r\n",
     b"app install /keep/hello-go.opk\r\n",
     b"app run app.example.hello one two\r\n",
+    // A SvelteKit web app (ADR-0064): installed like any app, served by
+    // the bridge to the paired browser, never run on Oceans itself.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/third-party-notes.opk /keep/notes-web.opk\r\n",
+    b"app install /keep/notes-web.opk\r\n",
+    b"app run app.example.notes\r\n",
+    b"@bridge webapp",
     b"ui unpair\r\n",
     b"@bridge unpaired",
     b"ui unpair\r\n",
@@ -525,9 +533,10 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
     // Hello, Heartbeat, Greeter, Greeter Service (ADR-0052), Notes
-    // (ADR-0059), Tiles (ADR-0060) and the two third-party apps (ADR-0062),
-    // whose developer's key is still trusted (ADR-0063).
-    Expect::Contains("core: ready, 8 apps installed, 2 trusted publisher keys"),
+    // (ADR-0059), Tiles (ADR-0060) and the three third-party apps
+    // (ADR-0062, ADR-0064), whose developer's key is still trusted
+    // (ADR-0063).
+    Expect::Contains("core: ready, 9 apps installed, 2 trusted publisher keys"),
     Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
@@ -690,6 +699,10 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("Counter: "),
     Expect::Line("Hello Go: hello from app.example.hello 0.1.0, built with the Oceans SDK"),
     Expect::Line("Hello Go: 2 arguments"),
+    Expect::Line("app: installed app.example.notes 0.1.0"),
+    Expect::Contains(
+        "app: app.example.notes: a web app: open it from Apps in the Oceans web experience",
+    ),
     // A Go app's window (ADR-0060), installed from the Store (ADR-0061).
     Expect::Contains("bridge: the paired browser set the Store's source to http://10.0.2.2:"),
     Expect::Contains(
@@ -885,7 +898,7 @@ impl Expect {
 }
 /// Each smoke boot, start to finish. Boot 1 runs ~150 scripted steps, many
 /// with QEMU monitor pauses; CI runners without KVM are slow.
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(300);
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(480);
 /// How long the last command waits for the host's echo probes.
 const PROBE_WAIT: Duration = Duration::from_secs(30);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
@@ -1333,7 +1346,7 @@ fn qemu_command(
     nic: Nic,
     images: &Images<'_>,
     forward: Option<(u16, u16)>,
-    bridge: Option<u16>,
+    bridge: Option<(u16, u16)>,
     monitor: Option<u16>,
 ) -> Result<Command> {
     let Images {
@@ -1399,8 +1412,10 @@ fn qemu_command(
                 ",hostfwd=udp:127.0.0.1:{udp}-:7,hostfwd=tcp:127.0.0.1:{tcp}-:7"
             ));
         }
-        if let Some(port) = bridge {
-            netdev.push_str(&format!(",hostfwd=tcp:127.0.0.1:{port}-:{BRIDGE_PORT}"));
+        if let Some((port, apps)) = bridge {
+            netdev.push_str(&format!(
+                ",hostfwd=tcp:127.0.0.1:{port}-:{BRIDGE_PORT},hostfwd=tcp:127.0.0.1:{apps}-:{BRIDGE_APP_PORT}"
+            ));
         }
         netdev
     })
@@ -1512,6 +1527,10 @@ fn run(profile: Profile) -> Result {
         Err(_) => BRIDGE_PORT,
     };
     println!("the web experience: http://127.0.0.1:{bridge}/ (type `ui pair` in the shell)");
+    let apps = bridge
+        .checked_add(1)
+        .ok_or("OCEANS_BRIDGE_PORT is too high")?;
+    println!("web apps (ADR-0064): from http://127.0.0.1:{apps}/");
     run_command(&mut qemu_command(
         false,
         Nic::from_env()?,
@@ -1522,7 +1541,7 @@ fn run(profile: Profile) -> Result {
             spare_stick: None,
         },
         None,
-        Some(bridge),
+        Some((bridge, apps)),
         None,
     )?)
 }
@@ -2039,6 +2058,9 @@ fn build_third_party() -> Result {
         if let Some(go) = env::var_os("OCEANS_GO") {
             cmd.env("OCEANS_GO", go);
         }
+        if let Some(bun) = env::var_os("OCEANS_BUN") {
+            cmd.env("OCEANS_BUN", bun);
+        }
         run_command(&mut cmd)
     };
     oceans(&["keygen", "Example", "Developer"])?;
@@ -2046,6 +2068,9 @@ fn build_third_party() -> Result {
     oceans(&["new", "go", "app.example.hello", "--name", "Hello Go"])?;
     oceans(&["build", "counter", "--key", "oceans-developer.key"])?;
     oceans(&["build", "hello", "--key", "oceans-developer.key"])?;
+    // A web app (ADR-0064): SvelteKit, built with Bun.
+    oceans(&["new", "sveltekit", "app.example.notes"])?;
+    oceans(&["build", "notes", "--key", "oceans-developer.key"])?;
     let packages = root().join(PACKAGES_DIR);
     for (from, to) in [
         (
@@ -2055,6 +2080,10 @@ fn build_third_party() -> Result {
         (
             "hello/dist/app.example.hello-0.1.0.opk",
             "third-party-hello.opk",
+        ),
+        (
+            "notes/dist/app.example.notes-0.1.0.opk",
+            "third-party-notes.opk",
         ),
     ] {
         copy(&dir.join(from), &packages.join(to))?;
@@ -2075,7 +2104,7 @@ fn build_third_party() -> Result {
         oceans_package::public_key_hex(&bytes),
     )
     .map_err(|e| format!("cannot write the developer's public key: {e}"))?;
-    println!("third-party apps built with the SDK: a Rust app and a Go app");
+    println!("third-party apps built with the SDK: a Rust app, a Go app and a SvelteKit web app");
     Ok(())
 }
 
@@ -2345,6 +2374,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     };
     let monitor_port = free_tcp_port()?;
     let bridge_port = free_tcp_port()?;
+    let apps_port = free_tcp_port()?;
     // The pairing code `ui pair` printed (ADR-0058), for `@bridge`.
     let mut pairing_code: Option<String> = None;
     let mut child = qemu_command(
@@ -2357,7 +2387,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             spare_stick: Some(SMOKE_FAT_IMAGE),
         },
         Some((udp_forward, tcp_forward)),
-        Some(bridge_port),
+        Some((bridge_port, apps_port)),
         Some(monitor_port),
     )?
     .stdin(Stdio::piped())
@@ -2474,9 +2504,12 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                             press_usb_keys(monitor_port, text)?;
                             thread::sleep(MONITOR_SETTLE);
                         } else if let Some(step) = command.strip_prefix(b"@bridge ") {
-                            if let Err(error) =
-                                check_bridge(step, bridge_port, http_port, pairing_code.as_deref())
-                            {
+                            if let Err(error) = check_bridge(
+                                step,
+                                (bridge_port, apps_port),
+                                http_port,
+                                pairing_code.as_deref(),
+                            ) {
                                 let _ = child.kill();
                                 let _ = child.wait();
                                 return Err(error);
@@ -2983,6 +3016,11 @@ fn press_usb_keys(port: u16, text: &[u8]) -> Result {
     Ok(())
 }
 
+/// An `Authorization` header with `token`.
+fn bearer_for(token: &str) -> String {
+    format!("Authorization: Bearer {token}")
+}
+
 /// `@screen X Y RRGGBB WHAT`: captures the screen until pixel `X`, `Y` has
 /// colour `RRGGBB` (an app may take a while to draw), or fails after a
 /// minute.
@@ -3431,7 +3469,12 @@ fn expect_reply(reply: &HttpReply, what: &str, status: u16, contains: &[&str]) -
 /// `paired` after `ui pair` (the page, refusals without the code, the
 /// System API with it, apps started and stopped, an AI action approved
 /// from the browser), `unpaired` after `ui unpair` (the code is dead).
-fn check_bridge(step: &[u8], port: u16, http_port: u16, code: Option<&str>) -> Result {
+fn check_bridge(
+    step: &[u8],
+    (port, apps_port): (u16, u16),
+    http_port: u16,
+    code: Option<&str>,
+) -> Result {
     let code = code.ok_or("bridge: `ui pair` printed no pairing code")?;
     let bearer = format!("Authorization: Bearer {code}");
     let auth = [bearer.as_str()];
@@ -3632,6 +3675,102 @@ fn check_bridge(step: &[u8], port: u16, http_port: u16, code: Option<&str>) -> R
                 "installing Tiles",
                 202,
                 &["confirm on the device"],
+            )?;
+            Ok(())
+        }
+        // A web app (ADR-0064): its page only for the paired browser,
+        // sandboxed, with a token of its own; its files public; its API
+        // only for its token, and only its own data.
+        b"webapp" => {
+            let app = |method: &str, path: &str, headers: &[&str], body: Option<&str>| {
+                bridge_request(apps_port, method, path, headers, body)
+            };
+            expect_reply(
+                &get("/api/apps", &auth)?,
+                "the web app in the list",
+                200,
+                &["\"id\":\"app.example.notes\"", "\"runtime\":\"web\""],
+            )?;
+            expect_reply(
+                &app("GET", "/app.example.notes/", &[], None)?,
+                "the page unpaired",
+                401,
+                &[],
+            )?;
+            let login = post("/api/session", &[], &format!(r#"{{"token":"{code}"}}"#))?;
+            let cookie = login
+                .header("set-cookie")
+                .and_then(|c| c.split(';').next())
+                .ok_or("bridge: the login set no cookie")?
+                .to_string();
+            let with_cookie = format!("Cookie: {cookie}");
+            let page = app("GET", "/app.example.notes/", &[&with_cookie], None)?;
+            expect_reply(
+                &page,
+                "the web app's page",
+                200,
+                &["name=\"oceans-app-token\""],
+            )?;
+            let policy = page.header("content-security-policy").unwrap_or("");
+            if !policy.contains("sandbox allow-scripts allow-forms")
+                || policy.contains("allow-same-origin")
+            {
+                return Err(format!("bridge: the web app's policy is {policy:?}"));
+            }
+            let html = page.text();
+            let token = html
+                .split("name=\"oceans-app-token\" content=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .ok_or("bridge: no token in the web app's page")?
+                .to_string();
+            let script = html
+                .split('"')
+                .find(|part| {
+                    part.starts_with("/app.example.notes/_app/immutable/") && part.ends_with(".js")
+                })
+                .ok_or("bridge: the web app's page names no script")?;
+            let asset = app("GET", script, &[], None)?;
+            expect_reply(&asset, "the web app's script", 200, &[])?;
+            if asset.header("access-control-allow-origin") != Some("*") {
+                return Err(
+                    "bridge: the web app's script is not open to its sandboxed page".into(),
+                );
+            }
+            let bearer = format!("Authorization: Bearer {token}");
+            expect_reply(
+                &app(
+                    "PUT",
+                    "/app.example.notes/api/data/note",
+                    &[&bearer],
+                    Some("remember the web"),
+                )?,
+                "storing a note",
+                204,
+                &[],
+            )?;
+            expect_reply(
+                &app("GET", "/app.example.notes/api/data/note", &[&bearer], None)?,
+                "the note",
+                200,
+                &["remember the web"],
+            )?;
+            expect_reply(
+                &app(
+                    "GET",
+                    "/app.example.notes/api/data/note",
+                    &[&bearer_for(code)],
+                    None,
+                )?,
+                "the system's code as an app token",
+                403,
+                &[],
+            )?;
+            expect_reply(
+                &app("GET", "/app.oceans.hello/api/data/note", &[&bearer], None)?,
+                "another app's data",
+                403,
+                &[],
             )?;
             Ok(())
         }

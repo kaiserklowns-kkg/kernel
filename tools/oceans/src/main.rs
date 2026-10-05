@@ -18,7 +18,7 @@ use oceans_dev::{DeveloperKey, Project, Template, package, package_name, sdk_roo
 
 const USAGE: &str = "\
 usage:
-  oceans new rust|go ID [DIR] [--name NAME] [--publisher NAME]
+  oceans new rust|go|sveltekit ID [DIR] [--name NAME] [--publisher NAME]
       a new app from a template (DIR defaults to the id's last part)
   oceans keygen PUBLISHER [--out FILE]
       a developer key signing as PUBLISHER (default file: oceans-developer.key)
@@ -30,7 +30,7 @@ usage:
       serves DIR/dist/ as a store (index.json and packages) on PORT (8000)
 
 environment: OCEANS_SDK (the SDK's root; default: where this tool was built),
-OCEANS_GO (the Go command, default `go`)";
+OCEANS_GO (the Go command, default `go`), OCEANS_BUN (Bun, default `bun`)";
 
 type Result<T = ()> = std::result::Result<T, String>;
 
@@ -99,7 +99,7 @@ fn new(args: &[String]) -> Result {
         [template, id, dir] => (*template, *id, Some(*dir)),
         _ => return Err(USAGE.into()),
     };
-    let template = Template::from_name(template).ok_or("templates: rust, go")?;
+    let template = Template::from_name(template).ok_or("templates: rust, go, sveltekit")?;
     let last = id.rsplit('.').next().unwrap_or(id);
     let default_name = {
         let mut chars = last.chars();
@@ -133,6 +133,7 @@ fn new(args: &[String]) -> Result {
         match template {
             Template::Rust => "Rust",
             Template::Go => "Go",
+            Template::SvelteKit => "SvelteKit",
         },
         project.id,
         dir.display(),
@@ -193,6 +194,19 @@ fn build(args: &[String]) -> Result {
                     .current_dir(&dir),
             )?;
             dir.join("target/x86_64-unknown-none/release").join(program)
+        }
+        oceans_package::Runtime::Web => {
+            let bun = std::env::var("OCEANS_BUN").unwrap_or_else(|_| "bun".into());
+            status(
+                Command::new(&bun)
+                    .args(["install", "--frozen-lockfile"])
+                    .current_dir(&dir),
+            )?;
+            status(Command::new(&bun).args(["run", "build"]).current_dir(&dir))?;
+            let out = dir.join("build").join(manifest.entry);
+            let bundle = oceans_dev::web_bundle(&dir.join("build"))?;
+            fs::write(&out, bundle).map_err(|e| format!("{}: {e}", out.display()))?;
+            out
         }
         oceans_package::Runtime::Wasm => {
             let out = dir.join("build").join(manifest.entry);

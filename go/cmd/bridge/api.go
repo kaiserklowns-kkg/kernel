@@ -34,6 +34,9 @@ type system interface {
 	// Propose hands a downloaded package to Core, to install once the
 	// user confirms on the device (ADR-0061).
 	Propose(pkg []byte) error
+	// WebBundle is a web app's version and bundle, verified by Core
+	// (ADR-0064).
+	WebBundle(id string) (string, []byte, error)
 }
 
 type SystemInfo struct {
@@ -111,10 +114,18 @@ type bridge struct {
 	log      func(string)
 	// The Store (nil: none on this system).
 	store storeClient
+	// Web apps (ADR-0064): their sites, the tokens their pages got, their
+	// data (nil: no storage).
+	webApps   map[string]*webApp
+	appTokens map[string]string
+	appData   appData
 }
 
 func newBridge(sys system, site *site, log func(string)) *bridge {
-	return &bridge{sys: sys, sessions: map[uint32]string{}, site: site, log: log}
+	return &bridge{
+		sys: sys, sessions: map[uint32]string{}, site: site, log: log,
+		webApps: map[string]*webApp{}, appTokens: map[string]string{},
+	}
 }
 
 // pair accepts a new token (and forgets the old one and its sessions).
@@ -124,6 +135,7 @@ func (b *bridge) pair(token string) error {
 	}
 	b.token = token
 	b.sessions = map[uint32]string{}
+	b.appTokens = map[string]string{}
 	return nil
 }
 
@@ -131,6 +143,8 @@ func (b *bridge) unpair() bool {
 	was := b.token != ""
 	b.token = ""
 	b.sessions = map[uint32]string{}
+	// Web app pages lose their API with the pairing.
+	b.appTokens = map[string]string{}
 	return was
 }
 

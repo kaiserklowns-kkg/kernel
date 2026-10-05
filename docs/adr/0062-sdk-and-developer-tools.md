@@ -1,6 +1,6 @@
 # ADR-0062: The Oceans SDK and developer tools
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0064: SvelteKit/Bun apps run as web apps through the bridge)
 - Date: 2026-10-05
 - Depends on: ADR-0045 (API level 1), ADR-0046 (packages), ADR-0050 and
   ADR-0052 (Go apps), ADR-0059 to ADR-0061 (windows, the Store),

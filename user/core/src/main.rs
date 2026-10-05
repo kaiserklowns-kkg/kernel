@@ -69,6 +69,8 @@ const RESTART_DELAY_MS: u64 = 1000;
 const MAX_PACKAGE: u64 = 32 << 20;
 /// Bytes moved per filesystem request.
 const FILE_BUFFER: usize = 128 * 1024;
+/// Why a web app does not start on Oceans (ADR-0064).
+const WEB_APP: &str = "a web app: open it from Apps in the Oceans web experience";
 /// Developers' keys the user trusts (ADR-0063), in `/system`.
 const TRUST_FILE: &str = "trust.keys";
 /// Audit entries kept in memory for `AUDIT` (all go to the log file).
@@ -763,6 +765,7 @@ impl Core {
                     op::DISABLE => self.disable(data),
                     op::WINDOW_OWNER => self.window_owner(data, reply),
                     op::PENDING => self.pending(reply),
+                    op::WEB_BUNDLE => self.web_bundle(data, reply, reply_handle),
                     op::TRUST => self.change_trust(data),
                     op::TRUSTED => {
                         let index = u32_at(data)? as usize;
@@ -903,6 +906,41 @@ impl Core {
             "{id}\0{version}\0{}",
             previous.map(|v| alloc::format!("{v}")).unwrap_or_default()
         );
+        Ok(())
+    }
+
+    // ---- Web apps (ADR-0064) ---------------------------------------------------
+
+    /// `WEB_BUNDLE`: a web app's files, verified as a start verifies a
+    /// program, for the bridge to serve.
+    fn web_bundle(
+        &self,
+        data: &[u8],
+        reply: &mut Vec<u8>,
+        reply_handle: &mut Option<Handle>,
+    ) -> Result<(), Refusal> {
+        let id = id_of(data)?;
+        let app = self.app(id)?;
+        if app.runtime != Runtime::Web {
+            return Err(Refusal {
+                status: Status::CannotStart,
+                text: Some("not a web app".to_owned()),
+            });
+        }
+        let (key, version) = (app.key, app.version);
+        let bytes = self.read_app_file(id, "package.opk")?;
+        let trust = self.trust();
+        let package = Package::open(&bytes, &trust).map_err(invalid)?;
+        if package.manifest.id != id || package.key != key || package.manifest.version != version {
+            return Err(invalid(PackageError::BadSignature));
+        }
+        let bundle = package.entry();
+        let memory = memory_with(bundle).ok_or(Status::CannotStart)?;
+        let shared = oceans_rt::duplicate(memory, rights::READ | rights::MAP | rights::TRANSFER);
+        let _ = oceans_rt::close(memory);
+        *reply_handle = Some(shared.map_err(|_| Status::CannotStart)?);
+        reply.extend_from_slice(&(bundle.len() as u64).to_le_bytes());
+        let _ = write!(Text(reply), "{version}");
         Ok(())
     }
 
@@ -1279,6 +1317,12 @@ impl Core {
             let id = id_of(rest.get(..id_len).ok_or(Status::BadRequest)?)?.to_owned();
             let args = core::str::from_utf8(&rest[id_len..]).map_err(|_| Status::BadRequest)?;
             let app = self.app(&id)?;
+            if app.runtime == Runtime::Web {
+                return Err(Refusal {
+                    status: Status::CannotStart,
+                    text: Some(WEB_APP.to_owned()),
+                });
+            }
             let detach = flags_byte & run_flags::DETACH != 0 || app.service;
             let service = app.service;
             if self.slot_of(&id).is_some() {
@@ -1345,6 +1389,14 @@ impl Core {
                             });
                         }
                     }
+                }
+                // Refused above; never spawned.
+                Runtime::Web => {
+                    let _ = oceans_rt::close(program);
+                    return Err(Refusal {
+                        status: Status::CannotStart,
+                        text: Some(WEB_APP.to_owned()),
+                    });
                 }
             };
             // A window end of its own, badged so the display service can ask

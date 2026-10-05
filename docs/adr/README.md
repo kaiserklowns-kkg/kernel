@@ -69,7 +69,8 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0059](0059-keyboard-focus-and-app-windows.md) | Keyboard focus and app windows (ABI 14) | Accepted |
 | [0060](0060-go-windows.md) | Windows for Go apps | Accepted |
 | [0061](0061-store.md) | The Store, and the end of Phase 7 | Accepted |
-| [0062](0062-sdk-and-developer-tools.md) | The Oceans SDK and developer tools | Accepted |
+| [0062](0062-sdk-and-developer-tools.md) | The Oceans SDK and developer tools | Accepted (amended by 0064) |
 | [0063](0063-developer-keys.md) | Trusting developers' keys | Accepted |
+| [0064](0064-web-apps.md) | Web apps (SvelteKit and Bun), and the end of Phase 8 | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

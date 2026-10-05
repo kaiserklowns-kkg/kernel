@@ -61,7 +61,16 @@ export function kind(text: string): string {
 export function runtime(text: string): string {
 	if (text === 'wasm') return 'Go (WebAssembly)';
 	if (text === 'native') return 'Native';
+	if (text === 'web') return 'Web (SvelteKit)';
 	return text;
+}
+
+/** The port web apps are served from (ADR-0064): their own origin. */
+export const webAppPort = 8081;
+
+/** Where a web app opens, beside this page's host. */
+export function webAppURL(id: string, location: { protocol: string; hostname: string }): string {
+	return `${location.protocol}//${location.hostname}:${webAppPort}/${encodeURIComponent(id)}/`;
 }
 
 /** A pairing code as typed: hex digits, spaces and dashes ignored. */

@@ -1,0 +1,77 @@
+<script>
+	import { onMount } from 'svelte';
+	import { load, save } from '$lib/oceans.js';
+
+	let text = $state('');
+	let status = $state('Loading…');
+
+	onMount(async () => {
+		try {
+			text = (await load('note')) ?? '';
+			status = 'Saved notes are kept on your Oceans system.';
+		} catch (e) {
+			status = String(e);
+		}
+	});
+
+	async function keep() {
+		status = 'Saving…';
+		try {
+			await save('note', text);
+			status = 'Saved.';
+		} catch (e) {
+			status = String(e);
+		}
+	}
+</script>
+
+<main>
+	<h1>{{NAME}}</h1>
+	<p class="muted">An Oceans web app, made with SvelteKit and the Oceans SDK.</p>
+	<label for="note">Note</label>
+	<textarea id="note" bind:value={text} rows="8" maxlength="16000"></textarea>
+	<button onclick={keep}>Save</button>
+	<p role="status" class="muted">{status}</p>
+</main>
+
+<style>
+	:global(body) {
+		margin: 0;
+		font: 16px/1.5 system-ui, sans-serif;
+		background: #0b1220;
+		color: #e6edf6;
+	}
+
+	main {
+		max-width: 640px;
+		margin: 0 auto;
+		padding: 32px 16px;
+		display: grid;
+		gap: 12px;
+	}
+
+	.muted {
+		color: #8a97ab;
+	}
+
+	textarea {
+		font: inherit;
+		padding: 12px;
+		border-radius: 8px;
+		border: 1px solid #26324a;
+		background: #121a2b;
+		color: inherit;
+	}
+
+	button {
+		justify-self: start;
+		font: inherit;
+		font-weight: 600;
+		padding: 8px 20px;
+		border: 0;
+		border-radius: 8px;
+		background: #3b9eff;
+		color: #0b1220;
+		cursor: pointer;
+	}
+</style>

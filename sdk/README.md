@@ -1,8 +1,8 @@
 # The Oceans SDK
 
-Build apps for Oceans in Rust or Go, sign them with your own developer key,
-and install them on an Oceans system. The SDK is described in ADR-0062 and
-developer keys in ADR-0063.
+Build apps for Oceans in Rust, Go or SvelteKit, sign them with your own
+developer key, and install them on an Oceans system. The SDK is described
+in ADR-0062, developer keys in ADR-0063 and web apps in ADR-0064.
 
 ## What is in it
 
@@ -10,7 +10,8 @@ developer keys in ADR-0063.
 |---|---|
 | Rust API (API level 1) | the `oceans-sdk` crate, [`user/sdk`](../user/sdk) |
 | Go API | the packages under [`go/oceans`](../go/oceans) (`oceans`, `fs`, `tcp`, `udp`, `dns`, `window`) |
-| Templates | [`sdk/templates`](templates): `rust`, `go` |
+| Web apps (SvelteKit, Bun) | the `sveltekit` template and its `src/lib/oceans.js` (the app API) |
+| Templates | [`sdk/templates`](templates): `rust`, `go`, `sveltekit` |
 | The developer tool | `oceans`, built from [`tools/oceans`](../tools/oceans) |
 | Examples | Rust: [Hello](../user/apps/hello), [Notes](../user/apps/notes) (a window). Go: [Greeter](../go/apps/greeter), [Tiles](../go/apps/tiles) (a window) |
 
@@ -31,7 +32,7 @@ never use kernel or service internals: only what is listed here.
 ## Getting started
 
 You need this repository (the SDK), Rust (the pinned toolchain installs
-itself) and, for Go apps, Go 1.26.
+itself), and Go 1.26 for Go apps or Bun 1.3 for web apps.
 
 Build the tool once:
 
@@ -56,8 +57,9 @@ The tool is then at `target/release/oceans` (`oceans.exe` on Windows).
    oceans new rust app.yourname.hello --publisher "Your Name"
    ```
 
-   Or `oceans new go …`. The app's `manifest` says who it is, what it runs
-   and the permissions it asks for. Oceans gives it nothing else.
+   Or `oceans new go …`, or `oceans new sveltekit …` for a web app. The
+   app's `manifest` says who it is, what it runs and the permissions it
+   asks for. Oceans gives it nothing else.
 3. **Build and sign:**
 
    ```bash
@@ -83,6 +85,22 @@ The tool is then at `target/release/oceans` (`oceans.exe` on Windows).
    Then set `http://YOUR-MACHINE:8000` as the Store's URL in the Oceans
    web app. Oceans asks on its own screen before installing.
 6. **Run it:** `app run app.yourname.hello`, or click it in the launcher.
+   A web app opens instead from **Apps → Open** in the Oceans web
+   experience.
+
+## Web apps
+
+A web app (`runtime = web`) is a SvelteKit app, built with Bun and signed
+like any other. The bridge serves it to the paired browser at
+`http://OCEANS:8081/ID/`:
+
+- **Sandboxed and on its own origin:** no cookies, no browser storage,
+  and no way into the system's pages or other apps.
+- **Its data:** it keeps data through the app API in `src/lib/oceans.js`
+  (`load(name)`, `save(name, text)`; at most 16 KiB per name). Its manifest
+  must ask for `storage`, and may ask for nothing else.
+- **Not on the device yet:** it runs in the paired browser; the same app
+  will run on Oceans once it has a web view (ADR-0056).
 
 ## Rules an app lives by
 

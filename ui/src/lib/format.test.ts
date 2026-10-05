@@ -1,5 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { decision, kind, memoryTone, normalizeCode, plausibleCode, runtime, size, uptime, usedPercent } from './format';
+import {
+	decision,
+	kind,
+	memoryTone,
+	normalizeCode,
+	plausibleCode,
+	runtime,
+	size,
+	uptime,
+	usedPercent,
+	webAppURL
+} from './format';
 
 describe('uptime', () => {
 	test('scales to the largest useful unit', () => {
@@ -47,5 +58,14 @@ describe('words', () => {
 		expect(plausibleCode('0123456789abcdef0123456789abcdef')).toBe(true);
 		expect(plausibleCode('0123')).toBe(false);
 		expect(plausibleCode('g123456789abcdef0123456789abcdef')).toBe(false);
+	});
+});
+
+describe('web apps', () => {
+	test('open on their own port, beside the page', () => {
+		expect(webAppURL('app.example.notes', { protocol: 'http:', hostname: '10.0.2.15' })).toBe(
+			'http://10.0.2.15:8081/app.example.notes/'
+		);
+		expect(runtime('web')).toBe('Web (SvelteKit)');
 	});
 });

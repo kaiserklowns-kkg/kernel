@@ -12,7 +12,7 @@ fn project() -> Project {
 #[test]
 fn templates_are_filled_completely() {
     let p = project();
-    for template in [Template::Rust, Template::Go] {
+    for template in [Template::Rust, Template::Go, Template::SvelteKit] {
         for (path, text) in template.files() {
             let filled = p.fill(text);
             assert!(
@@ -36,10 +36,10 @@ fn templates_are_filled_completely() {
         assert_eq!(parsed.publisher, "Example Developer");
         assert_eq!(
             parsed.entry,
-            if template == Template::Rust {
-                "hello"
-            } else {
-                "hello.wasm"
+            match template {
+                Template::Rust => "hello",
+                Template::Go => "hello.wasm",
+                Template::SvelteKit => "web.bundle",
             }
         );
     }
@@ -130,4 +130,20 @@ fn the_store_index_lists_packages_with_their_hashes() {
     assert!(index.contains("\"permissions\":[\"console\",\"storage\"]"));
     assert!(index.contains(&format!("\"size\":{}", pkg.len())));
     assert!(!index.contains("broken.opk"));
+}
+
+#[test]
+fn sveltekit_builds_become_web_bundles() {
+    let dir = std::env::temp_dir().join(format!("oceans-dev-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("_app/immutable")).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
+    std::fs::write(dir.join("index.html.br"), "brotli").unwrap();
+    std::fs::write(dir.join("_app/immutable/start.js"), "export {}").unwrap();
+    let bundle = web_bundle(&dir).unwrap();
+    let mut paths = Vec::new();
+    oceans_package::web::read(&bundle, |path, _| paths.push(path.to_string())).unwrap();
+    assert_eq!(paths, ["_app/immutable/start.js", "index.html"]);
+    assert!(oceans_package::Runtime::Web.accepts(&bundle));
+    let _ = std::fs::remove_dir_all(&dir);
 }

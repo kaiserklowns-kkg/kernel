@@ -408,3 +408,69 @@ fn the_bridge_catalog_matches() {
         assert_eq!(entry, want);
     }
 }
+
+#[test]
+fn web_bundles_round_trip_and_are_checked() {
+    let files: [(&str, &[u8]); 3] = [
+        ("index.html", b"<!doctype html>"),
+        ("_app/immutable/entry/start.abc123.js", b"export {}"),
+        ("favicon.svg", b"<svg/>"),
+    ];
+    let bundle = web::write(&files).unwrap();
+    let mut read = Vec::new();
+    web::read(&bundle, |path, data| read.push((path, data))).unwrap();
+    assert_eq!(read, files);
+    assert!(Runtime::Web.accepts(&bundle));
+    assert!(!Runtime::Web.accepts(b"OCEANSWB"));
+
+    for bad in [
+        "",
+        "/etc/passwd",
+        "a/../b",
+        "a//b",
+        ".hidden",
+        "a/.git/x",
+        "sp ace.js",
+        "back\\slash",
+    ] {
+        assert!(!web::valid_path(bad), "{bad}");
+        assert_eq!(
+            web::write(&[(bad, b"x")]),
+            Err(web::BundleError::BadPath),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        web::write(&[("a.js", b"1"), ("a.js", b"2")]),
+        Err(web::BundleError::DuplicatePath)
+    );
+    // Cut short, or with bytes after the last file.
+    assert_eq!(
+        web::read(&bundle[..bundle.len() - 1], |_, _| {}),
+        Err(web::BundleError::Truncated)
+    );
+    let mut longer = bundle.clone();
+    longer.push(0);
+    assert_eq!(
+        web::read(&longer, |_, _| {}),
+        Err(web::BundleError::Trailing)
+    );
+    // A path that lies about its length.
+    let mut lying = bundle.clone();
+    lying[16] = 0xff;
+    assert!(web::read(&lying, |_, _| {}).is_err());
+}
+
+#[test]
+fn web_apps_cannot_be_services() {
+    let manifest = MANIFEST_TEXT.replace(
+        "entry = hello",
+        "entry = web.bundle\nruntime = web\nkind = service",
+    );
+    assert!(Manifest::parse(&manifest).is_err());
+    // Asking for the network: refused (a web app has only its data).
+    let manifest = MANIFEST_TEXT.replace("entry = hello", "entry = web.bundle\nruntime = web");
+    assert!(Manifest::parse(&manifest).is_err());
+    let manifest = manifest.replace("permission = network: fetch today's greeting\n", "");
+    assert_eq!(Manifest::parse(&manifest).unwrap().runtime, Runtime::Web);
+}

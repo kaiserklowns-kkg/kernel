@@ -42,6 +42,8 @@ const port = 8080
 const (
 	connectionBit = 1 << 0
 	retryBit      = 1 << 1
+	// A connection waits on the web apps' port (ADR-0064).
+	appConnectionBit = 1 << 2
 )
 
 // Time limits: reading one request, each write wait, and retrying the
@@ -58,7 +60,9 @@ type service struct {
 	net      oceans.Handle
 	events   oceans.Handle
 	listener *tcp.Listener
-	retries  int
+	// The web apps' port (ADR-0064).
+	apps    *tcp.Listener
+	retries int
 	// The paired Core capability; 0 while unpaired.
 	core   oceans.Handle
 	bridge *bridge
@@ -87,9 +91,11 @@ func main() {
 	}
 	sys := &oceansSystem{sysinfo: sysinfo, ai: ai, core: func() oceans.Handle { return s.core }}
 	s.bridge = newBridge(sys, web, s.say)
-	// The Store (ADR-0061): the network, and storage for its URL.
+	// The Store (ADR-0061): the network, and storage for its URL. Web
+	// apps' data (ADR-0064) lives there too.
 	if storage, ok := oceans.Find("use", "storage"); ok && s.net != 0 {
 		s.bridge.store = newOceansStore(s.net, fs.FromHandle(storage), s.say)
+		s.bridge.appData = oceansAppData{storage: fs.FromHandle(storage)}
 	} else {
 		s.say("no storage or network: the Store is not available")
 	}
@@ -119,7 +125,10 @@ func main() {
 				s.listen()
 			}
 			if msg.Signals&connectionBit != 0 {
-				s.serveWaiting()
+				s.serveWaiting(s.listener, s.bridge.serve)
+			}
+			if msg.Signals&appConnectionBit != 0 {
+				s.serveWaiting(s.apps, s.bridge.serveApp)
 			}
 			continue
 		}
@@ -149,6 +158,11 @@ func (s *service) listen() {
 		return
 	}
 	s.listener = listener
+	if apps, err := tcp.Listen(s.net, appPort, s.events, appConnectionBit); err == nil {
+		s.apps = apps
+	} else {
+		s.say("cannot listen on TCP port " + strconv.Itoa(appPort) + " for web apps: " + err.Error())
+	}
 	files := len(s.bridge.site.files)
 	s.say("serving the Oceans web experience on TCP port " + strconv.Itoa(port) + " (" +
 		strconv.Itoa(files) + " files); not paired: run `ui pair` in the shell")
@@ -207,13 +221,14 @@ func (s *service) handle(msg oceans.Message) (uint64, []byte) {
 	return statusBadRequest, nil
 }
 
-// serveWaiting serves every connection waiting to be accepted.
-func (s *service) serveWaiting() {
-	if s.listener == nil {
+// serveWaiting serves every connection waiting on `listener` with
+// `serve`.
+func (s *service) serveWaiting(listener *tcp.Listener, serve func(*request) *response) {
+	if listener == nil {
 		return
 	}
 	for {
-		conn, err := s.listener.Accept(writeTimeout)
+		conn, err := listener.Accept(writeTimeout)
 		if err != nil {
 			s.say("accept failed: " + err.Error())
 			return
@@ -221,18 +236,18 @@ func (s *service) serveWaiting() {
 		if conn == nil {
 			return
 		}
-		s.serveConnection(conn)
+		s.serveConnection(conn, serve)
 	}
 }
 
-func (s *service) serveConnection(conn *tcp.Conn) {
+func (s *service) serveConnection(conn *tcp.Conn, serve func(*request) *response) {
 	defer conn.Close()
 	req, err := readRequest(&deadlineReader{conn: conn, deadline: time.Now().Add(requestTime)})
 	var resp *response
 	var bad *httpError
 	switch {
 	case err == nil:
-		resp = s.bridge.serve(req)
+		resp = serve(req)
 	case errors.As(err, &bad):
 		resp = harden(failure(err))
 	default:

@@ -1,0 +1,13 @@
+# The package manifest (ADR-0046): who the app is and what it asks for.
+# `runtime = web`: a SvelteKit app (ADR-0064), served by the Oceans bridge
+# to the paired browser; it may ask only for storage (its own data).
+id = {{ID}}
+name = {{NAME}}
+version = 0.1.0
+publisher = {{PUBLISHER}}
+description = {{NAME}}, a web app made with SvelteKit and the Oceans SDK
+architecture = x86_64
+api = 1
+runtime = web
+entry = web.bundle
+permission = storage: keep your notes
