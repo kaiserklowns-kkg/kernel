@@ -26,6 +26,15 @@ impl Rgb {
 
 pub use oceans_window::Rect;
 
+/// The integer square root of a small non-negative number.
+fn isqrt(n: i32) -> i32 {
+    let mut root = 0;
+    while (root + 1) * (root + 1) <= n {
+        root += 1;
+    }
+    root
+}
+
 /// Text styles.
 #[derive(Clone, Copy)]
 pub enum Font {
@@ -121,6 +130,61 @@ impl Canvas {
                 // height` pixels, all mapped; volatile, as another process
                 // writes them.
                 *pixel = unsafe { pixels.add(source + i).read_volatile() } & 0x00ff_ffff;
+            }
+        }
+    }
+
+    /// A rectangle with rounded corners of `radius` pixels (ADR-0076): the
+    /// corners' pixels outside the circle are left as they are, and the
+    /// edge pixel of each corner row is blended for a smoother curve.
+    pub fn round_fill(&mut self, r: Rect, radius: i32, color: Rgb) {
+        let radius = radius.min(r.w / 2).min(r.h / 2).max(0);
+        for dy in 0..r.h {
+            // The row's distance above (or below) the corners' centres.
+            let above = if dy < radius {
+                radius - dy
+            } else if dy >= r.h - radius {
+                dy - (r.h - radius) + 1
+            } else {
+                0
+            };
+            let inset = if above == 0 {
+                0
+            } else {
+                radius - isqrt(radius * radius - (above - 1) * (above - 1))
+            };
+            let y = r.y + dy;
+            self.fill(Rect::new(r.x + inset, y, r.w - 2 * inset, 1), color);
+            if inset > 0 {
+                // Soften the step at each end.
+                for x in [r.x + inset - 1, r.x + r.w - inset] {
+                    if x >= 0 && x < self.width && y >= 0 && y < self.height {
+                        let at = (y * self.width + x) as usize;
+                        self.pixels[at] = color.over(Rgb(self.pixels[at]), 110).0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A vertical gradient from `top` to `bottom` over `r`.
+    pub fn gradient(&mut self, r: Rect, top: Rgb, bottom: Rgb) {
+        let span = (r.h - 1).max(1) as u32;
+        for dy in 0..r.h {
+            let alpha = dy as u32 * 255 / span;
+            self.fill(Rect::new(r.x, r.y + dy, r.w, 1), bottom.over(top, alpha));
+        }
+    }
+
+    /// Darkens `r` by `alpha` (0..=255): a window's shadow.
+    pub fn darken(&mut self, r: Rect, alpha: u32) {
+        let Some((x0, y0, x1, y1)) = self.clip(r) else {
+            return;
+        };
+        for y in y0..y1 {
+            let row = (y * self.width) as usize;
+            for pixel in &mut self.pixels[row + x0 as usize..row + x1 as usize] {
+                *pixel = Rgb(0).over(Rgb(*pixel), alpha).0;
             }
         }
     }

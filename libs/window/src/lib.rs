@@ -4,8 +4,8 @@
 //!   display service (requests, statuses, events, limits).
 //! - [`Manager`]: the window manager's state, apart from drawing: where
 //!   windows are, which is on top, which has the keyboard focus (a window
-//!   or the Terminal), dragging by the title bar, the close button, and
-//!   each app's queue of events. The display service draws what it
+//!   or the Terminal), dragging by the title bar, the minimize and close
+//!   buttons (ADR-0076), and each app's queue of events. The display service draws what it
 //!   describes and moves bytes and pixels; the decisions are made here.
 //!
 //! Apps are untrusted: every request is bounded, and an app only ever
@@ -71,6 +71,8 @@ pub struct Frame {
     pub height: i32,
     /// The app has presented its pixels at least once.
     pub presented: bool,
+    /// Hidden until restored from the taskbar (ADR-0076).
+    pub minimized: bool,
 }
 
 impl Frame {
@@ -95,6 +97,12 @@ impl Frame {
             CLOSE_SIZE,
             CLOSE_SIZE,
         )
+    }
+
+    /// Left of the close button.
+    pub fn minimize_button(&self) -> Rect {
+        let close = self.close_button();
+        Rect::new(close.x - CLOSE_SIZE - 4, close.y, CLOSE_SIZE, CLOSE_SIZE)
     }
 
     /// Where the app's pixels go.
@@ -210,13 +218,15 @@ impl Manager {
         }
     }
 
-    /// Moves the keyboard focus (and raises a focused window).
+    /// Moves the keyboard focus (and raises a focused window, restoring
+    /// it if it was minimized).
     pub fn set_focus(&mut self, focus: Focus) {
         if let Focus::Window(id) = focus {
             let Some(i) = self.index(id) else {
                 return;
             };
-            let frame = self.frames.remove(i);
+            let mut frame = self.frames.remove(i);
+            frame.minimized = false;
             self.frames.push(frame);
         }
         if focus == self.focus {
@@ -232,7 +242,8 @@ impl Manager {
     }
 
     /// Opens a window for `owner` (app `app`, as Core named it); it is
-    /// placed after the others, on top, with the focus.
+    /// placed in the middle of the area, a step after the last one, on top,
+    /// with the focus.
     pub fn open(
         &mut self,
         owner: u64,
@@ -258,10 +269,10 @@ impl Manager {
         let (w, h) = (width + 2, height + TITLE_HEIGHT + 1);
         let right = self.area.x + self.area.w;
         let bottom = self.area.y + self.area.h;
-        let x = (self.area.x + 24 + step * CASCADE)
+        let x = (self.area.x + (self.area.w - w) / 2 + step * CASCADE)
             .min(right - w)
             .max(self.area.x);
-        let y = (self.area.y + 24 + step * CASCADE)
+        let y = (self.area.y + (self.area.h - h) / 2 + step * CASCADE)
             .min(bottom - h)
             .max(self.area.y);
         let id = self.next_id;
@@ -276,6 +287,7 @@ impl Manager {
             width,
             height,
             presented: false,
+            minimized: false,
         });
         self.set_focus(Focus::Window(id));
         Ok(id)
@@ -287,11 +299,35 @@ impl Manager {
             self.drag = None;
         }
         if self.focus == Focus::Window(frame.id) {
-            // The focus goes to the window below, else the Terminal.
             self.focus = Focus::Terminal;
-            if let Some(next) = self.frames.last().map(|f| f.id) {
-                self.set_focus(Focus::Window(next));
-            }
+            self.focus_below();
+        }
+    }
+
+    /// The focus goes to the topmost window still shown, else the
+    /// Terminal.
+    fn focus_below(&mut self) {
+        let next = self
+            .frames
+            .iter()
+            .rev()
+            .find(|f| !f.minimized && Focus::Window(f.id) != self.focus)
+            .map(|f| f.id);
+        self.set_focus(next.map_or(Focus::Terminal, Focus::Window));
+    }
+
+    /// Hides a window until it is restored (`set_focus`); the focus moves
+    /// on if it had it (ADR-0076).
+    pub fn minimize(&mut self, id: u32) {
+        let Some(index) = self.index(id) else {
+            return;
+        };
+        self.frames[index].minimized = true;
+        if self.drag.is_some_and(|(dragged, _, _)| dragged == id) {
+            self.drag = None;
+        }
+        if self.focus == Focus::Window(id) {
+            self.focus_below();
         }
     }
 
@@ -370,9 +406,11 @@ impl Manager {
         self.set_focus(next.map_or(Focus::Terminal, Focus::Window));
     }
 
-    /// The topmost window at a point.
+    /// The topmost window shown at a point.
     fn at(&self, x: i32, y: i32) -> Option<usize> {
-        self.frames.iter().rposition(|f| f.outer().contains(x, y))
+        self.frames
+            .iter()
+            .rposition(|f| !f.minimized && f.outer().contains(x, y))
     }
 
     /// The pointer moved to `x`, `y`; `true` if the screen changes (a
@@ -425,8 +463,13 @@ impl Manager {
         let (id, owner) = (frame.id, frame.owner);
         let content = frame.content();
         let on_close = frame.close_button().contains(x, y);
+        let on_minimize = frame.minimize_button().contains(x, y);
         let on_title = frame.title_bar().contains(x, y);
         let (grab_x, grab_y) = (x - frame.x, y - frame.y);
+        if pressed && button == 1 && on_minimize {
+            self.minimize(id);
+            return true;
+        }
         if pressed {
             self.set_focus(Focus::Window(id));
         }

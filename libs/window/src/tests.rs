@@ -84,17 +84,21 @@ fn a_new_window_is_placed_in_the_area_on_top_with_the_focus() {
     let mut m = manager();
     let first = m.open(APP, "Notes", "notes", 480, 240).unwrap();
     let frame = &m.frames()[0];
-    assert_eq!((frame.x, frame.y), (AREA.x + 24, AREA.y + 24));
+    // In the middle of the area (ADR-0076).
+    let (w, h) = (480 + 2, 240 + TITLE_HEIGHT + 1);
+    let (x, y) = (AREA.x + (AREA.w - w) / 2, AREA.y + (AREA.h - h) / 2);
+    assert_eq!((frame.x, frame.y), (x, y));
     assert_eq!(
         frame.content(),
-        Rect::new(AREA.x + 25, AREA.y + 24 + TITLE_HEIGHT, 480, 240)
+        Rect::new(x + 1, y + TITLE_HEIGHT, 480, 240)
     );
     assert_eq!(m.focus(), Focus::Window(first));
     assert_eq!(kinds(&mut m, APP), [(kind::FOCUS, first)]);
     assert_eq!(m.take_signals().into_iter().collect::<Vec<_>>(), [APP]);
 
     let second = m.open(OTHER, "Other", "", 200, 100).unwrap();
-    assert_eq!(m.frames()[1].x, AREA.x + 24 + 32);
+    // The next one, a step further.
+    assert_eq!(m.frames()[1].x, AREA.x + (AREA.w - 202) / 2 + 32);
     assert_eq!(m.focus(), Focus::Window(second));
     // The first app hears it lost the focus.
     let lost = m.take_events(APP, 10);
@@ -321,4 +325,34 @@ fn notification_texts_are_one_short_line() {
     }
     assert!(proto::notification_text(&[b'a'; proto::MAX_NOTIFICATION]).is_some());
     assert!(proto::notification_text(&[b'a'; proto::MAX_NOTIFICATION + 1]).is_none());
+}
+
+#[test]
+fn minimized_windows_hide_lose_the_focus_and_come_back_on_top() {
+    let mut m = manager();
+    let a = m.open(APP, "A", "", 200, 100).unwrap();
+    let b = m.open(OTHER, "B", "", 200, 100).unwrap();
+    let fb = m.frames()[1].clone();
+    let _ = (kinds(&mut m, APP), kinds(&mut m, OTHER));
+    // Its minimize button hides it; the focus goes to the window below.
+    let button = fb.minimize_button();
+    assert!(m.button(1, true, button.x + 2, button.y + 2));
+    assert!(m.frames().iter().find(|f| f.id == b).unwrap().minimized);
+    assert_eq!(m.focus(), Focus::Window(a));
+    assert_eq!(kinds(&mut m, OTHER), [(kind::FOCUS, b)]);
+    // A hidden window takes no clicks: they reach what is under it.
+    let inside = fb.content();
+    let fa = m.frames().iter().find(|f| f.id == a).unwrap().clone();
+    if !fa.outer().contains(inside.x + 1, inside.y + 1) {
+        assert!(!m.button(1, true, inside.x + 1, inside.y + 1));
+    }
+    // The last one shown minimized: the Terminal gets the keyboard.
+    m.minimize(a);
+    assert_eq!(m.focus(), Focus::Terminal);
+    // Restored (from the taskbar): shown again, on top, with the focus.
+    m.set_focus(Focus::Window(b));
+    assert!(!m.frames().last().unwrap().minimized);
+    assert_eq!(m.frames().last().unwrap().id, b);
+    assert_eq!(m.focus(), Focus::Window(b));
+    assert!(m.frames()[0].minimized);
 }

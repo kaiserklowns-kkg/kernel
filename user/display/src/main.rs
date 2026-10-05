@@ -2,11 +2,13 @@
 //!
 //! It takes the screen over from the kernel console (`DISPLAY_CLAIM`),
 //! draws the desktop into a back buffer and presents only the pixels that
-//! changed:
-//! - the Oceans Bar: the clock and the system's state;
-//! - the launcher: the installed apps, from Oceans Core; a click starts one;
+//! changed (the layout: ADR-0076, `desktop`):
+//! - the taskbar: the Start button, the Terminal and the open windows, the
+//!   system's state and the clock;
+//! - the Start menu: the installed apps, from Oceans Core; a click starts
+//!   one;
 //! - the Terminal: the console's text (`DISPLAY_TEXT`), where the shell
-//!   keeps working;
+//!   keeps working, in a window that can be minimized;
 //! - **app windows** (ADR-0059): apps given `window` open windows through
 //!   the window endpoint this service makes and registers with Core
 //!   (`WINDOWS`); each app's end is badged by Core, and Core says whose a
@@ -167,7 +169,7 @@ fn main(start: Start) -> i64 {
         return EXIT_BAD_START;
     }
     let console = directory.find("console-input", "console-input");
-    let area = desktop::terminal(canvas.width, canvas.height);
+    let area = desktop::area(canvas.width, canvas.height);
     let screen_pixels = (canvas.width * canvas.height) as usize;
     let mut service = Service {
         log,
@@ -319,8 +321,14 @@ impl Service {
             }
             Kind::Button { button, pressed } => {
                 let (x, y) = self.desktop.pointer;
-                // A permission dialog is modal: windows get nothing.
-                if self.desktop.dialog.is_none() && self.windows.button(button, pressed, x, y) {
+                // A permission dialog is modal: windows get nothing. The
+                // taskbar and an open Start menu lie over the windows, but
+                // a release always reaches them (it ends a drag).
+                let over = self.desktop.start_open || desktop::taskbar(w, h).contains(x, y);
+                if self.desktop.dialog.is_none()
+                    && (!pressed || !over)
+                    && self.windows.button(button, pressed, x, y)
+                {
                     return true;
                 }
                 return button == 1 && pressed && self.click(x, y, w, h);
@@ -365,10 +373,53 @@ impl Service {
     }
 
     fn click(&mut self, x: i32, y: i32, width: i32, height: i32) -> bool {
-        match self.desktop.hit(x, y, width, height) {
-            Hit::App(index) => {
+        let mut windows: Vec<u32> = self.windows.frames().iter().map(|f| f.id).collect();
+        windows.sort_unstable();
+        match self.desktop.hit(x, y, width, height, &windows) {
+            Hit::Start => {
+                self.desktop.start_open = !self.desktop.start_open;
+                true
+            }
+            Hit::Outside => {
+                self.desktop.start_open = false;
+                true
+            }
+            Hit::StartApp(index) => {
+                self.desktop.start_open = false;
                 let id = self.desktop.apps[index].id.clone();
                 self.launch(&id);
+                true
+            }
+            Hit::StartTerminal => {
+                self.desktop.start_open = false;
+                self.show_terminal();
+                true
+            }
+            Hit::TaskbarTerminal => {
+                // Like other taskbars: it shows the Terminal, or hides it if
+                // it is in front with the keyboard.
+                if !self.desktop.terminal_hidden && self.windows.focus() == Focus::Terminal {
+                    self.desktop.terminal_hidden = true;
+                } else {
+                    self.show_terminal();
+                }
+                true
+            }
+            Hit::TaskbarWindow(id) => {
+                let shown = self
+                    .windows
+                    .frames()
+                    .iter()
+                    .any(|f| f.id == id && !f.minimized);
+                if shown && self.windows.focus() == Focus::Window(id) {
+                    self.windows.minimize(id);
+                } else {
+                    self.windows.set_focus(Focus::Window(id));
+                }
+                true
+            }
+            Hit::TerminalMinimize => {
+                self.desktop.terminal_hidden = true;
                 true
             }
             Hit::Terminal => {
@@ -385,6 +436,12 @@ impl Service {
             }
             Hit::Nothing => false,
         }
+    }
+
+    /// The Terminal, shown and given the keyboard.
+    fn show_terminal(&mut self) {
+        self.desktop.terminal_hidden = false;
+        self.windows.set_focus(Focus::Terminal);
     }
 
     /// Starts an app in the background; asks first if it needs decisions.
@@ -647,14 +704,18 @@ impl Service {
         changed
     }
 
-    /// The clock and the status line; `true` if they changed.
+    /// The clock, the date and the status; `true` if they changed.
     fn refresh_clock(&mut self) -> bool {
-        let clock = match oceans_rt::unix_time_ms() {
+        let (clock, date) = match oceans_rt::unix_time_ms() {
             Some(ms) => {
                 let minutes = ms / 60_000;
-                alloc::format!("{:02}:{:02} UTC", minutes / 60 % 24, minutes % 60)
+                let (year, month, day) = oceans_package::date::civil((ms / 86_400_000) as u32);
+                (
+                    alloc::format!("{:02}:{:02}", minutes / 60 % 24, minutes % 60),
+                    alloc::format!("{year}-{month:02}-{day:02} UTC"),
+                )
             }
-            None => String::from("--:--"),
+            None => (String::from("--:--"), String::from("time not set")),
         };
         let mut status = String::new();
         if let Some(sysinfo) = self.sysinfo {
@@ -663,12 +724,15 @@ impl Service {
                 let word = |i: usize| u64::from_le_bytes(record[i..i + 8].try_into().unwrap());
                 let (total, free) = (word(8), word(16));
                 if let Some(percent) = (total.saturating_sub(free) * 100).checked_div(total) {
-                    let _ = write!(status, "Memory {percent}% used");
+                    let _ = write!(status, "RAM {percent}%");
                 }
             }
         }
-        let changed = clock != self.desktop.clock || status != self.desktop.status;
+        let changed = clock != self.desktop.clock
+            || date != self.desktop.date
+            || status != self.desktop.status;
         self.desktop.clock = clock;
+        self.desktop.date = date;
         self.desktop.status = status;
         changed
     }
