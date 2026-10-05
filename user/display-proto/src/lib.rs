@@ -137,3 +137,15 @@ pub fn events(windows: Handle, out: &mut [Event]) -> Result<usize, WindowError> 
     }
     Ok(count)
 }
+
+/// Shows `text` as a notification on the desktop, after the app's name
+/// (ADR-0065; needs `notifications`). One line, at most
+/// `proto::MAX_NOTIFICATION` bytes; one per `proto::NOTIFY_INTERVAL_MS`.
+pub fn notify(windows: Handle, text: &str) -> Result<(), WindowError> {
+    let got = oceans_rt::ipc_call_msg(windows, op::NOTIFY, text.as_bytes(), &[], &mut [], &mut [])
+        .map_err(WindowError::Ipc)?;
+    match Status::from_label(got.label) {
+        Status::Ok => Ok(()),
+        status => Err(WindowError::Refused(status)),
+    }
+}

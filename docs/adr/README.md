@@ -72,5 +72,8 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0062](0062-sdk-and-developer-tools.md) | The Oceans SDK and developer tools | Accepted (amended by 0064) |
 | [0063](0063-developer-keys.md) | Trusting developers' keys | Accepted |
 | [0064](0064-web-apps.md) | Web apps (SvelteKit and Bun), and the end of Phase 8 | Accepted |
+| [0065](0065-notifications.md) | Notifications for apps | Accepted |
+| [0066](0066-web-apps-network.md) | The network for web apps | Accepted |
+| [0067](0067-expiring-developer-keys.md) | Developer keys that expire | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

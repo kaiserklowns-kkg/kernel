@@ -49,7 +49,8 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use oceans_core_proto::{
-    Decision, MAX_DATA, Status, access, decision, field, op, outcome, run_flags, source,
+    Decision, MAX_DATA, Status, access, decision, display_grant, field, op, outcome, run_flags,
+    source,
 };
 use oceans_fs_proto::{FsError, Kind, Node, flags};
 use oceans_package::{Package, PackageError, Permission, Runtime, TrustedKey, Version};
@@ -185,6 +186,50 @@ struct Launch<'a> {
     window: Option<u64>,
 }
 
+/// A publisher key Core trusts (ADR-0046, ADR-0063), perhaps until a date
+/// (ADR-0067).
+struct Trusted {
+    publisher: String,
+    key: [u8; 32],
+    /// The last day it is trusted (days since 1970-01-01).
+    until: Option<u32>,
+}
+
+impl Trusted {
+    fn valid_on(&self, today: Option<u32>) -> bool {
+        self.until
+            .is_none_or(|until| today.is_some_and(|today| today <= until))
+    }
+
+    /// ` until YYYY-MM-DD`, or nothing.
+    fn until_text(&self) -> String {
+        self.until.map_or_else(String::new, |days| {
+            let (y, m, d) = oceans_package::date::civil(days);
+            alloc::format!(" until {y:04}-{m:02}-{d:02}")
+        })
+    }
+
+    /// Its trust-list line: `KEY [until=YYYY-MM-DD] PUBLISHER`.
+    fn line(&self) -> String {
+        match self.until {
+            None => alloc::format!("{} {}", hex32(&self.key), self.publisher),
+            Some(days) => {
+                let (y, m, d) = oceans_package::date::civil(days);
+                alloc::format!(
+                    "{} until={y:04}-{m:02}-{d:02} {}",
+                    hex32(&self.key),
+                    self.publisher
+                )
+            }
+        }
+    }
+}
+
+/// Today (UTC), if the wall clock is known.
+fn today() -> Option<u32> {
+    oceans_rt::unix_time_ms().map(oceans_package::date::today)
+}
+
 /// An install waiting for the user's confirmation (ADR-0061).
 struct Proposal {
     number: u32,
@@ -243,7 +288,7 @@ struct Core {
     next_window_badge: u64,
     /// The Go host's image, for `wasm` apps (ADR-0052).
     gohost: Option<Handle>,
-    trusted: Vec<(String, [u8; 32])>,
+    trusted: Vec<Trusted>,
     /// How many of `trusted` came with the boot image (the rest the user
     /// added, ADR-0063).
     boot_keys: usize,
@@ -286,19 +331,29 @@ impl Core {
             .find("module", "trust.keys")
             .and_then(oceans_rt::map_text)
             .unwrap_or("");
-        let mut trusted: Vec<(String, [u8; 32])> = oceans_package::trusted_keys(trust_text)
-            .map(|t| (t.publisher.to_owned(), t.key))
+        let mut trusted: Vec<Trusted> = oceans_package::trusted_keys(trust_text)
+            .map(|t| Trusted {
+                publisher: t.publisher.to_owned(),
+                key: t.key,
+                until: None,
+            })
             .collect();
         let boot_keys = trusted.len();
-        // Developers' keys the user added (ADR-0063), after the image's.
+        // Developers' keys the user added (ADR-0063), after the image's,
+        // some until a date (ADR-0067).
         if let Ok(bytes) = read_path(&system_dir, TRUST_FILE) {
             let text = core::str::from_utf8(&bytes).unwrap_or("");
-            for key in oceans_package::trusted_keys(text) {
+            for entry in oceans_package::trust_entries(text) {
+                let key = entry.key;
                 if !trusted
                     .iter()
-                    .any(|(p, k)| *k == key.key || *p == key.publisher)
+                    .any(|t| t.key == key.key || t.publisher == key.publisher)
                 {
-                    trusted.push((key.publisher.to_owned(), key.key));
+                    trusted.push(Trusted {
+                        publisher: key.publisher.to_owned(),
+                        key: key.key,
+                        until: entry.until,
+                    });
                 }
             }
         }
@@ -351,12 +406,16 @@ impl Core {
         Ok(core)
     }
 
+    /// The keys trusted today: a dated key past its day (or with no known
+    /// time) is not (ADR-0067).
     fn trust(&self) -> Vec<TrustedKey<'_>> {
+        let today = today();
         self.trusted
             .iter()
-            .map(|(publisher, key)| TrustedKey {
-                publisher,
-                key: *key,
+            .filter(|t| t.valid_on(today))
+            .map(|t| TrustedKey {
+                publisher: &t.publisher,
+                key: t.key,
             })
             .collect()
     }
@@ -769,9 +828,16 @@ impl Core {
                     op::TRUST => self.change_trust(data),
                     op::TRUSTED => {
                         let index = u32_at(data)? as usize;
-                        let (publisher, key) = self.trusted.get(index).ok_or(Status::NotFound)?;
-                        reply.push(u8::from(index >= self.boot_keys));
-                        let _ = write!(Text(reply), "{} {publisher}", hex32(key));
+                        let t = self.trusted.get(index).ok_or(Status::NotFound)?;
+                        let mut flags = 0;
+                        if index >= self.boot_keys {
+                            flags |= 1;
+                        }
+                        if !t.valid_on(today()) {
+                            flags |= 2;
+                        }
+                        reply.push(flags);
+                        let _ = write!(Text(reply), "{}", t.line());
                         Ok(())
                     }
                     op::ACCEPT => self.accept(data, reply),
@@ -827,6 +893,14 @@ impl Core {
             .find(|r| r.window == Some(badge))
             .ok_or(Status::NotFound)?;
         let app = self.app(&running.id)?;
+        let mut grants = 0;
+        if running.granted.contains(&Permission::Window) {
+            grants |= display_grant::WINDOW;
+        }
+        if running.granted.contains(&Permission::Notifications) {
+            grants |= display_grant::NOTIFICATIONS;
+        }
+        reply.push(grants);
         reply.extend_from_slice(
             alloc::format!("{}\0{}\0{}", running.id, app.version, app.name).as_bytes(),
         );
@@ -946,8 +1020,8 @@ impl Core {
 
     // ---- Developers' keys (ADR-0063) -------------------------------------------
 
-    /// `TRUST`: adds or removes a developer's publisher key; kept in
-    /// `/system/trust.keys` and audited.
+    /// `TRUST`: adds or removes a developer's publisher key, perhaps until
+    /// a date (ADR-0067); kept in `/system/trust.keys` and audited.
     fn change_trust(&mut self, data: &[u8]) -> Result<(), Refusal> {
         let (&add, line) = data.split_first().ok_or(Status::BadRequest)?;
         let line = core::str::from_utf8(line).map_err(|_| Status::BadRequest)?;
@@ -957,46 +1031,57 @@ impl Core {
         };
         match add {
             1 => {
-                let key = oceans_package::trusted_keys(line)
+                let entry = oceans_package::trust_entries(line)
                     .next()
                     .filter(|_| line.lines().count() == 1)
                     .ok_or_else(|| {
                         refuse("give the key as 64 hex digits, then the publisher's name")
                     })?;
-                if self.trusted.iter().any(|(_, k)| *k == key.key) {
+                let key = entry.key;
+                if self.trusted.iter().any(|t| t.key == key.key) {
                     return Err(refuse("that key is already trusted"));
                 }
-                if self.trusted.iter().any(|(p, _)| p == key.publisher) {
+                if self.trusted.iter().any(|t| t.publisher == key.publisher) {
                     return Err(refuse("another key is trusted for that publisher name"));
                 }
-                let (publisher, key) = (key.publisher.to_owned(), key.key);
-                self.trusted.push((publisher.clone(), key));
+                if !entry.valid_on(today()) {
+                    return Err(refuse("that date has passed (or the time is not known)"));
+                }
+                let added = Trusted {
+                    publisher: key.publisher.to_owned(),
+                    key: key.key,
+                    until: entry.until,
+                };
+                let limit = added.until_text();
+                let (publisher, short) = (added.publisher.clone(), hex32(&added.key));
+                self.trusted.push(added);
                 if let Err(refusal) = self.save_trust() {
                     self.trusted.pop();
                     return Err(refusal);
                 }
                 self.record(format_args!(
-                    "now trusts key {} for publisher {publisher} (added at the console)",
-                    &hex32(&key)[..16]
+                    "now trusts key {} for publisher {publisher}{limit} (added at the console)",
+                    &short[..16]
                 ));
             }
             0 => {
                 let index = self
                     .trusted
                     .iter()
-                    .position(|(_, k)| hex32(k) == line.trim())
+                    .position(|t| hex32(&t.key) == line.trim())
                     .ok_or(Status::NotFound)?;
                 if index < self.boot_keys {
                     return Err(refuse("keys from the boot image cannot be removed"));
                 }
-                let (publisher, key) = self.trusted.remove(index);
+                let removed = self.trusted.remove(index);
+                let (publisher, short) = (removed.publisher.clone(), hex32(&removed.key));
                 if let Err(refusal) = self.save_trust() {
-                    self.trusted.insert(index, (publisher, key));
+                    self.trusted.insert(index, removed);
                     return Err(refusal);
                 }
                 self.record(format_args!(
                     "no longer trusts key {} for publisher {publisher}: its apps no longer start",
-                    &hex32(&key)[..16]
+                    &short[..16]
                 ));
             }
             _ => return Err(Status::BadRequest.into()),
@@ -1006,10 +1091,11 @@ impl Core {
 
     fn save_trust(&self) -> Result<(), Refusal> {
         let mut text = String::from(
-            "# Developers' publisher keys the user trusts (ADR-0063): `KEY-HEX PUBLISHER`.\n",
+            "# Developers' publisher keys the user trusts (ADR-0063, ADR-0067):\n\
+             # `KEY-HEX [until=YYYY-MM-DD] PUBLISHER`.\n",
         );
-        for (publisher, key) in &self.trusted[self.boot_keys..] {
-            let _ = writeln!(text, "{} {publisher}", hex32(key));
+        for trusted in &self.trusted[self.boot_keys..] {
+            let _ = writeln!(text, "{}", trusted.line());
         }
         write_file(&self.system_dir, TRUST_FILE, text.as_bytes()).map_err(io)
     }
@@ -1401,11 +1487,13 @@ impl Core {
             };
             // A window end of its own, badged so the display service can ask
             // whose it is (ADR-0059).
-            let window =
-                (granted.contains(&Permission::Window) && self.windows.is_some()).then(|| {
-                    self.next_window_badge += 1;
-                    self.next_window_badge - 1
-                });
+            let window = ((granted.contains(&Permission::Window)
+                || granted.contains(&Permission::Notifications))
+                && self.windows.is_some())
+            .then(|| {
+                self.next_window_badge += 1;
+                self.next_window_badge - 1
+            });
             let launch = Launch {
                 id: &id,
                 name: entry_name,
@@ -1508,11 +1596,8 @@ impl Core {
                     .input
                     .and_then(|h| oceans_rt::duplicate(h, rights::SEND | rights::TRANSFER).ok())
                     .map(|h| (h, "use", "input")),
-                Permission::Window => self
-                    .windows
-                    .zip(window)
-                    .and_then(|(server, badge)| oceans_rt::endpoint_mint(server, badge).ok())
-                    .map(|h| (h, "use", "windows")),
+                // One display end for both, after the loop.
+                Permission::Window | Permission::Notifications => continue,
             };
             match given {
                 Some((handle, kind, label)) => {
@@ -1524,6 +1609,23 @@ impl Core {
                 None => say(
                     self.log,
                     format_args!("core: {id}: {} unavailable", permission.name()),
+                ),
+            }
+        }
+        // The display end (ADR-0059, ADR-0065): windows and notifications,
+        // badged so the display service can ask whose it is.
+        if let Some(badge) = window {
+            match self
+                .windows
+                .and_then(|server| oceans_rt::endpoint_mint(server, badge).ok())
+            {
+                Some(handle) => {
+                    let _ = writeln!(directory, "{} use windows", handles.len());
+                    handles.push(handle);
+                }
+                None => say(
+                    self.log,
+                    format_args!("core: {id}: the display is unavailable"),
                 ),
             }
         }

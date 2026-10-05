@@ -5,9 +5,11 @@
 
 use alloc::string::{String, ToString};
 
-use oceans_core_proto::{op as core_op, parts};
+use oceans_core_proto::{display_grant, op as core_op, parts};
 use oceans_rt::{Handle, Received};
-use oceans_window::proto::{Event, MAX_EVENTS, OpenRequest, Status, op, pixel_bytes};
+use oceans_window::proto::{
+    Event, MAX_EVENTS, NOTIFY_INTERVAL_MS, OpenRequest, Status, notification_text, op, pixel_bytes,
+};
 
 use super::{Service, prot, rights, say};
 
@@ -15,7 +17,11 @@ use super::{Service, prot, rights, say};
 /// notification its events are signalled on.
 pub struct Owner {
     pub app: String,
+    /// `display_grant` bits: windows, notifications.
+    pub grants: u8,
     pub notification: Option<(Handle, u64)>,
+    /// When it last notified (ms since boot).
+    pub notified_ms: Option<u64>,
 }
 
 /// A window's pixels: the memory shared with the app, mapped read-only
@@ -75,7 +81,8 @@ impl Service {
             let got = core
                 .call(core_op::WINDOW_OWNER, &badge.to_le_bytes(), &[], &mut reply)
                 .ok()?;
-            let mut fields = parts(&reply[..got.len]);
+            let (&grants, rest) = reply[..got.len].split_first()?;
+            let mut fields = parts(rest);
             let id = fields.next().unwrap_or("?");
             let _version = fields.next();
             let app = fields.next().filter(|name| !name.is_empty()).unwrap_or(id);
@@ -84,7 +91,9 @@ impl Service {
                 badge,
                 Owner {
                     app: app.to_string(),
+                    grants,
                     notification: None,
+                    notified_ms: None,
                 },
             );
         }
@@ -107,6 +116,10 @@ impl Service {
         } else {
             match got.label {
                 op::OPEN => return self.open(got.badge, data, handles),
+                op::NOTIFY => {
+                    close_all(handles);
+                    self.notify(got.badge, data)
+                }
                 op::EVENTS => {
                     close_all(handles);
                     let events = self.windows.take_events(got.badge, MAX_EVENTS);
@@ -167,7 +180,10 @@ impl Service {
         let (Some(request), &[notification]) = (OpenRequest::decode(data), handles) else {
             return refuse(Status::BadRequest);
         };
-        let Some(owner) = self.owner(badge) else {
+        let Some(owner) = self
+            .owner(badge)
+            .filter(|o| o.grants & display_grant::WINDOW != 0)
+        else {
             return refuse(Status::NotAllowed);
         };
         let app = owner.app.clone();
@@ -217,6 +233,33 @@ impl Service {
             let _ = oceans_rt::close(old);
         }
         true
+    }
+
+    /// `NOTIFY` (ADR-0065): a notification, after the app's verified name,
+    /// at most one per `NOTIFY_INTERVAL_MS`.
+    fn notify(&mut self, badge: u64, data: &[u8]) -> (Status, bool) {
+        let Some(text) = notification_text(data) else {
+            return (Status::BadRequest, false);
+        };
+        let now = oceans_rt::clock_ms();
+        let log = self.log;
+        let Some(owner) = self
+            .owner(badge)
+            .filter(|o| o.grants & display_grant::NOTIFICATIONS != 0)
+        else {
+            return (Status::NotAllowed, false);
+        };
+        if owner
+            .notified_ms
+            .is_some_and(|then| now.saturating_sub(then) < NOTIFY_INTERVAL_MS)
+        {
+            return (Status::TooMany, false);
+        }
+        owner.notified_ms = Some(now);
+        let shown = alloc::format!("{}: {text}", owner.app);
+        say(log, format_args!("desktop: notification: {shown}"));
+        self.toast(shown, false);
+        (Status::Ok, true)
     }
 
     /// The app behind `badge` is gone: its windows close. `true` if it had

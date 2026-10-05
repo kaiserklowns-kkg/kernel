@@ -8,6 +8,7 @@
 use core::fmt::Write;
 
 use oceans_sdk::app::{self, Directory, Start};
+use oceans_sdk::notification;
 use oceans_sdk::storage::{self, Kind, Node, flags};
 use oceans_sdk::system;
 
@@ -25,6 +26,10 @@ fn main(start: Start) -> i64 {
     match storage::data(&directory).map(|data| count_run(&data)) {
         Some(Ok(runs)) => {
             let _ = writeln!(out, "{{NAME}}: run {runs}");
+            // On the desktop too, if the user allowed notifications.
+            let mut note = app::Buffer::<64>::new();
+            let _ = write!(note, "ran {runs} times");
+            let _ = notification::notify(&directory, note.as_str());
         }
         Some(Err(problem)) => {
             let _ = writeln!(out, "{{NAME}}: storage failed: {problem}");

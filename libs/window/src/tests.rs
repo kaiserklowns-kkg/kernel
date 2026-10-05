@@ -309,3 +309,16 @@ fn wire_format_is_fixed() {
     .unwrap();
     assert_eq!(&data[..len], b"\x01\0\0\0\0\0\0\0\xe0\x01\xf0\0Notes");
 }
+
+#[test]
+fn notification_texts_are_one_short_line() {
+    assert_eq!(
+        proto::notification_text(b" Saved 3 notes "),
+        Some("Saved 3 notes")
+    );
+    for bad in [&b""[..], b"   ", b"two\nlines", b"bell\x07", &[0xff, 0xfe]] {
+        assert_eq!(proto::notification_text(bad), None, "{bad:?}");
+    }
+    assert!(proto::notification_text(&[b'a'; proto::MAX_NOTIFICATION]).is_some());
+    assert!(proto::notification_text(&[b'a'; proto::MAX_NOTIFICATION + 1]).is_none());
+}

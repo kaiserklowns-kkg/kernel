@@ -379,11 +379,16 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/third-party-counter.opk /keep/counter.opk\r\n",
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/third-party-hello.opk /keep/hello-go.opk\r\n",
     b"app install /keep/counter.opk\r\n",
-    b"app trust add $DEVKEY Example Developer\r\n",
+    // Trusted through a date (ADR-0067); a date already past is refused.
+    b"app trust add $DEVKEY Example Developer --until 2099-12-31\r\n",
     b"app trust add 1111111111111111111111111111111111111111111111111111111111111111 Oceans Examples\r\n",
+    b"app trust add 2222222222222222222222222222222222222222222222222222222222222222 Old Developer --until 2020-01-01\r\n",
     b"app trust\r\n",
     b"app install /keep/counter.opk\r\n",
+    // Its first run asks for notifications (ADR-0065), which the user
+    // allows: the desktop shows them with the app's name.
     b"app run app.example.counter\r\n",
+    b"y\r\n",
     b"app run app.example.counter\r\n",
     b"app install /keep/hello-go.opk\r\n",
     b"app run app.example.hello one two\r\n",
@@ -688,6 +693,10 @@ const SHELL_EXPECT: &[Expect] = &[
     // Third-party apps built with the SDK (ADR-0062, ADR-0063).
     Expect::Contains("app: /keep/counter.opk: signed with a key this system does not trust"),
     Expect::Contains("core: audit: now trusts key "),
+    Expect::Contains(" for publisher Example Developer until 2099-12-31 (added at the console)"),
+    Expect::Contains("app: trust: that date has passed"),
+    Expect::Contains("added by you, until 2099-12-31"),
+    Expect::Contains("desktop: notification: Counter: ran 1 times"),
     Expect::Contains("app: trust: another key is trusted for that publisher name"),
     Expect::Contains("  Oceans Examples  "),
     Expect::Contains("from the system image"),

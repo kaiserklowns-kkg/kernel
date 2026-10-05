@@ -244,7 +244,13 @@ func (b *bridge) appPage(req *request, id string, s *site, page *asset) *respons
 	resp := &response{status: 200, body: []byte(body)}
 	resp.set("Content-Type", page.contentType)
 	resp.set("Cache-Control", "no-store")
-	resp.set("Content-Security-Policy", s.csp+"; sandbox allow-scripts allow-forms")
+	policy := s.csp
+	// The network, if the user allowed it (ADR-0066): https servers, from
+	// the page. Without it the page reaches only its own origin.
+	if b.allowed(id, "network") {
+		policy = withNetwork(policy)
+	}
+	resp.set("Content-Security-Policy", policy+"; sandbox allow-scripts allow-forms")
 	resp.set("Cross-Origin-Opener-Policy", "same-origin")
 	return resp
 }
@@ -329,14 +335,36 @@ func (b *bridge) appAPI(req *request, id, name string) *response {
 }
 
 func (b *bridge) asksForStorage(id string) bool {
+	return b.allowed(id, "storage")
+}
+
+// allowed: the app asked for `permission` and has it (automatic, or the
+// user allowed it).
+func (b *bridge) allowed(id, permission string) bool {
 	permissions, err := b.sys.Permissions(id)
 	if err != nil {
 		return false
 	}
 	for _, p := range permissions {
-		if p.Name == "storage" && (p.Decision == "automatic" || p.Decision == "allowed") {
+		if p.Name == permission && (p.Decision == "automatic" || p.Decision == "allowed") {
 			return true
 		}
 	}
 	return false
+}
+
+// withNetwork lets a page's policy connect to https servers: `https:` is
+// added to its connect-src (or one is added).
+func withNetwork(policy string) string {
+	directives := strings.Split(policy, ";")
+	for i, d := range directives {
+		if fields := strings.Fields(d); len(fields) > 0 && fields[0] == "connect-src" {
+			if len(fields) == 2 && fields[1] == "'none'" {
+				fields = fields[:1]
+			}
+			directives[i] = " " + strings.Join(append(fields, "https:"), " ")
+			return strings.TrimSpace(strings.Join(directives, ";"))
+		}
+	}
+	return strings.TrimRight(policy, "; ") + "; connect-src 'self' https:"
 }

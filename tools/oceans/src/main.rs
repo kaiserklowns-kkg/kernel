@@ -24,8 +24,9 @@ usage:
       a developer key signing as PUBLISHER (default file: oceans-developer.key)
   oceans build [DIR] --key FILE
       builds the app in DIR and signs its package into DIR/dist/
-  oceans trust --key FILE
-      the command that makes Oceans trust the key (run it in the Oceans shell)
+  oceans trust --key FILE [--until YYYY-MM-DD]
+      the command that makes Oceans trust the key (run it in the Oceans shell),
+      through a date if given
   oceans serve [DIR] [--port PORT]
       serves DIR/dist/ as a store (index.json and packages) on PORT (8000)
 
@@ -78,10 +79,21 @@ fn run(args: &[String]) -> Result {
         "keygen" => keygen(rest),
         "build" => build(rest),
         "trust" => {
-            let (_, found) = options(rest, &["--key"])?;
+            let (_, found) = options(rest, &["--key", "--until"])?;
             let key = read_key(option(&found, "--key").ok_or("which key? (--key FILE)")?)?;
-            println!("{}", key.trust_command());
-            Ok(())
+            match option(&found, "--until") {
+                Some(day) if oceans_package::date::parse(day).is_none() => {
+                    Err(format!("{day}: not a date (YYYY-MM-DD)"))
+                }
+                Some(day) => {
+                    println!("{} --until {day}", key.trust_command());
+                    Ok(())
+                }
+                None => {
+                    println!("{}", key.trust_command());
+                    Ok(())
+                }
+            }
         }
         "serve" => serve(rest),
         "help" | "--help" | "-h" => {

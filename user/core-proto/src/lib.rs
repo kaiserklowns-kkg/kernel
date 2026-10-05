@@ -65,9 +65,11 @@ pub mod op {
     /// badged client end for each app given `window` (replacing an earlier
     /// one).
     pub const WINDOWS: u64 = 14;
-    /// data = `[badge u64]` → `ID\0VERSION\0NAME` of the running app whose
-    /// window end carries that badge; `NotFound` once it has ended. The
-    /// display service asks before showing a window (ADR-0059).
+    /// data = `[badge u64]` → `[grants u8]` + `ID\0VERSION\0NAME` of the
+    /// running app whose display end carries that badge, `grants` being
+    /// [`super::display_grant`] bits; `NotFound` once it has ended. The
+    /// display service asks before showing a window or a notification
+    /// (ADR-0059, ADR-0065).
     pub const WINDOW_OWNER: u64 = 15;
     /// data = `[length u64]`, handles = `[package]` (a memory object
     /// holding the package's `length` bytes): proposes installing it for
@@ -83,14 +85,15 @@ pub mod op {
     /// data = `[number u32][install u8]`: the user's answer. 1 installs
     /// exactly the bytes proposed; 0 discards them. → as `INSTALL`.
     pub const ACCEPT: u64 = 18;
-    /// data = `[add u8][key: 64 hex digits][publisher]`: trusts a
-    /// developer's publisher key (1), or no longer trusts one added so (0).
+    /// data = `[add u8][key: 64 hex digits][ until=YYYY-MM-DD] [publisher]`:
+    /// trusts a developer's publisher key (1), through a date if given
+    /// (ADR-0067), or no longer trusts one added so (0; data = the key).
     /// Keys from the boot image cannot be removed; a publisher name already
     /// trusted under another key is refused (`Invalid`, ADR-0063).
     pub const TRUST: u64 = 19;
-    /// data = `[index u32]` → `[added u8]` + `KEY PUBLISHER`, the index-th
-    /// trusted key (added: 1 if the user added it, 0 if from the boot
-    /// image); `NotFound` past the last.
+    /// data = `[index u32]` → `[flags u8]` + `KEY [until=YYYY-MM-DD]
+    /// PUBLISHER`, the index-th trusted key (flags: 1 the user added it, 2
+    /// it has expired); `NotFound` past the last.
     pub const TRUSTED: u64 = 20;
     /// data = id → handles = `[bundle]` (a read-only memory object holding
     /// the web app's bundle, verified as for a start), data = `[length
@@ -163,6 +166,14 @@ pub mod access {
             _ => return None,
         })
     }
+}
+
+/// What an app's display end may be used for (`WINDOW_OWNER`).
+pub mod display_grant {
+    /// Windows (`window`, ADR-0059).
+    pub const WINDOW: u8 = 1 << 0;
+    /// Notifications (`notifications`, ADR-0065).
+    pub const NOTIFICATIONS: u8 = 1 << 1;
 }
 
 /// `RUN` flags.

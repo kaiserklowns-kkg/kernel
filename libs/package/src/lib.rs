@@ -69,10 +69,12 @@ pub enum Permission {
     /// Its own windows on the screen (ADR-0059), with the keyboard and
     /// pointer while the user gives one the focus.
     Window,
+    /// Notifications on the desktop, framed with the app's name (ADR-0065).
+    Notifications,
 }
 
 impl Permission {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Console,
         Self::Storage,
         Self::SystemInfo,
@@ -80,6 +82,7 @@ impl Permission {
         Self::Files,
         Self::Pointer,
         Self::Window,
+        Self::Notifications,
     ];
 
     pub fn name(self) -> &'static str {
@@ -91,6 +94,7 @@ impl Permission {
             Self::Files => "files",
             Self::Pointer => "pointer",
             Self::Window => "window",
+            Self::Notifications => "notifications",
         }
     }
 
@@ -108,6 +112,7 @@ impl Permission {
             Self::Files => "read and change your files in /home",
             Self::Pointer => "see your mouse and tablet movements and clicks",
             Self::Window => "show windows, and get what you type into them",
+            Self::Notifications => "show you notifications on the desktop",
         }
     }
 
@@ -371,15 +376,17 @@ impl<'a> Manifest<'a> {
                 "a web app cannot be a service: it runs in a browser",
             ));
         }
-        // A web app reaches the system only through the bridge's app API:
-        // its own data (ADR-0064).
+        // A web app reaches the system only through the bridge: its own
+        // data (ADR-0064), and the network from its page (ADR-0066).
         if runtime == Runtime::Web
             && requests
                 .iter()
                 .flatten()
-                .any(|r| r.permission != Permission::Storage)
+                .any(|r| !matches!(r.permission, Permission::Storage | Permission::Network))
         {
-            return Err(ManifestError::BadText("a web app may ask only for storage"));
+            return Err(ManifestError::BadText(
+                "a web app may ask only for storage and network",
+            ));
         }
         let checks = [
             (
@@ -480,10 +487,104 @@ pub struct TrustedKey<'a> {
     pub key: [u8; 32],
 }
 
-/// The trust list: lines `KEY-HEX PUBLISHER NAME`, `#` comments. Lines
-/// that do not parse are skipped (and reported by [`trust_errors`]).
-pub fn trusted_keys(text: &str) -> impl Iterator<Item = TrustedKey<'_>> {
+/// A trust list line: a key, and the last day it is trusted, if limited
+/// (ADR-0067).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrustEntry<'a> {
+    pub key: TrustedKey<'a>,
+    /// Days since 1970-01-01 ([`date`]): trusted through that day.
+    pub until: Option<u32>,
+}
+
+impl TrustEntry<'_> {
+    /// Whether the key is trusted on `today` (days since 1970-01-01; `None`
+    /// if the time is not known: a limited key is then not trusted).
+    pub fn valid_on(&self, today: Option<u32>) -> bool {
+        match self.until {
+            None => true,
+            Some(until) => today.is_some_and(|today| today <= until),
+        }
+    }
+}
+
+/// The trust list: lines `KEY-HEX [until=YYYY-MM-DD] PUBLISHER NAME`, `#`
+/// comments. Lines that do not parse are skipped (and reported by
+/// [`trust_errors`]).
+pub fn trust_entries(text: &str) -> impl Iterator<Item = TrustEntry<'_>> {
     text.lines().filter_map(parse_trust_line)
+}
+
+/// The keys of a trust list without limits (the boot image's): a limited
+/// line is not trusted here.
+pub fn trusted_keys(text: &str) -> impl Iterator<Item = TrustedKey<'_>> {
+    trust_entries(text)
+        .filter(|entry| entry.until.is_none())
+        .map(|entry| entry.key)
+}
+
+/// Calendar dates as days since 1970-01-01 (ADR-0067).
+pub mod date {
+    /// `YYYY-MM-DD` (years 1970 to 9999).
+    pub fn parse(text: &str) -> Option<u32> {
+        let bytes = text.as_bytes();
+        if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+            return None;
+        }
+        let number = |range: core::ops::Range<usize>| -> Option<u32> {
+            let part = &text[range];
+            part.bytes()
+                .all(|b| b.is_ascii_digit())
+                .then(|| part.parse().ok())?
+        };
+        let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+        if year < 1970 || !(1..=12).contains(&month) || day == 0 || day > days_in(year, month) {
+            return None;
+        }
+        Some(days_from_civil(year, month, day))
+    }
+
+    /// The date of `days` as `(year, month, day)`.
+    pub fn civil(days: u32) -> (u32, u32, u32) {
+        // Howard Hinnant's civil_from_days, for days >= 0.
+        let z = days + 719_468;
+        let era = z / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + u32::from(month <= 2);
+        (year, month, day)
+    }
+
+    /// Today, from milliseconds since 1970 (UTC).
+    pub fn today(unix_ms: u64) -> u32 {
+        (unix_ms / 86_400_000) as u32
+    }
+
+    fn days_from_civil(year: u32, month: u32, day: u32) -> u32 {
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = y / 400;
+        let yoe = y - era * 400;
+        let mp = if month > 2 { month - 3 } else { month + 9 };
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+
+    fn days_in(year: u32, month: u32) -> u32 {
+        match month {
+            4 | 6 | 9 | 11 => 30,
+            2 if year.is_multiple_of(4)
+                && (!year.is_multiple_of(100) || year.is_multiple_of(400)) =>
+            {
+                29
+            }
+            2 => 28,
+            _ => 31,
+        }
+    }
 }
 
 /// How many non-comment lines of a trust list do not parse.
@@ -496,15 +597,25 @@ pub fn trust_errors(text: &str) -> usize {
         .count()
 }
 
-fn parse_trust_line(line: &str) -> Option<TrustedKey<'_>> {
+fn parse_trust_line(line: &str) -> Option<TrustEntry<'_>> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    let (hex, publisher) = line.split_once(' ')?;
-    let publisher = publisher.trim();
+    let (hex, rest) = line.split_once(' ')?;
+    let rest = rest.trim();
+    let (until, publisher) = match rest.strip_prefix("until=") {
+        Some(dated) => {
+            let (day, publisher) = dated.split_once(' ')?;
+            (Some(date::parse(day)?), publisher.trim())
+        }
+        None => (None, rest),
+    };
     let key = parse_hex32(hex)?;
-    text_ok(publisher, MAX_PUBLISHER).then_some(TrustedKey { publisher, key })
+    text_ok(publisher, MAX_PUBLISHER).then_some(TrustEntry {
+        key: TrustedKey { publisher, key },
+        until,
+    })
 }
 
 fn parse_hex32(hex: &str) -> Option<[u8; 32]> {

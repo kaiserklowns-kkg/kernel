@@ -30,6 +30,25 @@ pub mod op {
     pub const EVENTS: u64 = 3;
     /// data = `[window u32]`: closes the window.
     pub const CLOSE: u64 = 4;
+    /// data = text: a notification on the desktop, shown after the app's
+    /// name (ADR-0065). Needs `notifications`; one per
+    /// [`super::NOTIFY_INTERVAL_MS`] per app (`TooMany` sooner).
+    pub const NOTIFY: u64 = 5;
+}
+
+/// Longest notification text, in bytes.
+pub const MAX_NOTIFICATION: usize = 120;
+/// The shortest time between two notifications of one app.
+pub const NOTIFY_INTERVAL_MS: u64 = 3000;
+
+/// A notification's text, if acceptable: 1 to [`MAX_NOTIFICATION`] bytes
+/// of UTF-8, one line, no control characters.
+pub fn notification_text(data: &[u8]) -> Option<&str> {
+    let text = core::str::from_utf8(data).ok()?;
+    let ok = !text.trim().is_empty()
+        && text.len() <= MAX_NOTIFICATION
+        && !text.chars().any(char::is_control);
+    ok.then_some(text.trim())
 }
 
 /// Reply labels.
@@ -38,9 +57,11 @@ pub mod op {
 pub enum Status {
     Ok = 0,
     BadRequest = 1,
-    /// Core does not know the caller as a running app with `window`.
+    /// Core does not know the caller as a running app with `window` (for
+    /// windows) or `notifications` (for notifications).
     NotAllowed = 2,
-    /// The app has [`MAX_WINDOWS_PER_APP`] windows, or the screen is full.
+    /// The app has [`MAX_WINDOWS_PER_APP`] windows, or the screen is full;
+    /// or it notified less than [`NOTIFY_INTERVAL_MS`] ago.
     TooMany = 3,
     /// The display could not make the pixel memory.
     NoMemory = 4,

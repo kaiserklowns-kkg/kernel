@@ -80,6 +80,7 @@ var permissions = []struct{ name, description string }{
 	{"files", "read and change your files in /home"},
 	{"pointer", "see your mouse and tablet movements and clicks"},
 	{"window", "show windows, and get what you type into them"},
+	{"notifications", "show you notifications on the desktop"},
 }
 
 var decisions = []string{"automatic", "allowed", "denied", "undecided"}

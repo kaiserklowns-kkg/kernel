@@ -16,6 +16,7 @@ package window
 import (
 	"encoding/binary"
 	"errors"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 	"unsafe"
@@ -29,7 +30,11 @@ const (
 	opPresent = 2
 	opEvents  = 3
 	opClose   = 4
+	opNotify  = 5
 )
+
+// MaxNotification is the longest notification text, in bytes.
+const MaxNotification = 120
 
 // Limits (oceans_window::proto).
 const (
@@ -233,4 +238,15 @@ func Events(windows oceans.Handle) ([]Event, error) {
 		}
 	}
 	return events, nil
+}
+
+// Notify shows `text` as a notification on the desktop, after the app's
+// name (ADR-0065): one line of at most MaxNotification bytes, one every
+// 3 s. Needs the notifications permission.
+func Notify(windows oceans.Handle, text string) error {
+	if text == "" || len(text) > MaxNotification || !utf8.ValidString(text) || strings.ContainsFunc(text, unicode.IsControl) {
+		return ErrBadSize
+	}
+	_, err := check(oceans.Call(windows, opNotify, []byte(text), nil))
+	return err
 }

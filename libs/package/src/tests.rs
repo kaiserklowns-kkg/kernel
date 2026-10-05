@@ -468,9 +468,56 @@ fn web_apps_cannot_be_services() {
         "entry = web.bundle\nruntime = web\nkind = service",
     );
     assert!(Manifest::parse(&manifest).is_err());
-    // Asking for the network: refused (a web app has only its data).
+    // Storage and the network (ADR-0066), nothing else.
     let manifest = MANIFEST_TEXT.replace("entry = hello", "entry = web.bundle\nruntime = web");
-    assert!(Manifest::parse(&manifest).is_err());
-    let manifest = manifest.replace("permission = network: fetch today's greeting\n", "");
     assert_eq!(Manifest::parse(&manifest).unwrap().runtime, Runtime::Web);
+    let files = manifest.replace("permission = storage", "permission = files");
+    assert!(Manifest::parse(&files).is_err());
+}
+
+#[test]
+fn dates_round_trip() {
+    assert_eq!(date::parse("1970-01-01"), Some(0));
+    assert_eq!(date::parse("2000-03-01"), Some(11_017));
+    assert_eq!(
+        date::parse("2024-02-29").map(date::civil),
+        Some((2024, 2, 29))
+    );
+    for day in (0..30_000).step_by(37) {
+        let (y, m, d) = date::civil(day);
+        assert_eq!(
+            date::parse(&std::format!("{y:04}-{m:02}-{d:02}")),
+            Some(day)
+        );
+    }
+    for bad in [
+        "2023-02-29",
+        "2026-13-01",
+        "2026-00-10",
+        "1969-12-31",
+        "2026-1-01",
+        "2026/01/01",
+        "abcd-ef-gh",
+    ] {
+        assert_eq!(date::parse(bad), None, "{bad}");
+    }
+    assert_eq!(date::today(86_400_000 * 3 + 5), 3);
+}
+
+#[test]
+fn dated_trust_lines_expire() {
+    let key = public_key_hex(&SEED);
+    let text = std::format!("{key} until=2027-01-31 Example Developer\n");
+    let entry = trust_entries(&text).next().unwrap();
+    assert_eq!(entry.key.publisher, "Example Developer");
+    let last = date::parse("2027-01-31").unwrap();
+    assert!(entry.valid_on(Some(last)));
+    assert!(!entry.valid_on(Some(last + 1)));
+    // Without a known time, a limited key is not trusted.
+    assert!(!entry.valid_on(None));
+    // The boot image's list never trusts a limited key.
+    assert_eq!(trusted_keys(&text).count(), 0);
+    let bad = std::format!("{key} until=2027-02-30 Example Developer\n");
+    assert_eq!(trust_entries(&bad).count(), 0);
+    assert_eq!(trust_errors(&bad), 1);
 }

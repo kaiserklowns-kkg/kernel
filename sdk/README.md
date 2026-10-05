@@ -24,10 +24,12 @@ The Rust API, by area (master spec §40):
 | Network | `network`: TCP, UDP, names | `network` |
 | UI | `ui`: windows the system frames | `window` |
 | System | `system`: memory, uptime | `system-info` |
+| Notification | `notification`: notifications on the desktop (ADR-0065) | `notifications` (asked) |
 | Permission | `permission`: the names a manifest may use | — |
 
-Notifications and the AI runtime are not open to apps at API level 1. Apps
-never use kernel or service internals: only what is listed here.
+The AI runtime is not open to apps at API level 1. Apps never use kernel
+or service internals: only what is listed here. Go apps notify with
+`window.Notify`.
 
 ## Getting started
 
@@ -73,8 +75,10 @@ The tool is then at `target/release/oceans` (`oceans.exe` on Windows).
    app trust add <KEY> Your Name
    ```
 
-   Only the console can do this, and it is in the audit log. `app trust`
-   lists the trusted keys; `app trust remove KEY` takes yours back.
+   Only the console can do this, and it is in the audit log. Add
+   `--until YYYY-MM-DD` to trust it only through that day (ADR-0067).
+   `app trust` lists the trusted keys; `app trust remove KEY` takes yours
+   back.
 5. **Install.** Either copy the package over and run `app install FILE`,
    or serve it as a store:
 
@@ -98,7 +102,10 @@ like any other. The bridge serves it to the paired browser at
   and no way into the system's pages or other apps.
 - **Its data:** it keeps data through the app API in `src/lib/oceans.js`
   (`load(name)`, `save(name, text)`; at most 16 KiB per name). Its manifest
-  must ask for `storage`, and may ask for nothing else.
+  must ask for `storage`.
+- **The network:** it may also ask for `network`. Once the user allows it
+  (`app grant ID network`), its page may connect to https servers
+  (ADR-0066). It may ask for nothing else.
 - **Not on the device yet:** it runs in the paired browser; the same app
   will run on Oceans once it has a web view (ADR-0056).
 

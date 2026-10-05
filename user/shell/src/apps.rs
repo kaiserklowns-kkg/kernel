@@ -21,7 +21,7 @@ const USAGE: &str = "usage: app list | info ID | install PATH | run ID [ARGS...]
                      start ID [ARGS...] | stop ID | enable ID | disable ID | \
                      remove ID [--keep-data] | \
                      grant ID PERMISSION | revoke ID PERMISSION | rollback ID | audit | \
-                     trust [add KEY PUBLISHER | remove KEY]\r\n";
+                     trust [add KEY PUBLISHER [--until YYYY-MM-DD] | remove KEY]\r\n";
 
 impl Shell {
     fn core(&self) -> Option<Core> {
@@ -76,15 +76,35 @@ impl Shell {
             match core.call(op::TRUSTED, &index.to_le_bytes(), &[], &mut reply) {
                 Ok(got) if got.len > 65 => {
                     let line = core::str::from_utf8(&reply[1..got.len]).unwrap_or("?");
-                    let (key, publisher) = line.split_once(' ').unwrap_or((line, "?"));
-                    self.print(format_args!(
-                        "  {publisher}  {}…  {}\r\n",
-                        &key[..16.min(key.len())],
-                        if reply[0] != 0 {
-                            "added by you"
-                        } else {
-                            "from the system image"
+                    let (key, rest) = line.split_once(' ').unwrap_or((line, "?"));
+                    // `until=YYYY-MM-DD PUBLISHER` for a dated key (ADR-0067).
+                    let (until, publisher) = match rest.strip_prefix("until=") {
+                        Some(dated) => {
+                            let (day, publisher) = dated.split_once(' ').unwrap_or((dated, "?"));
+                            (Some(day), publisher)
                         }
+                        None => (None, rest),
+                    };
+                    let flags = reply[0];
+                    let source = if flags & 1 != 0 {
+                        "added by you"
+                    } else {
+                        "from the system image"
+                    };
+                    let mut limit = Buffer::<40>::new();
+                    match (until, flags & 2 != 0) {
+                        (Some(day), true) => {
+                            let _ = write!(limit, ", expired after {day}");
+                        }
+                        (Some(day), false) => {
+                            let _ = write!(limit, ", until {day}");
+                        }
+                        (None, _) => {}
+                    }
+                    self.print(format_args!(
+                        "  {publisher}  {}…  {source}{}\r\n",
+                        &key[..16.min(key.len())],
+                        limit.as_str()
                     ));
                 }
                 Err((CoreError::Status(Status::NotFound), _)) => return,
@@ -97,9 +117,18 @@ impl Shell {
     /// `app trust add KEY PUBLISHER` / `app trust remove KEY`: only here,
     /// at the console, can a developer's key become trusted.
     fn app_trust(&self, core: Core, add: bool, key: &str, publisher: &[&str]) {
+        // `--until YYYY-MM-DD` at the end limits the trust (ADR-0067).
+        let (publisher, until) = match publisher {
+            [name @ .., "--until", day] if !name.is_empty() => (name, Some(*day)),
+            _ => (publisher, None),
+        };
         let mut data = Buffer::<200>::new();
         let _ = data.write_char(if add { '\u{1}' } else { '\0' });
         let _ = data.write_str(key);
+        if let Some(day) = until {
+            let _ = write!(data, " until={day}");
+        }
+        let start = data.as_str().len() + 1;
         for word in publisher {
             let _ = write!(data, " {word}");
         }
@@ -108,7 +137,7 @@ impl Shell {
             Ok(_) if add => self.print(format_args!(
                 "app: packages signed with {}… for {} can now be installed\r\n",
                 &key[..16.min(key.len())],
-                data.as_str().get(2 + key.len()..).unwrap_or("?")
+                data.as_str().get(start..).unwrap_or("?")
             )),
             Ok(_) => self.print(format_args!(
                 "app: key {}… no longer trusted; its apps no longer start\r\n",

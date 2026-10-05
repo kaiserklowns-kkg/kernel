@@ -16,6 +16,8 @@ type fake struct {
 	// A web app's bundle (ADR-0064), and whether it is installed.
 	bundle []byte
 	webApp bool
+	// The web app's network decision (ADR-0066; "" = it does not ask).
+	network string
 }
 
 func (f *fake) Info() (SystemInfo, error) {
@@ -46,7 +48,11 @@ func (f *fake) Stop(id string) error {
 func (f *fake) Permissions(id string) ([]Permission, error) {
 	if id == "app.example.notes" {
 		storage, _ := parsePermission([]byte{1, 0})
-		return []Permission{storage}, nil
+		permissions := []Permission{storage}
+		if f.network != "" {
+			permissions = append(permissions, Permission{Name: "network", Decision: f.network})
+		}
+		return permissions, nil
 	}
 	p, _ := parsePermission([]byte{3, 3, 'w', 'h', 'y'})
 	return []Permission{p}, nil

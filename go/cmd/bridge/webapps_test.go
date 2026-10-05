@@ -169,3 +169,26 @@ func TestTheAppAPIReachesOnlyTheAppsOwnData(t *testing.T) {
 		t.Errorf("nothing stored: %d", resp.status)
 	}
 }
+
+func TestTheNetworkIsOnlyForAllowedWebApps(t *testing.T) {
+	if got := withNetwork("default-src 'self'; connect-src 'self'; img-src 'self'"); got !=
+		"default-src 'self'; connect-src 'self' https:; img-src 'self'" {
+		t.Fatalf("%q", got)
+	}
+	if got := withNetwork("default-src 'self'"); got != "default-src 'self'; connect-src 'self' https:" {
+		t.Fatalf("%q", got)
+	}
+	if got := withNetwork("connect-src 'none'"); got != "connect-src https:" {
+		t.Fatalf("%q", got)
+	}
+	b, sys, _ := newWebBridge(t)
+	page := app(b, "GET", "/app.example.notes/", testToken, "")
+	if strings.Contains(header(page, "Content-Security-Policy"), "https:") {
+		t.Fatal("the network without the permission")
+	}
+	sys.network = "allowed"
+	page = app(b, "GET", "/app.example.notes/", testToken, "")
+	if !strings.Contains(header(page, "Content-Security-Policy"), "https:") {
+		t.Fatalf("no network once allowed: %s", header(page, "Content-Security-Policy"))
+	}
+}

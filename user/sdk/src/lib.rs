@@ -9,13 +9,14 @@
 //! | Network | [`network`] | TCP, UDP and names through the network service (`network`) |
 //! | UI | [`ui`] | windows the system frames (`window`, ADR-0059) |
 //! | System | [`system`] | memory and uptime, read-only (`system-info`) |
+//! | Notification | [`notification`] | notifications on the desktop (`notifications`) |
 //! | Permission | [`permission`] | the permission names a manifest may ask for |
 //!
 //! An app gets only what its manifest asks for and the user allows: each
 //! area's handle is found in the directory (`None` when not granted), and
 //! an app must keep working without it.
 //!
-//! Notifications and the AI runtime are not open to apps at API level 1.
+//! The AI runtime is not open to apps at API level 1.
 
 #![no_std]
 
@@ -90,6 +91,21 @@ pub mod ui {
     /// The window endpoint (`window`).
     pub fn windows(directory: &Directory) -> Option<Handle> {
         directory.find("use", "windows")
+    }
+}
+
+/// Notifications on the desktop (`notifications`, ADR-0065): one short
+/// line, shown after the app's name as the system knows it.
+pub mod notification {
+    pub use oceans_display_proto::WindowError as Error;
+
+    use super::app::Directory;
+
+    /// Shows `text` (one line, at most 120 bytes; one every 3 s).
+    pub fn notify(directory: &Directory, text: &str) -> Result<(), Error> {
+        let display = super::ui::windows(directory)
+            .ok_or(Error::Refused(oceans_display_proto::Status::NotAllowed))?;
+        oceans_display_proto::notify(display, text)
     }
 }
 
