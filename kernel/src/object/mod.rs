@@ -134,7 +134,9 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::WAIT)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
+        // READ: the kept log (ADR-0070); init passes it on only when asked.
         ObjectKind::Log => Rights::WRITE
+            .union(Rights::READ)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::SystemInfo => Rights::READ

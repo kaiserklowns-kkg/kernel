@@ -52,6 +52,7 @@ const USER_PROGRAMS: &[&str] = &[
     "date",
     "lsusb",
     "sysreport",
+    "diag",
     "apps",
     "mouse",
     "ipc-test",
@@ -174,6 +175,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"cat /docs/note.txt\r\n",
     b"write /bin/evil x\r\n",
     b"rm /bin/crasher\r\n",
+    // Diagnostics (ADR-0070): the log the kernel keeps, read only with the
+    // `logs` grant; the crasher test service's faults are in it.
+    b"run diag out -- crashes\r\n",
+    b"run diag out logs -- crashes\r\n",
+    b"run diag out logs sysinfo use:fs -- save /docs/diag.txt\r\n",
     // Programs come from /bin and get only the typed authority.
     b"run hello-client log use:echo\r\n",
     b"run /bin/crasher log\r\n",
@@ -568,7 +574,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 14)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 15)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -590,6 +596,11 @@ const REBOOT_EXPECT: &[Expect] = &[
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
 const SHELL_EXPECT: &[Expect] = &[
+    // Diagnostics (ADR-0070).
+    Expect::Contains("diag: needs the logs capability"),
+    Expect::Contains(" lines of trouble in the kept log:"),
+    Expect::Contains("  [WARN ] process: process init/crasher killed: page fault"),
+    Expect::Contains("diag: saved "),
     Expect::Contains("Oceans shell."),
     Expect::Contains("run PROGRAM [GRANT...]"),
     Expect::Line("hello from the shell"),
@@ -606,7 +617,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 14)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 15)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),

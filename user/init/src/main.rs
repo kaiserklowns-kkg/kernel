@@ -79,6 +79,8 @@ enum Restart {
 #[derive(Clone, Copy)]
 enum Grant {
     Log,
+    /// Reading the kept log (ADR-0070).
+    LogRead,
     Console,
     SystemInfo,
     Devices,
@@ -348,6 +350,7 @@ fn parse(
             "grant" | "provide" | "use" => {
                 let grant = match (key, value) {
                     ("grant", "log") => Grant::Log,
+                    ("grant", "log-read") => Grant::LogRead,
                     ("grant", "console") => Grant::Console,
                     ("grant", "sysinfo") => Grant::SystemInfo,
                     ("grant", "devices") => Grant::Devices,
@@ -377,7 +380,7 @@ fn parse(
                             }
                         } else {
                             return error(
-                                "unknown grant (known: log, console, console-input, sysinfo, devices, display, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
+                                "unknown grant (known: log, log-read, console, console-input, sysinfo, devices, display, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
                             );
                         }
                     }
@@ -504,6 +507,16 @@ impl Init {
             for grant in service.grants.iter().flatten() {
                 let (handle, kind, name) = match *grant {
                     Grant::Log => (oceans_rt::duplicate(self.log, LOG_RIGHTS)?, "log", "log"),
+                    // Reading the kept log (ADR-0070): it may hold what users
+                    // and agents did, so only on request.
+                    Grant::LogRead => (
+                        oceans_rt::duplicate(
+                            self.log,
+                            rights::READ | rights::DUPLICATE | rights::TRANSFER,
+                        )?,
+                        "logs",
+                        "logs",
+                    ),
                     Grant::Console => (
                         oceans_rt::duplicate(self.console, CONSOLE_RIGHTS)?,
                         "console",

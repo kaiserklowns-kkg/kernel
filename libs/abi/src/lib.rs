@@ -22,9 +22,10 @@
 /// notifications, timers, clock); 9 = ADR-0026 (38: random); 10 = ADR-0031
 /// (39: wall time); 11 = ADR-0032 (40: console input; class selectors for
 /// `DEVICE_OPEN`); 12 = ADR-0044 (41: kill); 13 = ADR-0057 (42–44:
-/// display); 14 = ADR-0059 (45–46: the keyboard to the desktop). Versions only
+/// display); 14 = ADR-0059 (45–46: the keyboard to the desktop); 15 =
+/// ADR-0070 (47: reading the log). Versions only
 /// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 14;
+pub const ABI_VERSION: u64 = 15;
 
 /// System call numbers.
 pub mod nr {
@@ -233,6 +234,17 @@ pub mod nr {
     /// without waiting (0: none). Only the keyboard's holder (else
     /// `Busy`). Needs `READ`.
     pub const DISPLAY_KEYS: u64 = 46;
+
+    // ABI 15 (ADR-0070)
+
+    /// `(log, from, ptr, capacity) -> (len, start)` — log text the kernel
+    /// keeps (its last [`LOG_RING`](super::LOG_RING) bytes of lines at
+    /// level INFO and above, services' lines included), from byte `from`
+    /// of everything ever logged, or from the oldest still kept: `start`
+    /// is where the copy begins, `start + len` where to continue. At most
+    /// [`LOG_READ_MAX`](super::LOG_READ_MAX) per call. Needs `READ` on the
+    /// log, which init grants only on request (`grant = log-read`).
+    pub const LOG_READ: u64 = 47;
 }
 
 /// The display (ADR-0057).
@@ -304,6 +316,11 @@ pub mod display {
 /// The exit code of a process ended by `PROCESS_KILL` (ADR-0044). Exit
 /// codes from CPU exceptions are `-128 - vector`, so they never collide.
 pub const EXIT_KILLED: i64 = -127;
+
+/// Bytes of log the kernel keeps for `LOG_READ` (ADR-0070).
+pub const LOG_RING: usize = 64 * 1024;
+/// Largest single `LOG_READ`.
+pub const LOG_READ_MAX: usize = 16 * 1024;
 
 /// Largest single `RANDOM` request, in bytes.
 pub const RANDOM_MAX: usize = 256;

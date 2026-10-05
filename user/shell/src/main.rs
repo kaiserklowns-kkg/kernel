@@ -861,6 +861,13 @@ impl Shell {
                 "sysinfo",
                 "sysinfo",
             ),
+            // The kept log (ADR-0070): read-only.
+            "logs" => (
+                self.directory.find("logs", "logs"),
+                rights::READ | rights::TRANSFER,
+                "logs",
+                "logs",
+            ),
             // The PCI device list (ADR-0021): read-only, no device access.
             "devices" => (
                 self.directory.find("devices", "devices"),
@@ -897,7 +904,7 @@ impl Shell {
                 ),
                 None => {
                     return Err(
-                        "unknown grant (log, console, out, sysinfo, devices, use:ENDPOINT, core:RIGHTS)",
+                        "unknown grant (log, logs, console, out, sysinfo, devices, use:ENDPOINT, core:RIGHTS)",
                     );
                 }
             },

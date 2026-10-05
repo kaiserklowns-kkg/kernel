@@ -80,6 +80,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DISPLAY_TEXT => display_text(&process, a0, a1, a2),
         nr::DISPLAY_KEYBOARD => display_keyboard(&process, a0, a1, a2),
         nr::DISPLAY_KEYS => display_keys(&process, a0, a1, a2),
+        nr::LOG_READ => log_read(&process, a0, a1, a2, a3),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
         nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
@@ -151,6 +152,28 @@ fn debug_write(process: &Process, log: u64, ptr: u64, len: u64) -> SyscallResult
     let text = core::str::from_utf8(&buffer[..len]).unwrap_or("<invalid UTF-8>");
     klog::info!("[{}] {}", process.name(), text.trim_end_matches('\n'));
     Ok((0, 0))
+}
+
+/// `LOG_READ` (ADR-0070): the kept log, for holders of `READ` on it.
+fn log_read(process: &Process, log: u64, from: u64, ptr: u64, capacity: u64) -> SyscallResult {
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        match table
+            .get(handle(log), Rights::READ)
+            .map_err(cap_error)?
+            .object()
+        {
+            KernelObject::Log => Ok(()),
+            _ => Err(Error::WrongType),
+        }
+    })?;
+    let capacity = usize::try_from(capacity)
+        .unwrap_or(usize::MAX)
+        .min(oceans_abi::LOG_READ_MAX);
+    let mut buffer = alloc::vec![0u8; capacity];
+    let (count, start) = klog::read(from, &mut buffer);
+    process.copy_to_user(ptr, &buffer[..count])?;
+    Ok((count as u64, start))
 }
 
 fn close(process: &Process, raw: u64) -> SyscallResult {

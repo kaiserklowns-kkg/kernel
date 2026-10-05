@@ -2,7 +2,8 @@
 //!
 //! Lines have the form `[LEVEL] subsystem: message` and go to the
 //! architecture console (serial on x86_64). Diagnostics never depend on a
-//! display (master spec §42).
+//! display (master spec §42). Lines at INFO and above are also kept in a
+//! ring for `LOG_READ` (ADR-0070), so diagnostics need no serial cable.
 
 use core::fmt::{self, Write};
 
@@ -101,12 +102,59 @@ impl Write for Console {
         if self.screen {
             if self.emergency {
                 crate::display::try_write(s.as_bytes());
+                if let Some(mut ring) = RING.try_lock() {
+                    ring.append(s.as_bytes());
+                }
             } else {
                 crate::display::write(s.as_bytes());
+                RING.lock().append(s.as_bytes());
             }
         }
         Ok(())
     }
+}
+
+const RING_SIZE: usize = oceans_abi::LOG_RING;
+
+/// The log kept for `LOG_READ` (ADR-0070): the last `RING_SIZE` bytes of
+/// lines at INFO and above. Taken with preemption disabled (under
+/// `CONSOLE`, or by `read`); never by an interrupt handler.
+struct Ring {
+    bytes: [u8; RING_SIZE],
+    /// Bytes ever written: the next byte's position.
+    written: u64,
+}
+
+static RING: Mutex<Ring> = Mutex::new(Ring {
+    bytes: [0; RING_SIZE],
+    written: 0,
+});
+
+impl Ring {
+    fn append(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.bytes[(self.written % RING_SIZE as u64) as usize] = byte;
+            self.written += 1;
+        }
+    }
+
+    /// Copies from position `from` (or the oldest byte kept) into `out`;
+    /// returns how many and from where.
+    fn read(&self, from: u64, out: &mut [u8]) -> (usize, u64) {
+        let oldest = self.written.saturating_sub(RING_SIZE as u64);
+        let start = from.clamp(oldest, self.written);
+        let count = ((self.written - start) as usize).min(out.len());
+        for (i, slot) in out[..count].iter_mut().enumerate() {
+            *slot = self.bytes[((start + i as u64) % RING_SIZE as u64) as usize];
+        }
+        (count, start)
+    }
+}
+
+/// `LOG_READ`: kept log text from position `from` (see [`Ring::read`]).
+pub fn read(from: u64, out: &mut [u8]) -> (usize, u64) {
+    let _no_preempt = sched::NoPreempt::new();
+    RING.lock().read(from, out)
 }
 
 macro_rules! log_at {

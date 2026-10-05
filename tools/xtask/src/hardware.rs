@@ -235,7 +235,7 @@ const HW_SCRIPT: &[&[u8]] = &[
     b"run sysreport out devices sysinfo use:net use:usb\r\n",
 ];
 const HW_EXPECT: &[Expect] = &[
-    Expect::Contains("(ABI 14)"),
+    Expect::Contains("(ABI 15)"),
     Expect::Contains("fs: formatted a blank disk"),
     Expect::Line("app: no apps installed"),
     // The boot stick itself, as removable media (ADR-0035): its ESP.

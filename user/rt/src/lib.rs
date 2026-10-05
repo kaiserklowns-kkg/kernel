@@ -439,6 +439,24 @@ pub fn display_keys(display: Handle, buffer: &mut [u8]) -> Result<usize, Error> 
     .map(|(count, _)| count as usize)
 }
 
+/// Kept log text from position `from` (ABI 15, ADR-0070; needs `READ` on
+/// the log): returns how many bytes, and the position they start at (later
+/// than `from` if that was no longer kept).
+pub fn log_read(log: Handle, from: u64, buffer: &mut [u8]) -> Result<(usize, u64), Error> {
+    call(
+        nr::LOG_READ,
+        [
+            log.0,
+            from,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+        ],
+    )
+    .map(|(count, start)| (count as usize, start))
+}
+
 /// Blocks until any bit is set; returns and clears them (needs `WAIT`).
 pub fn notification_wait(notification: Handle) -> Result<u64, Error> {
     call(nr::NOTIFICATION_WAIT, [notification.0, 0, 0, 0, 0, 0]).map(|(bits, _)| bits)
