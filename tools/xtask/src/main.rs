@@ -55,6 +55,7 @@ const USER_PROGRAMS: &[&str] = &[
     "lsusb",
     "sysreport",
     "diag",
+    "logkeep",
     "update",
     "apps",
     "mouse",
@@ -518,6 +519,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
 /// 82574L in place of the virtio NIC (ADR-0041): the same stack, unchanged,
 /// must get its address by DHCP and carry ICMP, UDP, TCP and HTTP over it.
 const REBOOT_SCRIPT: &[&[u8]] = &[
+    // The previous boot's log, kept on disk (ADR-0074): the crasher test
+    // service's faults of the first boot are in it.
+    b"run diag out logs use:fs -- previous 3\r\n",
     b"app run app.example.counter\r\n",
     b"cat /keep/note.txt\r\n",
     b"ls /keep\r\n",
@@ -546,6 +550,10 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"exit\r\n",
 ];
 const REBOOT_EXPECT: &[Expect] = &[
+    Expect::Contains("logkeep: keeping the log in /system/logs/boot.log"),
+    Expect::Contains("diag: the previous boot's log, "),
+    Expect::Contains("  [WARN ] process: process init/crasher killed: page fault"),
+    Expect::Line("diag: its last 3 lines:"),
     Expect::Contains("fs (media): mounted the disk"),
     Expect::Line("  usb/"),
     Expect::Line("  big.bin"),

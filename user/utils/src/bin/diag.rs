@@ -7,11 +7,14 @@
 //!                    failed or restarted services
 //! diag save PATH     a report (system, crashes, the whole kept log) to a
 //!                    file, e.g. /usb/diag.txt, to send
+//! diag previous [LINES]  the previous boot's log, as `logkeep` kept it on
+//!                    disk (ADR-0074): what went wrong, then its last lines
 //! ```
 //!
 //! Needs `logs` (`run diag out logs ...`), which the shell holds only
 //! because init granted it (`grant = log-read`); `save` also needs
-//! `use:fs`, and `sysinfo` adds the system's summary.
+//! `use:fs`, and `sysinfo` adds the system's summary; `previous` needs
+//! `use:fs` too.
 
 #![no_std]
 #![no_main]
@@ -30,7 +33,9 @@ use utils::{EXIT_FAILED, EXIT_USAGE, console, require};
 oceans_rt::manifest!(b"grant out\n");
 oceans_rt::entry!(main);
 
-const USAGE: &str = "usage: diag log [LINES] | crashes | save PATH";
+const USAGE: &str = "usage: diag log [LINES] | crashes | save PATH | previous [LINES]";
+/// The previous boot's log (ADR-0074).
+const PREVIOUS: &str = "system/logs/previous-boot.log";
 
 /// What a crash, a failure or trouble looks like in the log.
 const TROUBLE: &[&str] = &[
@@ -77,6 +82,13 @@ fn main(start: Start) -> i64 {
             }
         }
         (Some("save"), Some(path), None) => return save(&mut out, &directory, &log, path),
+        (Some("previous"), count, None) => {
+            let Ok(count) = count.map_or(Ok(20), str::parse) else {
+                let _ = writeln!(out, "{USAGE}");
+                return EXIT_USAGE;
+            };
+            return previous(&mut out, &directory, count);
+        }
         _ => {
             let _ = writeln!(out, "{USAGE}");
             return EXIT_USAGE;
@@ -121,6 +133,43 @@ fn last_lines(out: &mut oceans_rt::Out, log: &str, count: usize) {
     for line in &lines[lines.len().saturating_sub(count)..] {
         let _ = writeln!(out, "{line}");
     }
+}
+
+/// The previous boot's log from disk, if `logkeep` kept one.
+fn previous_log(fs: &Node) -> Option<String> {
+    let (file, kind) = fs.walk(PREVIOUS, 0).ok()?;
+    let mut bytes = Vec::new();
+    if kind == Kind::File {
+        let mut chunk = [0u8; 4096];
+        while let Ok(got @ 1..) = file.read(bytes.len() as u64, &mut chunk) {
+            bytes.extend_from_slice(&chunk[..got]);
+        }
+    }
+    file.close();
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn previous(out: &mut oceans_rt::Out, directory: &Directory, count: usize) -> i64 {
+    let fs = match require(out, directory, "diag", "use", "fs", "use:fs") {
+        Ok(fs) => Node(fs),
+        Err(code) => return code,
+    };
+    let Some(log) = previous_log(&fs) else {
+        let _ = writeln!(out, "diag: no log from a previous boot (/{PREVIOUS})");
+        return 0;
+    };
+    let found = troubles(&log).count();
+    let _ = writeln!(
+        out,
+        "diag: the previous boot's log, {} bytes: {found} lines of trouble",
+        log.len()
+    );
+    for line in troubles(&log) {
+        let _ = writeln!(out, "  {line}");
+    }
+    let _ = writeln!(out, "diag: its last {count} lines:");
+    last_lines(out, &log, count);
+    0
 }
 
 fn save(out: &mut oceans_rt::Out, directory: &Directory, log: &str, path: &str) -> i64 {
@@ -168,6 +217,15 @@ fn save(out: &mut oceans_rt::Out, directory: &Directory, log: &str, path: &str) 
     }
     report.push_str("\n== the kept log ==\n");
     report.push_str(log);
+    if let Some(previous) = previous_log(&fs) {
+        report.push_str("\n== the previous boot: what went wrong (ADR-0074) ==\n");
+        for line in troubles(&previous) {
+            report.push_str(line);
+            report.push('\n');
+        }
+        report.push_str("\n== the previous boot's log ==\n");
+        report.push_str(&previous);
+    }
 
     let file = fs.walk(path, flags::CREATE_FILE | flags::WRITE);
     let written = file.and_then(|(file, kind)| {

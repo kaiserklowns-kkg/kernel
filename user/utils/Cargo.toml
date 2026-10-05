@@ -88,6 +88,11 @@ test = false
 bench = false
 
 [[bin]]
+name = "logkeep"
+test = false
+bench = false
+
+[[bin]]
 name = "update"
 test = false
 bench = false

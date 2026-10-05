@@ -107,3 +107,5 @@ The update is checked against the update keys of the release that is
 running, and it starts at the next boot. If it does not start, choose the
 "(previous)" entry in the boot menu. `run diag out logs sysinfo use:fs --
 save /usb/diag.txt` saves what went wrong, to attach to a report (ADR-0070).
+After a hang or a reset, `run diag out logs use:fs -- previous` shows the
+boot before it, and `diag save` includes it (ADR-0074).
