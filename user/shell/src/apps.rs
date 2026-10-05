@@ -20,7 +20,8 @@ use super::{LINE_MAX, Shell};
 const USAGE: &str = "usage: app list | info ID | install PATH | run ID [ARGS...] | \
                      start ID [ARGS...] | stop ID | enable ID | disable ID | \
                      remove ID [--keep-data] | \
-                     grant ID PERMISSION | revoke ID PERMISSION | rollback ID | audit\r\n";
+                     grant ID PERMISSION | revoke ID PERMISSION | rollback ID | audit | \
+                     trust [add KEY PUBLISHER | remove KEY]\r\n";
 
 impl Shell {
     fn core(&self) -> Option<Core> {
@@ -59,7 +60,61 @@ impl Shell {
                 }
             }
             ["audit"] => self.app_audit(core),
+            ["trust"] => self.app_trusted(core),
+            ["trust", "add", key, publisher @ ..] if !publisher.is_empty() => {
+                self.app_trust(core, true, key, publisher)
+            }
+            ["trust", "remove", key] => self.app_trust(core, false, key, &[]),
             _ => self.write(USAGE.as_bytes()),
+        }
+    }
+
+    /// `app trust` (ADR-0063): the publisher keys Core trusts.
+    fn app_trusted(&self, core: Core) {
+        let mut reply = [0u8; 256];
+        for index in 0u32.. {
+            match core.call(op::TRUSTED, &index.to_le_bytes(), &[], &mut reply) {
+                Ok(got) if got.len > 65 => {
+                    let line = core::str::from_utf8(&reply[1..got.len]).unwrap_or("?");
+                    let (key, publisher) = line.split_once(' ').unwrap_or((line, "?"));
+                    self.print(format_args!(
+                        "  {publisher}  {}…  {}\r\n",
+                        &key[..16.min(key.len())],
+                        if reply[0] != 0 {
+                            "added by you"
+                        } else {
+                            "from the system image"
+                        }
+                    ));
+                }
+                Err((CoreError::Status(Status::NotFound), _)) => return,
+                Ok(_) => return,
+                Err((error, _)) => return self.app_error("trust", error, &[]),
+            }
+        }
+    }
+
+    /// `app trust add KEY PUBLISHER` / `app trust remove KEY`: only here,
+    /// at the console, can a developer's key become trusted.
+    fn app_trust(&self, core: Core, add: bool, key: &str, publisher: &[&str]) {
+        let mut data = Buffer::<200>::new();
+        let _ = data.write_char(if add { '\u{1}' } else { '\0' });
+        let _ = data.write_str(key);
+        for word in publisher {
+            let _ = write!(data, " {word}");
+        }
+        let mut reply = [0u8; 128];
+        match core.call(op::TRUST, data.as_bytes(), &[], &mut reply) {
+            Ok(_) if add => self.print(format_args!(
+                "app: packages signed with {}… for {} can now be installed\r\n",
+                &key[..16.min(key.len())],
+                data.as_str().get(2 + key.len()..).unwrap_or("?")
+            )),
+            Ok(_) => self.print(format_args!(
+                "app: key {}… no longer trusted; its apps no longer start\r\n",
+                &key[..16.min(key.len())]
+            )),
+            Err((error, len)) => self.app_error("trust", error, &reply[..len.min(reply.len())]),
         }
     }
 

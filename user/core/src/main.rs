@@ -69,6 +69,8 @@ const RESTART_DELAY_MS: u64 = 1000;
 const MAX_PACKAGE: u64 = 32 << 20;
 /// Bytes moved per filesystem request.
 const FILE_BUFFER: usize = 128 * 1024;
+/// Developers' keys the user trusts (ADR-0063), in `/system`.
+const TRUST_FILE: &str = "trust.keys";
 /// Audit entries kept in memory for `AUDIT` (all go to the log file).
 const AUDIT_KEPT: usize = 64;
 /// Handles an app may get besides its directory: one per permission, a
@@ -240,6 +242,9 @@ struct Core {
     /// The Go host's image, for `wasm` apps (ADR-0052).
     gohost: Option<Handle>,
     trusted: Vec<(String, [u8; 32])>,
+    /// How many of `trusted` came with the boot image (the rest the user
+    /// added, ADR-0063).
+    boot_keys: usize,
     apps: BTreeMap<String, App>,
     /// The user's decisions: `true` allowed, `false` denied.
     decisions: BTreeMap<(String, Permission), bool>,
@@ -279,9 +284,22 @@ impl Core {
             .find("module", "trust.keys")
             .and_then(oceans_rt::map_text)
             .unwrap_or("");
-        let trusted: Vec<(String, [u8; 32])> = oceans_package::trusted_keys(trust_text)
+        let mut trusted: Vec<(String, [u8; 32])> = oceans_package::trusted_keys(trust_text)
             .map(|t| (t.publisher.to_owned(), t.key))
             .collect();
+        let boot_keys = trusted.len();
+        // Developers' keys the user added (ADR-0063), after the image's.
+        if let Ok(bytes) = read_path(&system_dir, TRUST_FILE) {
+            let text = core::str::from_utf8(&bytes).unwrap_or("");
+            for key in oceans_package::trusted_keys(text) {
+                if !trusted
+                    .iter()
+                    .any(|(p, k)| *k == key.key || *p == key.publisher)
+                {
+                    trusted.push((key.publisher.to_owned(), key.key));
+                }
+            }
+        }
         let bad = oceans_package::trust_errors(trust_text);
         if bad > 0 {
             say(
@@ -304,6 +322,7 @@ impl Core {
             next_proposal: 0,
             gohost: directory.find("module", "gohost"),
             trusted,
+            boot_keys,
             apps: BTreeMap::new(),
             decisions: BTreeMap::new(),
             running: [const { None }; MAX_RUNNING],
@@ -744,6 +763,14 @@ impl Core {
                     op::DISABLE => self.disable(data),
                     op::WINDOW_OWNER => self.window_owner(data, reply),
                     op::PENDING => self.pending(reply),
+                    op::TRUST => self.change_trust(data),
+                    op::TRUSTED => {
+                        let index = u32_at(data)? as usize;
+                        let (publisher, key) = self.trusted.get(index).ok_or(Status::NotFound)?;
+                        reply.push(u8::from(index >= self.boot_keys));
+                        let _ = write!(Text(reply), "{} {publisher}", hex32(key));
+                        Ok(())
+                    }
                     op::ACCEPT => self.accept(data, reply),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
@@ -877,6 +904,76 @@ impl Core {
             previous.map(|v| alloc::format!("{v}")).unwrap_or_default()
         );
         Ok(())
+    }
+
+    // ---- Developers' keys (ADR-0063) -------------------------------------------
+
+    /// `TRUST`: adds or removes a developer's publisher key; kept in
+    /// `/system/trust.keys` and audited.
+    fn change_trust(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let (&add, line) = data.split_first().ok_or(Status::BadRequest)?;
+        let line = core::str::from_utf8(line).map_err(|_| Status::BadRequest)?;
+        let refuse = |why: &str| Refusal {
+            status: Status::Invalid,
+            text: Some(why.to_owned()),
+        };
+        match add {
+            1 => {
+                let key = oceans_package::trusted_keys(line)
+                    .next()
+                    .filter(|_| line.lines().count() == 1)
+                    .ok_or_else(|| {
+                        refuse("give the key as 64 hex digits, then the publisher's name")
+                    })?;
+                if self.trusted.iter().any(|(_, k)| *k == key.key) {
+                    return Err(refuse("that key is already trusted"));
+                }
+                if self.trusted.iter().any(|(p, _)| p == key.publisher) {
+                    return Err(refuse("another key is trusted for that publisher name"));
+                }
+                let (publisher, key) = (key.publisher.to_owned(), key.key);
+                self.trusted.push((publisher.clone(), key));
+                if let Err(refusal) = self.save_trust() {
+                    self.trusted.pop();
+                    return Err(refusal);
+                }
+                self.record(format_args!(
+                    "now trusts key {} for publisher {publisher} (added at the console)",
+                    &hex32(&key)[..16]
+                ));
+            }
+            0 => {
+                let index = self
+                    .trusted
+                    .iter()
+                    .position(|(_, k)| hex32(k) == line.trim())
+                    .ok_or(Status::NotFound)?;
+                if index < self.boot_keys {
+                    return Err(refuse("keys from the boot image cannot be removed"));
+                }
+                let (publisher, key) = self.trusted.remove(index);
+                if let Err(refusal) = self.save_trust() {
+                    self.trusted.insert(index, (publisher, key));
+                    return Err(refusal);
+                }
+                self.record(format_args!(
+                    "no longer trusts key {} for publisher {publisher}: its apps no longer start",
+                    &hex32(&key)[..16]
+                ));
+            }
+            _ => return Err(Status::BadRequest.into()),
+        }
+        Ok(())
+    }
+
+    fn save_trust(&self) -> Result<(), Refusal> {
+        let mut text = String::from(
+            "# Developers' publisher keys the user trusts (ADR-0063): `KEY-HEX PUBLISHER`.\n",
+        );
+        for (publisher, key) in &self.trusted[self.boot_keys..] {
+            let _ = writeln!(text, "{} {publisher}", hex32(key));
+        }
+        write_file(&self.system_dir, TRUST_FILE, text.as_bytes()).map_err(io)
     }
 
     // ---- The Store (ADR-0061) --------------------------------------------------
@@ -1640,4 +1737,13 @@ fn read_memory(memory: Handle, data: &[u8]) -> Result<Vec<u8>, Refusal> {
     let bytes = unsafe { core::slice::from_raw_parts(base, length as usize) }.to_vec();
     let _ = oceans_rt::memory_unmap(base);
     Ok(bytes)
+}
+
+/// A key as 64 lowercase hex digits.
+fn hex32(key: &[u8; 32]) -> String {
+    let mut text = String::with_capacity(64);
+    for byte in key {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }

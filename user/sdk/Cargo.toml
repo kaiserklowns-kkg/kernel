@@ -1,0 +1,15 @@
+[package]
+name = "oceans-sdk"
+description = "The Oceans SDK for Rust apps: the System API by area (app, storage, network, UI, system), API level 1 (ADR-0062)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-fs-proto.workspace = true
+oceans-net-proto.workspace = true
+oceans-display-proto.workspace = true
+oceans-package.workspace = true
+oceans-abi.workspace = true

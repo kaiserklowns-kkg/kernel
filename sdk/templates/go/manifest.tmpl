@@ -1,0 +1,14 @@
+# The package manifest (ADR-0046): who the app is, what it runs, and what
+# it asks for. Oceans gives it nothing else. `runtime = wasm`: a Go
+# program, run by the Go host (ADR-0052).
+id = {{ID}}
+name = {{NAME}}
+version = 0.1.0
+publisher = {{PUBLISHER}}
+description = {{NAME}}, made with the Oceans SDK
+architecture = x86_64
+api = 1
+runtime = wasm
+entry = {{CRATE}}.wasm
+permission = console
+permission = system-info: show how much memory is free

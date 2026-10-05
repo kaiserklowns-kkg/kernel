@@ -371,6 +371,20 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey x",
     b"@screen 509 236 c75b39 Tiles' next colour, after a key",
     b"app stop app.oceans.tiles\r\n",
+    // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
+    // until the developer's key is trusted at the console; then the Rust
+    // app and the Go app install and run.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/third-party-counter.opk /keep/counter.opk\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/third-party-hello.opk /keep/hello-go.opk\r\n",
+    b"app install /keep/counter.opk\r\n",
+    b"app trust add $DEVKEY Example Developer\r\n",
+    b"app trust add 1111111111111111111111111111111111111111111111111111111111111111 Oceans Examples\r\n",
+    b"app trust\r\n",
+    b"app install /keep/counter.opk\r\n",
+    b"app run app.example.counter\r\n",
+    b"app run app.example.counter\r\n",
+    b"app install /keep/hello-go.opk\r\n",
+    b"app run app.example.hello one two\r\n",
     b"ui unpair\r\n",
     b"@bridge unpaired",
     b"ui unpair\r\n",
@@ -476,6 +490,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
 /// 82574L in place of the virtio NIC (ADR-0041): the same stack, unchanged,
 /// must get its address by DHCP and carry ICMP, UDP, TCP and HTTP over it.
 const REBOOT_SCRIPT: &[&[u8]] = &[
+    b"app run app.example.counter\r\n",
     b"cat /keep/note.txt\r\n",
     b"ls /keep\r\n",
     b"ls /\r\n",
@@ -510,8 +525,10 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("fs (nvmefs): mounted the disk: generation"),
     Expect::Line("kept on nvme"),
     // Hello, Heartbeat, Greeter, Greeter Service (ADR-0052), Notes
-    // (ADR-0059) and Tiles (ADR-0060).
-    Expect::Contains("core: ready, 6 apps installed"),
+    // (ADR-0059), Tiles (ADR-0060) and the two third-party apps (ADR-0062),
+    // whose developer's key is still trusted (ADR-0063).
+    Expect::Contains("core: ready, 8 apps installed, 2 trusted publisher keys"),
+    Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
     Expect::Line("greeter: 3 arguments: \"after\" \"a\" \"reboot\""),
@@ -659,6 +676,20 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("display: windows for app.oceans.notes (Notes)"),
     Expect::Contains("core: app.oceans.notes exited with code 0"),
     Expect::Line("note"),
+    // Third-party apps built with the SDK (ADR-0062, ADR-0063).
+    Expect::Contains("app: /keep/counter.opk: signed with a key this system does not trust"),
+    Expect::Contains("core: audit: now trusts key "),
+    Expect::Contains("app: trust: another key is trusted for that publisher name"),
+    Expect::Contains("  Oceans Examples  "),
+    Expect::Contains("from the system image"),
+    Expect::Contains("  Example Developer  "),
+    Expect::Contains("added by you"),
+    Expect::Line("app: installed app.example.counter 0.1.0"),
+    Expect::Line("Counter: hello from app.example.counter 0.1.0, built with the Oceans SDK"),
+    Expect::Line("Counter: run 2"),
+    Expect::Contains("Counter: "),
+    Expect::Line("Hello Go: hello from app.example.hello 0.1.0, built with the Oceans SDK"),
+    Expect::Line("Hello Go: 2 arguments"),
     // A Go app's window (ADR-0060), installed from the Store (ADR-0061).
     Expect::Contains("bridge: the paired browser set the Store's source to http://10.0.2.2:"),
     Expect::Contains(
@@ -1979,6 +2010,75 @@ fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
 }
 
 /// A PPM (P6) screen capture: width, height, RGB bytes.
+/// Third-party apps for the smoke test (ADR-0062, the exit criterion of
+/// Phase 8): made, built and signed outside this repository with the SDK
+/// and its developer tool, as a developer would: a new key, a Rust app and
+/// a Go app from the templates. Their packages are served as
+/// `/packages/third-party-*.opk`, the key's public half as
+/// `third-party.pub` (the script trusts it).
+fn build_third_party() -> Result {
+    run_command(cargo().args(["build", "--quiet", "--package", "oceans-dev"]))?;
+    let tool = root()
+        .join("target/debug/oceans")
+        .with_extension(env::consts::EXE_EXTENSION);
+    let dir = env::temp_dir().join("oceans-third-party");
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("cannot clear {}: {e}", dir.display()))?;
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let cache = root().join("build").join("go");
+    let oceans = |args: &[&str]| {
+        let mut cmd = Command::new(&tool);
+        cmd.args(args)
+            .current_dir(&dir)
+            .env("OCEANS_SDK", root())
+            .env("GOCACHE", cache.join("cache"))
+            .env("GOMODCACHE", cache.join("mod"))
+            .env("GOPATH", cache.join("path"))
+            .env("GOTOOLCHAIN", "local");
+        if let Some(go) = env::var_os("OCEANS_GO") {
+            cmd.env("OCEANS_GO", go);
+        }
+        run_command(&mut cmd)
+    };
+    oceans(&["keygen", "Example", "Developer"])?;
+    oceans(&["new", "rust", "app.example.counter"])?;
+    oceans(&["new", "go", "app.example.hello", "--name", "Hello Go"])?;
+    oceans(&["build", "counter", "--key", "oceans-developer.key"])?;
+    oceans(&["build", "hello", "--key", "oceans-developer.key"])?;
+    let packages = root().join(PACKAGES_DIR);
+    for (from, to) in [
+        (
+            "counter/dist/app.example.counter-0.1.0.opk",
+            "third-party-counter.opk",
+        ),
+        (
+            "hello/dist/app.example.hello-0.1.0.opk",
+            "third-party-hello.opk",
+        ),
+    ] {
+        copy(&dir.join(from), &packages.join(to))?;
+    }
+    let key = fs::read_to_string(dir.join("oceans-developer.key"))
+        .map_err(|e| format!("the developer key: {e}"))?;
+    let seed = key
+        .lines()
+        .find_map(|line| line.strip_prefix("seed = "))
+        .ok_or("the developer key has no seed")?;
+    let mut bytes = [0u8; 32];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(seed.get(2 * i..2 * i + 2).unwrap_or("zz"), 16)
+            .map_err(|_| "the developer key's seed is not hex".to_string())?;
+    }
+    fs::write(
+        packages.join("third-party.pub"),
+        oceans_package::public_key_hex(&bytes),
+    )
+    .map_err(|e| format!("cannot write the developer's public key: {e}"))?;
+    println!("third-party apps built with the SDK: a Rust app and a Go app");
+    Ok(())
+}
+
 /// The Store's catalog (ADR-0061) the smoke test's HTTP server serves at
 /// `/store/index.json`: Tiles, with the size and SHA-256 of its package.
 fn store_index(tiles: &[u8]) -> String {
@@ -2176,6 +2276,7 @@ fn check_smoke_stick() -> Result {
 
 fn smoke(profile: Profile) -> Result {
     build_image(profile, Some("oceans.test=smoke"))?;
+    build_third_party()?;
     prepare_disk(SMOKE_DISK_IMAGE, true)?;
     prepare_blank(SMOKE_NVME_IMAGE, NVME_SIZE, true)?;
     prepare_stick(SMOKE_STICK_IMAGE, true)?;
@@ -2225,6 +2326,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let dns6_port = dns_server(IPV6_LOOPBACK)?;
     let tcp6_port = tcp_greeter(IPV6_LOOPBACK, "hello from the host over IPv6")?;
     let http6_port = http_server(IPV6_LOOPBACK)?;
+    // The third-party developer's public key (`build_third_party`).
+    let developer_key =
+        fs::read_to_string(root().join(PACKAGES_DIR).join("third-party.pub")).unwrap_or_default();
     let expand = |command: &[u8]| -> Vec<u8> {
         // Longer names first: `$HTTP` is a prefix of `$HTTPS` and `$HTTP6`.
         String::from_utf8_lossy(command)
@@ -2236,6 +2340,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             .replace("$HTTPS", &https.port.to_string())
             .replace("$HTTP6", &http6_port.to_string())
             .replace("$HTTP", &http_port.to_string())
+            .replace("$DEVKEY", &developer_key)
             .into_bytes()
     };
     let monitor_port = free_tcp_port()?;

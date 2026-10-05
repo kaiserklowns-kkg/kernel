@@ -1,0 +1,26 @@
+// {{CRATE}}: {{NAME}}, an Oceans app in Go (ADR-0062). It says who it is,
+// its arguments, and the free memory; the memory needs the system-info
+// permission from its manifest, and without it, it carries on without.
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/kaiserklowns-kkg/kernel/go/oceans"
+)
+
+func main() {
+	app, err := oceans.AppInfo()
+	if err != nil {
+		fmt.Println("{{NAME}}:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("{{NAME}}: hello from %s %s, built with the Oceans SDK\n", app.ID, app.Version)
+	fmt.Printf("{{NAME}}: %d arguments\n", len(os.Args)-1)
+	if sysinfo, ok := oceans.Find("sysinfo", "sysinfo"); ok {
+		if memory, err := oceans.Memory(sysinfo); err == nil {
+			fmt.Printf("{{NAME}}: %d MiB free of %d MiB\n", memory.FreeBytes()>>20, memory.TotalBytes()>>20)
+		}
+	}
+}

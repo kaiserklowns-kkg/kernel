@@ -1,0 +1,74 @@
+//! {{NAME}}: an Oceans app (ADR-0062). It says who it is, counts its runs
+//! in its own storage, and shows the free memory. Each of those needs a
+//! permission from its manifest; without one, it carries on without.
+
+#![no_std]
+#![no_main]
+
+use core::fmt::Write;
+
+use oceans_sdk::app::{self, Directory, Start};
+use oceans_sdk::storage::{self, Kind, Node, flags};
+use oceans_sdk::system;
+
+app::entry!(main);
+
+fn main(start: Start) -> i64 {
+    let Some(directory) = Directory::from_start(&start) else {
+        return 2;
+    };
+    let Some(mut out) = app::console(&directory) else {
+        return 0; // started without a console: nothing to say it on
+    };
+    let (id, version) = app::info(&directory).map_or(("?", "?"), |info| (info.id, info.version));
+    let _ = writeln!(out, "{{NAME}}: hello from {id} {version}, built with the Oceans SDK");
+    match storage::data(&directory).map(|data| count_run(&data)) {
+        Some(Ok(runs)) => {
+            let _ = writeln!(out, "{{NAME}}: run {runs}");
+        }
+        Some(Err(problem)) => {
+            let _ = writeln!(out, "{{NAME}}: storage failed: {problem}");
+        }
+        None => {
+            let _ = writeln!(out, "{{NAME}}: no storage");
+        }
+    }
+    if let Some(memory) = system::handle(&directory).and_then(|h| system::memory(h).ok()) {
+        let _ = writeln!(
+            out,
+            "{{NAME}}: {} MiB free of {} MiB",
+            memory.free >> 20,
+            memory.total >> 20
+        );
+    }
+    let _ = out.flush();
+    0
+}
+
+/// Reads, increments and writes back the `runs` file.
+fn count_run(data: &Node) -> Result<u64, &'static str> {
+    let (file, kind) = data
+        .open("runs", flags::CREATE_FILE | flags::WRITE)
+        .map_err(|e| e.message())?;
+    let result = (|| {
+        if kind != Kind::File {
+            return Err("runs is not a file");
+        }
+        let mut text = [0u8; 20];
+        let len = file.read(0, &mut text).map_err(|e| e.message())?;
+        let runs = core::str::from_utf8(&text[..len])
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+            + 1;
+        let mut line = app::Buffer::<24>::new();
+        let _ = writeln!(line, "{runs}");
+        file.truncate(0)
+            .and_then(|()| file.write_all(0, line.as_bytes()))
+            .and_then(|()| file.sync())
+            .map_err(|e| e.message())?;
+        Ok(runs)
+    })();
+    file.close();
+    result
+}

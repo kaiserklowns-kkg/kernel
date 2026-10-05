@@ -472,6 +472,16 @@ name = "oceans-capability"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-dev"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "oceans-archive",
+ "oceans-package",
+ "sha2",
+]
+
+[[package]]
 name = "oceans-dns"
 version = "0.1.0"
 

@@ -83,6 +83,15 @@ pub mod op {
     /// data = `[number u32][install u8]`: the user's answer. 1 installs
     /// exactly the bytes proposed; 0 discards them. → as `INSTALL`.
     pub const ACCEPT: u64 = 18;
+    /// data = `[add u8][key: 64 hex digits][publisher]`: trusts a
+    /// developer's publisher key (1), or no longer trusts one added so (0).
+    /// Keys from the boot image cannot be removed; a publisher name already
+    /// trusted under another key is refused (`Invalid`, ADR-0063).
+    pub const TRUST: u64 = 19;
+    /// data = `[index u32]` → `[added u8]` + `KEY PUBLISHER`, the index-th
+    /// trusted key (added: 1 if the user added it, 0 if from the boot
+    /// image); `NotFound` past the last.
+    pub const TRUSTED: u64 = 20;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -125,11 +134,17 @@ pub mod access {
     pub fn needed(op: u64) -> Option<u8> {
         use super::op;
         Some(match op {
-            op::LIST | op::INFO | op::PERMISSION | op::WINDOW_OWNER | op::PENDING => QUERY,
-            op::RUN | op::STOP => RUN,
-            op::INSTALL | op::REMOVE | op::ROLLBACK | op::ENABLE | op::DISABLE | op::WINDOWS => {
-                MANAGE
+            op::LIST | op::INFO | op::PERMISSION | op::WINDOW_OWNER | op::PENDING | op::TRUSTED => {
+                QUERY
             }
+            op::RUN | op::STOP => RUN,
+            op::INSTALL
+            | op::REMOVE
+            | op::ROLLBACK
+            | op::ENABLE
+            | op::DISABLE
+            | op::WINDOWS
+            | op::TRUST => MANAGE,
             op::DECIDE | op::ACCEPT => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,

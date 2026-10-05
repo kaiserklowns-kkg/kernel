@@ -1,0 +1,30 @@
+# {{NAME}}: an Oceans app, made from the SDK's Rust template (ADR-0062).
+# `oceans build` builds it for Oceans (x86_64, no OS underneath) and signs
+# the package with your developer key.
+[package]
+name = "{{CRATE}}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "{{CRATE}}"
+test = false
+bench = false
+
+[dependencies]
+oceans-sdk = { path = "{{SDK}}/user/sdk" }
+
+# A project of its own, not part of a surrounding workspace.
+[workspace]
+
+# Programs are loaded from disk: keep them small.
+[profile.release]
+strip = "debuginfo"
+
+[profile.dev]
+strip = "debuginfo"
+
+# Dependencies (crypto above all) are optimised even in debug builds.
+[profile.dev.package."*"]
+opt-level = 2
