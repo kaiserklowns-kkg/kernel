@@ -1,0 +1,17 @@
+[package]
+name = "activity-app"
+description = "Activity Monitor: processes and memory, shipped with the system (ADR-0080, ADR-0083)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "activity-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-abi.workspace = true
+oceans-ui.workspace = true

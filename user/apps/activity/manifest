@@ -1,0 +1,15 @@
+# Activity Monitor's package manifest (ADR-0080, ADR-0083), an app that
+# comes with the system: `cargo xtask` packages it with the `activity-app`
+# program as `activity`, signs it with the image's key and bundles it into
+# the boot image.
+id = app.oceans.activity
+name = Activity Monitor
+version = 1.0.0
+publisher = {{PUBLISHER}}
+description = What runs and how much memory it takes
+architecture = x86_64
+api = 1
+entry = activity
+permission = window
+permission = system-info: show the processes and the memory in use
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/activity

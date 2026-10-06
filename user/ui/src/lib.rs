@@ -351,9 +351,24 @@ pub fn run<S>(
     width: u16,
     height: u16,
     state: &mut S,
+    frame: impl FnMut(&mut Ui<'_, '_>, &mut S),
+) -> i64 {
+    run_ticking(directory, title, width, height, None, state, frame)
+}
+
+/// As [`run`], and also a frame every `tick_ms` (for apps that show what
+/// changes by itself: a clock, the processes).
+pub fn run_ticking<S>(
+    directory: &Directory,
+    title: &str,
+    width: u16,
+    height: u16,
+    tick_ms: Option<u64>,
+    state: &mut S,
     mut frame: impl FnMut(&mut Ui<'_, '_>, &mut S),
 ) -> i64 {
     const EVENTS: u64 = 1;
+    const TICK: u64 = 2;
     let (Some(windows), Ok(notification)) = (
         directory.find("use", "windows"),
         oceans_rt::notification_create(),
@@ -391,9 +406,17 @@ pub fn run<S>(
             changed
         };
     draw(&mut window, &mut input, &mut focus, state);
+    if let Some(ms) = tick_ms {
+        let _ = oceans_rt::timer_set(notification, TICK, ms);
+    }
     loop {
-        if oceans_rt::notification_wait(notification).is_err() {
+        let Ok(bits) = oceans_rt::notification_wait(notification) else {
             return EXIT_BAD_START;
+        };
+        if bits & TICK != 0
+            && let Some(ms) = tick_ms
+        {
+            let _ = oceans_rt::timer_set(notification, TICK, ms);
         }
         loop {
             let count = match events(windows, &mut batch) {

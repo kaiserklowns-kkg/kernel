@@ -89,5 +89,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0079](0079-audio.md) | Sound: Intel High Definition Audio | Accepted |
 | [0080](0080-app-toolkit-and-system-apps.md) | The app toolkit, and apps that come with the system | Accepted |
 | [0081](0081-settings-and-system-rights.md) | Settings, and the rights of the system's own apps | Accepted |
+| [0082](0082-files.md) | Files | Accepted |
+| [0083](0083-activity-monitor.md) | Activity Monitor | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.
