@@ -303,6 +303,11 @@ struct Core {
     /// How many of `trusted` came with the boot image (the rest the user
     /// added, ADR-0063).
     boot_keys: usize,
+    /// Core's own endpoint, to mint `manage-apps` ends (ADR-0081).
+    server: Handle,
+    /// The ids of the apps the image brings (ADR-0080): with the image's
+    /// key, the system's own apps (ADR-0081).
+    bundled: BTreeSet<String>,
     apps: BTreeMap<String, App>,
     /// The user's decisions: `true` allowed, `false` denied.
     decisions: BTreeMap<(String, Permission), bool>,
@@ -391,6 +396,8 @@ impl Core {
             gohost: directory.find("module", "gohost"),
             trusted,
             boot_keys,
+            server: Handle(0),
+            bundled: BTreeSet::new(),
             apps: BTreeMap::new(),
             decisions: BTreeMap::new(),
             running: [const { None }; MAX_RUNNING],
@@ -436,6 +443,7 @@ impl Core {
     /// grants. Each is installed when missing or older than the image's,
     /// through every check an install makes; one already as new is left.
     fn install_bundled(&mut self, directory: &Directory) {
+        let mut packages = Vec::new();
         for line in directory.lines() {
             let mut words = line.split_whitespace();
             let (Some(_), Some("module"), Some(name)) = (words.next(), words.next(), words.next())
@@ -455,8 +463,23 @@ impl Core {
             // A module is rounded up to whole pages: only the archive.
             let len = oceans_archive::Archive::parse(&bytes)
                 .map_or(bytes.len(), |archive| archive.extent());
+            packages.push((name, bytes[..len].to_vec()));
+        }
+        // Every bundled id first: they are the system's own (ADR-0081)
+        // when the image's key signed them, checked as each installs.
+        let trust = self.trust();
+        let ids: Vec<String> = packages
+            .iter()
+            .filter_map(|(_, bytes)| {
+                Package::open(bytes, &trust)
+                    .ok()
+                    .map(|package| package.manifest.id.to_owned())
+            })
+            .collect();
+        self.bundled.extend(ids);
+        for (name, bytes) in packages {
             let mut reply = Vec::new();
-            match self.install_bytes(&bytes[..len], &mut reply) {
+            match self.install_bytes(&bytes, &mut reply) {
                 Ok(()) => say(
                     self.log,
                     format_args!("core: installed {name} from the system image"),
@@ -706,8 +729,26 @@ impl Core {
         bytes.map_err(io)
     }
 
+    /// Signed by a key the image brought (ADR-0081): the system's own.
+    fn system_key(&self, key: &[u8; 32]) -> bool {
+        self.trusted[..self.boot_keys].iter().any(|t| t.key == *key)
+    }
+
+    /// Brought by the image and signed by its key: the system's own
+    /// (ADR-0081). An example signed with the development key is not, nor
+    /// a package of the same id from elsewhere.
+    fn system_app(&self, id: &str) -> bool {
+        self.bundled.contains(id)
+            && self
+                .apps
+                .get(id)
+                .is_some_and(|app| self.system_key(&app.key))
+    }
+
     fn decision(&self, id: &str, permission: Permission) -> Decision {
-        if permission.automatic() {
+        // The system's own apps get what they ask for, as the system does
+        // (ADR-0081).
+        if permission.automatic() || self.system_app(id) {
             return Decision::Automatic;
         }
         match self.decisions.get(&(id.to_owned(), permission)) {
@@ -718,6 +759,7 @@ impl Core {
     }
 
     fn serve(&mut self, server: Handle) -> i64 {
+        self.server = server;
         let mut data = [0u8; 256];
         let mut handles = [Handle(0); 4];
         loop {
@@ -989,6 +1031,20 @@ impl Core {
     fn install_bytes(&mut self, bytes: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
         let trust = self.trust();
         let package = Package::open(bytes, &trust).map_err(invalid)?;
+        if let Some(request) = package
+            .manifest
+            .requests()
+            .find(|r| r.permission.system_only())
+            && !(self.bundled.contains(package.manifest.id) && self.system_key(&package.key))
+        {
+            return Err(Refusal {
+                status: Status::Invalid,
+                text: Some(alloc::format!(
+                    "{} is only for the system's own apps",
+                    request.permission.name()
+                )),
+            });
+        }
         if oceans_package::system_id(package.manifest.id) {
             // A system update (ADR-0071): `update` applies it to the boot
             // partition; it is never an app.
@@ -1418,6 +1474,7 @@ impl Core {
         let how = match *by {
             source::PROMPT => "at its prompt",
             source::DIALOG => "in a permission dialog",
+            source::SETTINGS => "in Settings",
             _ => "by command",
         };
         self.record(format_args!(
@@ -1618,7 +1675,7 @@ impl Core {
     /// Spawns the app with its program module (`wasm`), a handle per
     /// granted permission, its arguments and the directory describing
     /// them.
-    fn spawn(&self, launch: &Launch<'_>, out: &mut Option<Handle>) -> Result<Handle, Refusal> {
+    fn spawn(&mut self, launch: &Launch<'_>, out: &mut Option<Handle>) -> Result<Handle, Refusal> {
         let Launch {
             id,
             name,
@@ -1674,6 +1731,22 @@ impl Core {
                     .map(|h| (h, "use", "input")),
                 // One display end for both, after the loop.
                 Permission::Window | Permission::Notifications => continue,
+                // A Core end that may query, decide, manage and audit
+                // (ADR-0081), only for the system's own apps.
+                Permission::ManageApps if self.system_app(id) => {
+                    let badge = self.next_badge;
+                    oceans_rt::endpoint_mint(self.server, badge)
+                        .ok()
+                        .map(|end| {
+                            self.next_badge += 1;
+                            self.minted.insert(
+                                badge,
+                                access::QUERY | access::DECIDE | access::MANAGE | access::AUDIT,
+                            );
+                            (end, "use", "core")
+                        })
+                }
+                Permission::ManageApps => None,
             };
             match given {
                 Some((handle, kind, label)) => {

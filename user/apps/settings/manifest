@@ -1,0 +1,16 @@
+# Settings' package manifest (ADR-0080, ADR-0081), an app that comes with
+# the system: `cargo xtask` packages it with the `settings-app` program as
+# `settings`, signs it with the image's key and bundles it into the boot
+# image. `manage-apps` is granted only to the system's own apps.
+id = app.oceans.settings
+name = Settings
+version = 1.0.0
+publisher = {{PUBLISHER}}
+description = The system's settings: general information, apps and their permissions
+architecture = x86_64
+api = 1
+entry = settings
+permission = window
+permission = system-info
+permission = manage-apps: show your apps and change their permissions
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/settings

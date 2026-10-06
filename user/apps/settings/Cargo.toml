@@ -1,0 +1,19 @@
+[package]
+name = "settings-app"
+description = "Settings: the system's settings (general information, apps and their permissions), shipped with the system (ADR-0080, ADR-0081)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "settings-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-abi.workspace = true
+oceans-core-proto.workspace = true
+oceans-package.workspace = true
+oceans-ui.workspace = true

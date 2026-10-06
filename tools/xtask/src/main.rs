@@ -414,6 +414,13 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app start app.oceans.calculator\r\n",
     b"@screen 594 301 ffffff Calculator's display",
     b"app stop app.oceans.calculator\r\n",
+    // Settings (ADR-0081): the system's own app gets `manage-apps` without
+    // asking; its window (the fourth opened, at the bottom of the area)
+    // shows its sidebar.
+    b"app info app.oceans.settings\r\n",
+    b"app start app.oceans.settings\r\n",
+    b"@screen 376 523 e9e9ee Settings' sidebar",
+    b"app stop app.oceans.settings\r\n",
     // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
     // until the developer's key is trusted at the console; then the Rust
     // app and the Go app install and run.
@@ -426,6 +433,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app trust add 2222222222222222222222222222222222222222222222222222222222222222 Old Developer --until 2020-01-01\r\n",
     b"app trust\r\n",
     b"app install /keep/counter.opk\r\n",
+    // A trusted developer's app may not ask for `manage-apps` (ADR-0081).
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/third-party-manager.opk /keep/manager.opk\r\n",
+    b"app install /keep/manager.opk\r\n",
     // Its first run asks for notifications (ADR-0065), which the user
     // allows: the desktop shows them with the app's name.
     b"app run app.example.counter\r\n",
@@ -589,7 +599,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // (ADR-0059), Tiles (ADR-0060) and the three third-party apps
     // (ADR-0062, ADR-0064), whose developer's key is still trusted
     // (ADR-0063).
-    Expect::Contains("core: ready, 10 apps installed, 2 trusted publisher keys"),
+    Expect::Contains("core: ready, 11 apps installed, 2 trusted publisher keys"),
     Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
@@ -740,7 +750,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("  big.bin"),
     // The apps the system brings (ADR-0080), installed on a fresh disk.
     Expect::Contains("core: installed calculator.opk from the system image"),
-    Expect::Contains("core: ready, 1 apps installed, 1 trusted publisher keys"),
+    Expect::Contains("core: installed settings.opk from the system image"),
+    Expect::Contains("core: ready, 2 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
     Expect::Contains("gohello: goroutines computed 30"),
@@ -772,6 +783,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("  Example Developer  "),
     Expect::Contains("added by you"),
     Expect::Line("app: installed app.example.counter 0.1.0"),
+    Expect::Contains("app: /keep/manager.opk: manage-apps is only for the system's own apps"),
     Expect::Line("Counter: hello from app.example.counter 0.1.0, built with the Oceans SDK"),
     Expect::Line("Counter: run 2"),
     Expect::Contains("Counter: "),
@@ -2105,11 +2117,18 @@ fn dev_seed() -> Result<[u8; 32]> {
 }
 
 /// The apps that come with the system (ADR-0080): (program, manifest).
-const BUNDLED_APPS: &[(&str, &str, &str)] = &[(
-    "calculator",
-    "calculator-app",
-    include_str!("../../../user/apps/calculator/manifest"),
-)];
+const BUNDLED_APPS: &[(&str, &str, &str)] = &[
+    (
+        "calculator",
+        "calculator-app",
+        include_str!("../../../user/apps/calculator/manifest"),
+    ),
+    (
+        "settings",
+        "settings-app",
+        include_str!("../../../user/apps/settings/manifest"),
+    ),
+];
 
 /// The bundled apps as signed packages, `NAME.opk`, for the boot archive.
 fn bundled_apps(user: &Path, keys: &release::ImageKeys) -> Result<Vec<(String, Vec<u8>)>> {
@@ -2323,6 +2342,24 @@ fn build_third_party() -> Result {
         oceans_package::public_key_hex(&bytes),
     )
     .map_err(|e| format!("cannot write the developer's public key: {e}"))?;
+    // The same developer's package asking for `manage-apps`, which only
+    // the system's own apps may (ADR-0081): Core refuses to install it.
+    let counter = fs::read(dir.join("counter/dist/app.example.counter-0.1.0.opk"))
+        .map_err(|e| format!("the counter package: {e}"))?;
+    let program = oceans_archive::Archive::parse(&counter)
+        .ok()
+        .and_then(|archive| archive.find("counter").map(<[u8]>::to_vec))
+        .ok_or("the counter package has no program")?;
+    let manifest = "id = app.example.manager\nname = Manager\nversion = 0.1.0\n\
+        publisher = Example Developer\narchitecture = x86_64\napi = 1\nentry = manager\n\
+        permission = manage-apps\n";
+    let manager = oceans_package::build(
+        &[("manifest", manifest.as_bytes()), ("manager", &program)],
+        &bytes,
+    )
+    .map_err(|e| format!("cannot sign the manager package: {e:?}"))?;
+    fs::write(packages.join("third-party-manager.opk"), manager)
+        .map_err(|e| format!("cannot write the manager package: {e}"))?;
     println!("third-party apps built with the SDK: a Rust app, a Go app and a SvelteKit web app");
     Ok(())
 }

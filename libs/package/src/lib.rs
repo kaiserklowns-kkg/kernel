@@ -71,10 +71,13 @@ pub enum Permission {
     Window,
     /// Notifications on the desktop, framed with the app's name (ADR-0065).
     Notifications,
+    /// Managing the installed apps and their permissions (ADR-0081): only
+    /// the system's own apps (Settings) may ask for it.
+    ManageApps,
 }
 
 impl Permission {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Console,
         Self::Storage,
         Self::SystemInfo,
@@ -83,6 +86,7 @@ impl Permission {
         Self::Pointer,
         Self::Window,
         Self::Notifications,
+        Self::ManageApps,
     ];
 
     pub fn name(self) -> &'static str {
@@ -95,6 +99,7 @@ impl Permission {
             Self::Pointer => "pointer",
             Self::Window => "window",
             Self::Notifications => "notifications",
+            Self::ManageApps => "manage-apps",
         }
     }
 
@@ -113,6 +118,7 @@ impl Permission {
             Self::Pointer => "see your mouse and tablet movements and clicks",
             Self::Window => "show windows, and get what you type into them",
             Self::Notifications => "show you notifications on the desktop",
+            Self::ManageApps => "manage your apps and their permissions",
         }
     }
 
@@ -125,6 +131,12 @@ impl Permission {
             self,
             Self::Console | Self::Storage | Self::SystemInfo | Self::Window
         )
+    }
+
+    /// Only the system's own apps (signed by a key of the image's trust
+    /// list) may ask for it (ADR-0081).
+    pub fn system_only(self) -> bool {
+        matches!(self, Self::ManageApps)
     }
 }
 

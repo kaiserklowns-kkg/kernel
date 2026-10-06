@@ -217,6 +217,8 @@ pub mod source {
     pub const COMMAND: u8 = 1;
     /// The user answered a permission dialog of the desktop (ADR-0057).
     pub const DIALOG: u8 = 2;
+    /// The user decided in Settings (ADR-0081).
+    pub const SETTINGS: u8 = 3;
 }
 
 /// `DECIDE` values of `allow`.

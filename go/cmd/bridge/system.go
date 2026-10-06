@@ -81,6 +81,7 @@ var permissions = []struct{ name, description string }{
 	{"pointer", "see your mouse and tablet movements and clicks"},
 	{"window", "show windows, and get what you type into them"},
 	{"notifications", "show you notifications on the desktop"},
+	{"manage-apps", "manage your apps and their permissions"},
 }
 
 var decisions = []string{"automatic", "allowed", "denied", "undecided"}
