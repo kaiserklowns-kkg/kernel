@@ -49,12 +49,23 @@ fn templates_are_filled_completely() {
 #[test]
 fn names_are_checked_before_they_reach_files() {
     assert!(project().check().is_ok());
+    // Names in Thai, marks included (ADR-0077), and in other scripts.
+    for name in ["สวัสดีชาวโลก", "บันทึก ประจำวัน", "Café", "Zürich-Notes"]
+    {
+        let p = Project {
+            name: name.into(),
+            ..project()
+        };
+        assert!(p.check().is_ok(), "{name}");
+    }
     for (id, name, publisher) in [
         ("Hello", "Hello", "Dev"),
         ("app.example.hello", "Hello\"; evil", "Dev"),
         ("app.example.hello", "Hello", "Dev\nid = app.other"),
         ("app.example.hello", "{oops}", "Dev"),
         ("app.example.hello", "", "Dev"),
+        ("app.example.hello", "line\u{2028}separator", "Dev"),
+        ("app.example.hello", "back\\slash", "Dev"),
     ] {
         let p = Project {
             id: id.into(),

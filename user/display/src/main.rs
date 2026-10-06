@@ -38,6 +38,7 @@ extern crate alloc;
 
 mod canvas;
 mod desktop;
+mod text;
 mod windows;
 
 use alloc::collections::BTreeMap;

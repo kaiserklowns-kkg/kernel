@@ -145,12 +145,18 @@ impl Project {
             ));
         }
         for (what, text) in [("name", &self.name), ("publisher", &self.publisher)] {
-            let plain = text
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || " -_.'".contains(c));
+            // Letters and digits of any script (Thai with its vowel and tone
+            // marks: ADR-0077), and nothing that could end a string in a
+            // template.
+            let plain = text.chars().all(|c| {
+                c.is_alphanumeric()
+                    || " -_.'".contains(c)
+                    || ('\u{0e00}'..='\u{0e7f}').contains(&c)
+                    || ('\u{0300}'..='\u{036f}').contains(&c)
+            });
             if text.trim().is_empty() || text.len() > 64 || !plain {
                 return Err(format!(
-                    "the {what} must be 1 to 64 letters, digits, spaces, - _ . or '"
+                    "the {what} must be 1 to 64 bytes of letters, digits, spaces, - _ . or '"
                 ));
             }
         }

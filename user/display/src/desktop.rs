@@ -391,18 +391,18 @@ impl Desktop {
         let body = Rect::new(window.x + 8, window.y + 36, window.w - 16, window.h - 44);
         let t = &self.terminal;
         if t.cols > 0 {
-            let visible = (body.h / Font::Body.height()).max(1) as usize;
+            let visible = (body.h / Font::Mono.height()).max(1) as usize;
             let last = (t.row + 1).min(t.rows);
             let first = last.saturating_sub(visible);
             for (line, row) in (first..last).enumerate() {
                 let cells = &t.cells[row * t.cols..(row + 1) * t.cols];
                 let text = core::str::from_utf8(cells).unwrap_or("").trim_end();
-                let y = body.y + line as i32 * Font::Body.height();
-                canvas.text(body.x, y, text, Font::Body, TEXT, body);
+                let y = body.y + line as i32 * Font::Mono.height();
+                canvas.text(body.x, y, text, Font::Mono, TEXT, body);
                 if row == t.row {
-                    let x = body.x + t.col as i32 * Font::Body.advance();
+                    let x = body.x + t.col as i32 * Font::Mono.advance();
                     canvas.fill(
-                        Rect::new(x, y + 2, Font::Body.advance(), Font::Body.height() - 2),
+                        Rect::new(x, y + 2, Font::Mono.advance(), Font::Mono.height() - 2),
                         ACCENT,
                     );
                 }
@@ -451,13 +451,12 @@ impl Desktop {
         }
 
         // The system's state and the clock, on the right.
-        let clock_width = |text: &str, font: Font| font.advance() * text.chars().count() as i32;
         let right = w - 16;
-        let time_x = right - clock_width(&self.clock, Font::Strong);
+        let time_x = right - canvas.measure(&self.clock, Font::Strong);
         canvas.text(time_x, bar.y + 6, &self.clock, Font::Strong, TEXT, bar);
-        let date_x = right - clock_width(&self.date, Font::Body);
+        let date_x = right - canvas.measure(&self.date, Font::Body);
         canvas.text(date_x, bar.y + 25, &self.date, Font::Body, MUTED, bar);
-        let status_x = time_x.min(date_x) - 24 - clock_width(&self.status, Font::Body);
+        let status_x = time_x.min(date_x) - 24 - canvas.measure(&self.status, Font::Body);
         canvas.text(status_x, bar.y + 16, &self.status, Font::Body, MUTED, bar);
         canvas.text(16, bar.y + 16, "Oceans", Font::Strong, MUTED, bar);
     }
@@ -547,7 +546,7 @@ impl Desktop {
                 (false, true) => BORDER,
             };
             canvas.round_fill(button, 8, fill);
-            let tx = button.x + (button.w - Font::Strong.advance() * label.len() as i32) / 2;
+            let tx = button.x + (button.w - canvas.measure(label, Font::Strong)) / 2;
             let color = if primary { BACKGROUND } else { TEXT };
             canvas.text(tx, button.y + 10, label, Font::Strong, color, button);
         }
@@ -565,16 +564,18 @@ fn icon_in(tile: Rect) -> Rect {
 
 /// A tile's name, centred under its icon, cut to fit.
 fn tile_label(canvas: &mut Canvas, tile: Rect, name: &str) {
-    let fits = ((tile.w - 8) / Font::Body.advance()).max(1) as usize;
-    let shown: String = if name.chars().count() > fits {
-        name.chars()
-            .take(fits - 1)
-            .chain(core::iter::once('.'))
-            .collect()
-    } else {
-        name.into()
-    };
-    let width = Font::Body.advance() * shown.chars().count() as i32;
+    let room = tile.w - 8;
+    let mut shown = String::from(name);
+    if canvas.measure(&shown, Font::Body) > room {
+        // Shortened, with an ellipsis of dots.
+        while !shown.is_empty()
+            && canvas.measure(&shown, Font::Body) + canvas.measure("..", Font::Body) > room
+        {
+            shown.pop();
+        }
+        shown.push_str("..");
+    }
+    let width = canvas.measure(&shown, Font::Body);
     canvas.text(
         tile.x + (tile.w - width) / 2,
         tile.y + 68,
@@ -605,15 +606,17 @@ fn app_icon(canvas: &mut Canvas, r: Rect, name: &str) {
         hash.wrapping_mul(31).wrapping_add(byte.into())
     });
     canvas.round_fill(r, r.w / 4, ICON_COLOURS[hash % ICON_COLOURS.len()]);
+    // The first letter, Thai included (ADR-0077).
     let initial: String = name
         .chars()
-        .find(|c| c.is_ascii_alphanumeric())
+        .find(|c| c.is_alphanumeric())
         .map(|c| c.to_ascii_uppercase())
         .into_iter()
         .collect();
     let font = if r.w >= 40 { Font::Title } else { Font::Strong };
+    let width = canvas.measure(&initial, font);
     canvas.text(
-        r.x + (r.w - font.advance()) / 2,
+        r.x + (r.w - width) / 2,
         r.y + (r.h - font.height()) / 2,
         &initial,
         font,
@@ -627,8 +630,9 @@ fn terminal_icon(canvas: &mut Canvas, r: Rect) {
     canvas.round_fill(r, r.w / 4, BORDER);
     canvas.round_fill(inset(r, 1), r.w / 4 - 1, TERMINAL_BACKGROUND);
     let font = if r.w >= 40 { Font::Title } else { Font::Strong };
+    let width = canvas.measure(">_", font);
     canvas.text(
-        r.x + (r.w - 2 * font.advance()) / 2,
+        r.x + (r.w - width) / 2,
         r.y + (r.h - font.height()) / 2,
         ">_",
         font,

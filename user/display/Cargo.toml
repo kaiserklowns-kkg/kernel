@@ -17,4 +17,6 @@ oceans-core-proto.workspace = true
 oceans-package.workspace = true
 oceans-input-proto.workspace = true
 oceans-window.workspace = true
+# Interface text (ADR-0077): TrueType fonts, rasterized without std.
+ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"] }
 noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "bold", "size_16", "size_20", "unicode-basic-latin"] }

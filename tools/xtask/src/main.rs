@@ -754,8 +754,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("Counter: hello from app.example.counter 0.1.0, built with the Oceans SDK"),
     Expect::Line("Counter: run 2"),
     Expect::Contains("Counter: "),
-    Expect::Line("Hello Go: hello from app.example.hello 0.1.0, built with the Oceans SDK"),
-    Expect::Line("Hello Go: 2 arguments"),
+    // Its name is Thai (ADR-0077): UTF-8 through the SDK, Core and the console.
+    Expect::Line("สวัสดี Go: hello from app.example.hello 0.1.0, built with the Oceans SDK"),
+    Expect::Line("สวัสดี Go: 2 arguments"),
     Expect::Line("app: installed app.example.notes 0.1.0"),
     Expect::Contains(
         "app: app.example.notes: a web app: open it from Apps in the Oceans web experience",
@@ -2167,7 +2168,7 @@ fn build_third_party() -> Result {
     };
     oceans(&["keygen", "Example", "Developer"])?;
     oceans(&["new", "rust", "app.example.counter"])?;
-    oceans(&["new", "go", "app.example.hello", "--name", "Hello Go"])?;
+    oceans(&["new", "go", "app.example.hello", "--name", "สวัสดี Go"])?;
     oceans(&["build", "counter", "--key", "oceans-developer.key"])?;
     oceans(&["build", "hello", "--key", "oceans-developer.key"])?;
     // A web app (ADR-0064): SvelteKit, built with Bun.

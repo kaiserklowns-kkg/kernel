@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 
+use crate::text::{Style, Typesetter};
+
 /// A colour, 0xRRGGBB.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rgb(pub u32);
@@ -35,29 +37,43 @@ fn isqrt(n: i32) -> i32 {
     root
 }
 
-/// Text styles.
+/// Text styles: the interface's (proportional, with Thai: ADR-0077), and
+/// the Terminal's monospaced grid.
 #[derive(Clone, Copy)]
 pub enum Font {
     Body,
     Strong,
     Title,
+    /// The Terminal's: a fixed cell per character, Basic Latin.
+    Mono,
 }
 
 impl Font {
+    /// The bitmap font: the Terminal's, and the interface's fallback.
     fn spec(self) -> (FontWeight, RasterHeight, i32) {
         match self {
-            Self::Body => (FontWeight::Regular, RasterHeight::Size16, 16),
+            Self::Body | Self::Mono => (FontWeight::Regular, RasterHeight::Size16, 16),
             Self::Strong => (FontWeight::Bold, RasterHeight::Size16, 16),
             Self::Title => (FontWeight::Bold, RasterHeight::Size20, 20),
         }
     }
 
-    /// Width of one character cell.
+    fn style(self) -> Option<Style> {
+        match self {
+            Self::Body => Some(Style::Body),
+            Self::Strong => Some(Style::Strong),
+            Self::Title => Some(Style::Title),
+            Self::Mono => None,
+        }
+    }
+
+    /// Width of one character cell of the bitmap font.
     pub fn advance(self) -> i32 {
         let (weight, height, _) = self.spec();
         get_raster_width(weight, height) as i32
     }
 
+    /// A line's height.
     pub fn height(self) -> i32 {
         self.spec().2
     }
@@ -72,6 +88,9 @@ pub struct Canvas {
     screen: *mut u8,
     pitch: usize,
     shifts: (u32, u32, u32),
+    /// The interface's fonts; without them, text falls back to the bitmap
+    /// font.
+    typesetter: Option<Typesetter>,
 }
 
 impl Canvas {
@@ -91,6 +110,15 @@ impl Canvas {
                 u32::from(shifts.1),
                 u32::from(shifts.2),
             ),
+            typesetter: Typesetter::new(),
+        }
+    }
+
+    /// The width of `text` in `font`.
+    pub fn measure(&mut self, text: &str, font: Font) -> i32 {
+        match (font.style(), self.typesetter.as_mut()) {
+            (Some(style), Some(typesetter)) => typesetter.measure(text, style),
+            _ => font.advance() * text.chars().count() as i32,
         }
     }
 
@@ -205,8 +233,61 @@ impl Canvas {
     }
 
     /// Text from (`x`, `y`) (top left), clipped to `clip`; returns the x
-    /// after it. Characters outside Basic Latin show as `?`.
+    /// after it.
     pub fn text(&mut self, x: i32, y: i32, text: &str, font: Font, color: Rgb, clip: Rect) -> i32 {
+        match font.style() {
+            Some(style) if self.typesetter.is_some() => {
+                self.typeset(x, y, text, style, color, clip)
+            }
+            _ => self.bitmap_text(x, y, text, font, color, clip),
+        }
+    }
+
+    /// Interface text (ADR-0077): each character's coverage, blended.
+    fn typeset(&mut self, x: i32, y: i32, text: &str, style: Style, color: Rgb, clip: Rect) -> i32 {
+        let Some(mut typesetter) = self.typesetter.take() else {
+            return x;
+        };
+        let mut pen = x;
+        for c in text.chars() {
+            if pen >= clip.x + clip.w {
+                break;
+            }
+            let glyph = typesetter.glyph(style, c);
+            for gy in 0..glyph.height {
+                for gx in 0..glyph.width {
+                    let alpha = glyph.coverage[gy * glyph.width + gx];
+                    let (px, py) = (pen + glyph.left + gx as i32, y + glyph.top + gy as i32);
+                    if alpha == 0
+                        || !clip.contains(px, py)
+                        || px < 0
+                        || py < 0
+                        || px >= self.width
+                        || py >= self.height
+                    {
+                        continue;
+                    }
+                    let at = (py * self.width + px) as usize;
+                    self.pixels[at] = color.over(Rgb(self.pixels[at]), u32::from(alpha)).0;
+                }
+            }
+            pen += glyph.advance;
+        }
+        self.typesetter = Some(typesetter);
+        pen
+    }
+
+    /// The bitmap font: a fixed cell per character; characters outside
+    /// Basic Latin show as `?`.
+    fn bitmap_text(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        font: Font,
+        color: Rgb,
+        clip: Rect,
+    ) -> i32 {
         let (weight, height, _) = font.spec();
         let advance = font.advance();
         let mut pen = x;

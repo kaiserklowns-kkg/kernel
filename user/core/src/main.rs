@@ -947,6 +947,13 @@ impl Core {
         let id = package.manifest.id.to_owned();
         let previous = self.installable(&package)?;
 
+        // A folder already there (an app removed with its data kept) is
+        // never removed below.
+        let existed = self
+            .apps_dir
+            .open(&id, 0)
+            .map(|(node, _)| node.close())
+            .is_ok();
         // Written beside the installed version, then renamed into place:
         // the swap is one atomic commit on the Oceans volume.
         let (dir, _) = self
@@ -963,7 +970,15 @@ impl Core {
             data.close();
             dir.sync()
         })();
+        if placed.is_err() {
+            // Nothing half-written stays behind to fill the disk: the
+            // partial copy goes, and the folder if this install made it.
+            let _ = dir.remove("incoming.opk");
+        }
         dir.close();
+        if placed.is_err() && !existed {
+            let _ = oceans_fs_proto::tree::remove_tree(&self.apps_dir, &id);
+        }
         placed.map_err(io)?;
 
         let app = App::from(&package, previous);
