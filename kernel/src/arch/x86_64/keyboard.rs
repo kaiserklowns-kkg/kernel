@@ -3,8 +3,9 @@
 //!
 //! The controller is set to interrupt on IRQ 1 with scancode translation
 //! (set 1). Make codes are mapped to ASCII with Shift, Caps Lock and Ctrl;
-//! Enter sends CR and Backspace DEL, like a serial terminal. Keys without
-//! an ASCII meaning (arrows, function keys) are ignored for now; Ctrl+Tab
+//! Enter sends CR and Backspace DEL, like a serial terminal. The arrows,
+//! Home, End, Delete and the page keys send `display::KEY_*` (ADR-0084);
+//! other keys without an ASCII meaning (function keys) are ignored. Ctrl+Tab
 //! sends the desktop's "next window" byte (ADR-0059).
 
 use core::sync::atomic::{AtomicU8, Ordering};
@@ -107,6 +108,23 @@ pub fn drain(sink: fn(u8)) {
     }
 }
 
+/// The extended (0xe0) make codes of the moving and editing keys.
+fn navigation(key: u8) -> Option<u8> {
+    use oceans_abi::display as d;
+    Some(match key {
+        0x48 => d::KEY_UP,
+        0x50 => d::KEY_DOWN,
+        0x4b => d::KEY_LEFT,
+        0x4d => d::KEY_RIGHT,
+        0x47 => d::KEY_HOME,
+        0x4f => d::KEY_END,
+        0x53 => d::KEY_DELETE,
+        0x49 => d::KEY_PAGE_UP,
+        0x51 => d::KEY_PAGE_DOWN,
+        _ => return None,
+    })
+}
+
 fn translate(code: u8) -> Option<u8> {
     let state = STATE.load(Ordering::Relaxed);
     if code == 0xe0 {
@@ -136,9 +154,11 @@ fn translate(code: u8) -> Option<u8> {
         return None;
     }
     STATE.store(state, Ordering::Relaxed);
-    // Releases, extended keys (arrows, ...) and keys past the table.
-    if released || extended {
+    if released {
         return None;
+    }
+    if extended {
+        return navigation(key);
     }
     let index = usize::from(key);
     let mut byte = *NORMAL.get(index)?;

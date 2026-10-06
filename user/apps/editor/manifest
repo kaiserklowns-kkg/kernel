@@ -1,0 +1,15 @@
+# Text Editor's package manifest (ADR-0080, ADR-0084), an app that comes
+# with the system: `cargo xtask` packages it with the `editor-app` program
+# as `editor`, signs it with the image's key and bundles it into the boot
+# image.
+id = app.oceans.editor
+name = Text Editor
+version = 1.0.0
+publisher = {{PUBLISHER}}
+description = Plain text files: open, change and save them
+architecture = x86_64
+api = 1
+entry = editor
+permission = window
+permission = files: open and save your text files
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/editor

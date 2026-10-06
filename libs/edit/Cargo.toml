@@ -1,0 +1,10 @@
+[package]
+name = "oceans-edit"
+description = "Editing text for Oceans: lines, a cursor and the keyboard's keys, for the Text Editor and apps' text fields (ADR-0084)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-abi.workspace = true

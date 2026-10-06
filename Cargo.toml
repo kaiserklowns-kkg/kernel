@@ -1,10 +1,10 @@
 [workspace]
 exclude = ["user"]
 resolver = "3"
-members = ["kernel", "libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
+members = ["kernel", "libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/edit", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
 # The kernel only builds for bare-metal targets; host-side `cargo test`
 # and `cargo build` cover the portable crates and tooling.
-default-members = ["libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
+default-members = ["libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/edit", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -35,6 +35,7 @@ oceans-nvme = { path = "libs/nvme" }
 oceans-ahci = { path = "libs/ahci" }
 oceans-hda = { path = "libs/hda" }
 oceans-draw = { path = "libs/draw" }
+oceans-edit = { path = "libs/edit" }
 oceans-package = { path = "libs/package" }
 oceans-pci = { path = "libs/pci" }
 oceans-random = { path = "libs/random" }

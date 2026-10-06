@@ -532,6 +532,13 @@ name = "oceans-e1000e"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-edit"
+version = "0.1.0"
+dependencies = [
+ "oceans-abi",
+]
+
+[[package]]
 name = "oceans-elf"
 version = "0.1.0"
 

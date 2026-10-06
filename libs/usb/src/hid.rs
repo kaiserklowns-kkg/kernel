@@ -1,8 +1,10 @@
 //! The HID boot keyboard (HID 1.11 appendix B): 8-byte reports become
 //! console bytes, the same ones the PS/2 keyboard sends (ADR-0029): ASCII
 //! with Shift, Caps Lock and Ctrl, Enter as CR, Backspace as DEL; keys
-//! without an ASCII meaning are ignored. Ctrl+Tab sends the desktop's
-//! "next window" byte (ADR-0059).
+//! without an ASCII meaning are ignored, but for the arrows, Home, End,
+//! Delete and the page keys, which send `oceans_abi::display::KEY_*`
+//! (ADR-0084). Ctrl+Tab sends the desktop's "next window" byte
+//! (ADR-0059).
 
 const LEFT_CTRL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
@@ -19,6 +21,10 @@ const NORMAL: &[u8; 0x35] = b"abcdefghijklmnopqrstuvwxyz1234567890\r\x1b\x7f\t -
 const SHIFTED: &[u8; 0x35] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()\r\x1b\x7f\t _+{}|\0:\"~<>?";
 /// What Ctrl+Tab sends: `oceans_abi::display::KEY_NEXT_WINDOW` (ADR-0059).
 pub const NEXT_WINDOW: u8 = 0x1e;
+/// The moving and editing keys, as `oceans_abi::display::KEY_*`
+/// (ADR-0084), by usage: Home 0x4a, Page Up 0x4b, Delete 0x4c, End 0x4d,
+/// Page Down 0x4e, Right 0x4f, Left 0x50, Down 0x51, Up 0x52.
+const NAVIGATION: &[u8; 9] = &[0x84, 0x87, 0x86, 0x85, 0x88, 0x83, 0x82, 0x81, 0x80];
 /// Keypad usages 0x54–0x63.
 const KEYPAD: &[u8; 0x10] = b"/*-+\r1234567890.";
 
@@ -76,6 +82,7 @@ impl Keyboard {
                     NORMAL[index]
                 }
             }
+            0x4a..=0x52 => return Some(NAVIGATION[usize::from(key - 0x4a)]),
             0x54..=0x63 => KEYPAD[usize::from(key - 0x54)],
             _ => 0,
         };
@@ -182,6 +189,29 @@ mod tests {
         // Caps: "A", Shift inverts it: "b", Shift+2: "@", Ctrl+C: 0x03,
         // keypad 1, Backspace, F1 ignored.
         assert_eq!(out, b"Ab@\x031\x7f");
+    }
+
+    #[test]
+    fn moving_keys_send_their_bytes() {
+        let mut keyboard = Keyboard::new();
+        let out = feed(
+            &mut keyboard,
+            &[
+                keys(0, [0x52, 0, 0, 0, 0, 0]),
+                keys(0, [0x51, 0, 0, 0, 0, 0]),
+                keys(0, [0x50, 0, 0, 0, 0, 0]),
+                keys(LEFT_SHIFT, [0x4f, 0, 0, 0, 0, 0]),
+                keys(0, [0x4a, 0, 0, 0, 0, 0]),
+                keys(0, [0x4d, 0, 0, 0, 0, 0]),
+                keys(LEFT_CTRL, [0x4c, 0, 0, 0, 0, 0]),
+                keys(0, [0x4b, 0, 0, 0, 0, 0]),
+                keys(0, [0x4e, 0, 0, 0, 0, 0]),
+                // Insert (0x49) has no byte.
+                keys(0, [0x49, 0, 0, 0, 0, 0]),
+            ],
+        );
+        // Up, Down, Left, Right, Home, End, Delete, Page Up, Page Down.
+        assert_eq!(out, [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88]);
     }
 
     #[test]

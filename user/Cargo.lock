@@ -355,6 +355,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "editor-app"
+version = "0.1.0"
+dependencies = [
+ "oceans-edit",
+ "oceans-fs-proto",
+ "oceans-rt",
+ "oceans-ui",
+]
+
+[[package]]
 name = "elliptic-curve"
 version = "0.13.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -708,6 +718,13 @@ dependencies = [
 [[package]]
 name = "oceans-e1000e"
 version = "0.1.0"
+
+[[package]]
+name = "oceans-edit"
+version = "0.1.0"
+dependencies = [
+ "oceans-abi",
+]
 
 [[package]]
 name = "oceans-elf"

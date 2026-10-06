@@ -340,9 +340,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // check. Positions follow the layout on a 1280x800 screen
     // (user/display/src/desktop.rs): the apps button at 612,760 with no
     // windows open; tiles from 384,360, 102 by 100, the Terminal first,
-    // then the apps by id, Activity Monitor and Calculator among them
-    // (ADR-0080): Hello is the eighth tile, Notes the ninth; Allow at
-    // 776,448.
+    // then the apps by id, Activity Monitor, Calculator and Text Editor
+    // among them (ADR-0080): Hello is the ninth tile, Notes the tenth;
+    // Allow at 776,448.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
@@ -353,11 +353,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@screen 880 320 f2f2f7 the apps panel",
-    b"@monitor mouse_move 27 -250",
+    b"@monitor mouse_move 129 -250",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-dialog.ppm",
-    b"@monitor mouse_move 197 -44",
+    b"@monitor mouse_move 95 -44",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // App windows and the keyboard focus (ADR-0059): Notes is started from
@@ -369,14 +369,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move -224 294",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move 129 -250",
+    b"@monitor mouse_move 231 -250",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-window.ppm",
     b"@keys note\r",
     b"@monitor sendkey ctrl-tab",
     b"@monitor screendump build/smoke-focus.ppm",
-    b"@monitor mouse_move -326 -257",
+    b"@monitor mouse_move -428 -257",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
@@ -432,6 +432,18 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app start app.oceans.activity\r\n",
     b"@screen 650 230 ffffff Activity Monitor's memory card",
     b"app stop app.oceans.activity\r\n",
+    // Text Editor (ADR-0084): its page (the seventh window opened) has the
+    // keyboard; what the USB keyboard types goes in, Home goes back to the
+    // line's start (a key past ASCII), and Ctrl+S saves the page, never
+    // named, as untitled.txt, read back here.
+    b"app start app.oceans.editor\r\n",
+    b"@screen 1052 499 ffffff Text Editor's page",
+    b"@keys edited in oceans",
+    b"@monitor sendkey home",
+    b"@keys text ",
+    b"@monitor sendkey ctrl-s",
+    b"app stop app.oceans.editor\r\n",
+    b"cat /home/untitled.txt\r\n",
     // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
     // until the developer's key is trusted at the console; then the Rust
     // app and the Go app install and run.
@@ -610,7 +622,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // (ADR-0059), Tiles (ADR-0060) and the three third-party apps
     // (ADR-0062, ADR-0064), whose developer's key is still trusted
     // (ADR-0063).
-    Expect::Contains("core: ready, 13 apps installed, 2 trusted publisher keys"),
+    Expect::Contains("core: ready, 14 apps installed, 2 trusted publisher keys"),
     Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
@@ -764,7 +776,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed settings.opk from the system image"),
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),
-    Expect::Contains("core: ready, 4 apps installed, 1 trusted publisher keys"),
+    Expect::Contains("text edited in oceans"),
+    Expect::Contains("core: installed editor.opk from the system image"),
+    Expect::Contains("core: ready, 5 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
     Expect::Contains("gohello: goroutines computed 30"),
@@ -2150,6 +2164,11 @@ const BUNDLED_APPS: &[(&str, &str, &str)] = &[
         "activity",
         "activity-app",
         include_str!("../../../user/apps/activity/manifest"),
+    ),
+    (
+        "editor",
+        "editor-app",
+        include_str!("../../../user/apps/editor/manifest"),
     ),
 ];
 

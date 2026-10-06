@@ -261,6 +261,20 @@ pub mod display {
     /// sends it.)
     pub const KEY_NEXT_WINDOW: u8 = 0x1e;
 
+    /// The bytes keyboards send for keys that move or edit without a
+    /// character (ADR-0084), past ASCII so that what reads only text
+    /// (the shell, older apps) skips them.
+    pub const KEY_UP: u8 = 0x80;
+    pub const KEY_DOWN: u8 = 0x81;
+    pub const KEY_LEFT: u8 = 0x82;
+    pub const KEY_RIGHT: u8 = 0x83;
+    pub const KEY_HOME: u8 = 0x84;
+    pub const KEY_END: u8 = 0x85;
+    /// Delete (forward); Backspace stays DEL (0x7f) or BS (0x08).
+    pub const KEY_DELETE: u8 = 0x86;
+    pub const KEY_PAGE_UP: u8 = 0x87;
+    pub const KEY_PAGE_DOWN: u8 = 0x88;
+
     /// The screen.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Info {
