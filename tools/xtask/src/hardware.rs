@@ -421,6 +421,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("NVMe SSD (any vendor): driver nvme (ADR-0040), attached"),
     Expect::Contains("SATA AHCI controller (any vendor): driver ahci (ADR-0069), attached"),
     Expect::Contains("USB 3 xHCI controller (any vendor): driver xhci (ADR-0032)"),
+    Expect::Contains("Intel High Definition Audio controller (any vendor): driver hda (ADR-0079)"),
     Expect::Contains("Intel 82574L Ethernet: driver e1000e (ADR-0041), attached"),
     Expect::Contains("Display controller: UEFI GOP framebuffer"),
     Expect::Contains("QEMU USB Keyboard"),
@@ -519,6 +520,15 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
         .args([
             "-device",
             "usb-storage,bus=usb.0,port=2,drive=stick,bootindex=0",
+        ])
+        // HD Audio, as on every PC (ADR-0079), recorded.
+        .arg("-audiodev")
+        .arg(audiodev(true, "build/smoke-hw-audio.wav"))
+        .args([
+            "-device",
+            "intel-hda",
+            "-device",
+            "hda-output,audiodev=snd0",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

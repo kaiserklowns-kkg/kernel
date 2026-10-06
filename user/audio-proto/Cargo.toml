@@ -1,0 +1,10 @@
+[package]
+name = "oceans-audio-proto"
+description = "The Oceans audio protocol and client API (ADR-0079)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt.workspace = true

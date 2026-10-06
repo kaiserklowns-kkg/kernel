@@ -36,6 +36,7 @@ const USER_PROGRAMS: &[&str] = &[
     "virtio-blk",
     "nvme",
     "ahci",
+    "hda",
     "virtio-net",
     "e1000e",
     "xhci",
@@ -56,6 +57,7 @@ const USER_PROGRAMS: &[&str] = &[
     "sysreport",
     "diag",
     "logkeep",
+    "play",
     "update",
     "apps",
     "mouse",
@@ -187,6 +189,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run diag out -- crashes\r\n",
     b"run diag out logs -- crashes\r\n",
     b"run diag out logs sysinfo use:fs -- save /docs/diag.txt\r\n",
+    // Sound (ADR-0079): the HD Audio driver's output, and a tone, which
+    // QEMU records for the host to find.
+    b"run play out -- tone\r\n",
+    b"run play out use:audio -- info\r\n",
+    b"run play out use:audio -- tone 440 2\r\n",
     // Programs come from /bin and get only the typed authority.
     b"run hello-client log use:echo\r\n",
     b"run /bin/crasher log\r\n",
@@ -623,6 +630,11 @@ const REBOOT_EXPECT: &[Expect] = &[
 const SHELL_EXPECT: &[Expect] = &[
     // Diagnostics (ADR-0070).
     Expect::Contains("diag: needs the logs capability"),
+    // Sound (ADR-0079).
+    Expect::Contains("hda: Intel HD Audio 1.0, codec "),
+    Expect::Contains("play: needs the audio capability"),
+    Expect::Contains("play: Intel HD Audio 1.0, codec "),
+    Expect::Line("play: a 440 Hz tone for 2 s"),
     Expect::Contains(" lines of trouble in the kept log:"),
     Expect::Contains("  [WARN ] process: process init/crasher killed: page fault"),
     Expect::Contains("diag: saved "),
@@ -1553,7 +1565,14 @@ fn qemu_command(
     // A hub with a tablet behind it (ADR-0033).
     .args(["-device", "usb-hub,bus=usb.0,port=2,id=hub"])
     .args(["-device", "usb-tablet,bus=usb.0,port=2.1"])
-    .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
+    .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+    // Sound (ADR-0079): an Intel HD Audio controller (class 040300) with an
+    // output codec, driven by the userspace hda service. A headless boot
+    // records what it plays (the smoke test checks it); `run` plays it
+    // (DirectSound on Windows, nothing elsewhere; OCEANS_AUDIODEV chooses).
+    .arg("-audiodev")
+    .arg(audiodev(headless, SMOKE_AUDIO))
+    .args(["-device", "intel-hda", "-device", "hda-output,audiodev=snd0"]);
     if let Some(spare) = spare_stick {
         cmd.arg("-drive")
             .arg(format!("if=none,id=fatstick,format=raw,file={spare}"));
@@ -1570,6 +1589,65 @@ fn qemu_command(
         cmd.args(extra.to_string_lossy().split_whitespace());
     }
     Ok(cmd)
+}
+
+/// Where a headless boot records the sound it plays (ADR-0079).
+const SMOKE_AUDIO: &str = "build/smoke-audio.wav";
+
+/// QEMU's audio backend, `snd0`: recorded to `wav` headless, else heard.
+fn audiodev(headless: bool, wav: &str) -> String {
+    if let Some(chosen) = env::var_os("OCEANS_AUDIODEV") {
+        return format!("{},id=snd0", chosen.to_string_lossy());
+    }
+    if headless {
+        format!("wav,id=snd0,path={wav}")
+    } else if cfg!(windows) {
+        "dsound,id=snd0".to_string()
+    } else {
+        "none,id=snd0".to_string()
+    }
+}
+
+/// The tone the smoke test plays (`play tone 440 2`), found in what QEMU
+/// recorded: enough loud samples, and about 880 zero crossings a second.
+fn check_smoke_audio() -> Result {
+    let path = root().join(SMOKE_AUDIO);
+    let wav = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let channels = wav.get(22).copied().unwrap_or(2).max(1) as usize;
+    let rate = wav
+        .get(24..28)
+        .map_or(48_000, |b| u32::from_le_bytes(b.try_into().unwrap()));
+    // The samples: after the "data" chunk's header. QEMU may not have
+    // finished the header's sizes when it exits: the file's end counts.
+    let start = wav
+        .windows(4)
+        .position(|w| w == b"data")
+        .map(|at| at + 8)
+        .ok_or("the recording has no data chunk")?;
+    let samples: Vec<i32> = wav[start..]
+        .chunks_exact(2 * channels)
+        .map(|frame| i32::from(i16::from_le_bytes([frame[0], frame[1]])))
+        .collect();
+    // From the first loud sample to the last.
+    let first = samples.iter().position(|s| s.abs() > 2000);
+    let last = samples.iter().rposition(|s| s.abs() > 2000);
+    let loud = match (first, last) {
+        (Some(first), Some(last)) => &samples[first..=last],
+        _ => &[][..],
+    };
+    let crossings = loud
+        .windows(2)
+        .filter(|pair| (pair[0] < 0) != (pair[1] < 0))
+        .count();
+    let seconds = loud.len() as f64 / f64::from(rate);
+    let hz = crossings as f64 / seconds.max(0.001) / 2.0;
+    if seconds < 1.0 || !(400.0..480.0).contains(&hz) {
+        return Err(format!(
+            "the recording ({SMOKE_AUDIO}) has no 440 Hz tone: {seconds:.2} s of sound at about {hz:.0} Hz"
+        ));
+    }
+    println!("sound: {seconds:.1} s of a {hz:.0} Hz tone in {SMOKE_AUDIO}");
+    Ok(())
 }
 
 fn find_qemu() -> Result<PathBuf> {
@@ -2420,6 +2498,8 @@ fn smoke(profile: Profile) -> Result {
     prepare_fat_stick()?;
     println!("smoke boot 1 of 2: blank disk");
     smoke_boot(SHELL_SCRIPT, SHELL_EXPECT, Nic::Virtio)?;
+    // The second boot records over it.
+    check_smoke_audio()?;
     println!("smoke boot 2 of 2: the same disk, an Intel NIC instead of virtio-net");
     // A clean boot image: the first boot's firmware wrote into it (vvfat).
     build_image(profile, Some("oceans.test=smoke"))?;

@@ -33,6 +33,9 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::fmt::Write;
 
 use oceans_archive::Archive;
@@ -44,7 +47,9 @@ oceans_rt::entry!(main);
 
 const MANIFEST: &str = "services.conf";
 const MAX_SERVICES: usize = 32;
-const MAX_GRANTS: usize = 28;
+/// Grants of one service. The file system holds one per program it
+/// publishes in /bin, so this grows with the system's programs.
+const MAX_GRANTS: usize = 48;
 const MAX_ENDPOINTS: usize = 24;
 const DEFAULT_MAX_RESTARTS: u32 = 5;
 const BACKOFF_BASE_MS: u64 = 100;
@@ -193,7 +198,8 @@ struct Init {
     images: [(&'static str, Handle); MAX_IMAGES],
     image_count: usize,
     events: Handle,
-    services: [Service; MAX_SERVICES],
+    /// On the heap: `MAX_SERVICES` of them no longer fit on the stack.
+    services: Vec<Service>,
     count: usize,
     registry: Registry,
 }
@@ -238,7 +244,7 @@ fn main(start: Start) -> i64 {
         images: [("", Handle(0)); MAX_IMAGES],
         image_count: 0,
         events,
-        services: [NO_SERVICE; MAX_SERVICES],
+        services: alloc::vec![NO_SERVICE; MAX_SERVICES],
         count: 0,
         registry: Registry {
             names: [""; MAX_ENDPOINTS],
@@ -302,10 +308,7 @@ fn map_archive(memory: Handle) -> Result<Archive<'static>, &'static str> {
 
 /// Parses the manifest into `services`; returns how many, or the 1-based
 /// line number and problem of the first error.
-fn parse(
-    text: &'static str,
-    services: &mut [Service; MAX_SERVICES],
-) -> Result<usize, (usize, &'static str)> {
+fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, &'static str)> {
     let mut count = 0;
     for (number, raw) in text.lines().enumerate() {
         let line_number = number + 1;

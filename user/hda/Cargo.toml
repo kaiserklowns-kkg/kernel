@@ -1,0 +1,18 @@
+[package]
+name = "hda"
+description = "Intel High Definition Audio driver: a userspace service holding one HD Audio controller's device capability, playing 48 kHz stereo through its best output with the audio protocol (ADR-0079)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hda"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-audio-proto.workspace = true
+oceans-hda.workspace = true
+oceans-virtio.workspace = true

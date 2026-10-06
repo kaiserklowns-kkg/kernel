@@ -514,6 +514,10 @@ name = "oceans-hardware"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-hda"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-heap"
 version = "0.1.0"
 

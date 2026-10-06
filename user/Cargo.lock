@@ -440,6 +440,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hda"
+version = "0.1.0"
+dependencies = [
+ "oceans-audio-proto",
+ "oceans-hda",
+ "oceans-rt",
+ "oceans-virtio",
+]
+
+[[package]]
 name = "heartbeat-app"
 version = "0.1.0"
 dependencies = [
@@ -628,6 +638,13 @@ name = "oceans-archive"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-audio-proto"
+version = "0.1.0"
+dependencies = [
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-block-proto"
 version = "0.1.0"
 dependencies = [
@@ -674,6 +691,10 @@ dependencies = [
 
 [[package]]
 name = "oceans-hardware"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-hda"
 version = "0.1.0"
 
 [[package]]
@@ -1189,6 +1210,7 @@ name = "utils"
 version = "0.1.0"
 dependencies = [
  "oceans-abi",
+ "oceans-audio-proto",
  "oceans-block-proto",
  "oceans-core-proto",
  "oceans-fs-proto",

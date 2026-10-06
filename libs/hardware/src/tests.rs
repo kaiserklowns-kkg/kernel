@@ -63,6 +63,13 @@ fn devices_get_the_most_specific_row() {
         support(0x8086, 0xa352, 0x01, 0x06, 0x01),
         Support::Driver(_)
     ));
+    // QEMU's intel-hda (ICH6), and an Intel 300-series one.
+    for (vendor, device) in [(0x8086, 0x2668), (0x8086, 0xa348)] {
+        assert_eq!(
+            support(vendor, device, 0x04, 0x03, 0x00),
+            Support::Driver("hda (ADR-0079): output, 48 kHz stereo")
+        );
+    }
     // A SATA controller in RAID mode (class 01.04): not driven.
     assert_eq!(support(0x8086, 0x2822, 0x01, 0x04, 0x00), Support::None);
     assert!(matches!(

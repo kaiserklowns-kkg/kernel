@@ -30,6 +30,7 @@ procedure below passes on it.
 |---|---|---|
 | NVMe SSD (any vendor) | nvme (ADR-0040) | Tier 0 (QEMU `nvme`) in CI; real SSDs: awaiting reports |
 | SATA AHCI controller (any vendor) | ahci (ADR-0069) | Tier 0 (QEMU q35's ICH9 AHCI with `ide-hd` disks) in CI; real controllers and disks: awaiting reports |
+| Intel High Definition Audio controller (any vendor) | hda (ADR-0079): output, 48 kHz stereo | Tier 0 (QEMU `intel-hda` with `hda-output`, recorded and checked) in CI; real codecs: awaiting reports |
 | USB 3 xHCI controller (any vendor) | xhci (ADR-0032): keyboards, mice, tablets, hubs, mass storage | Tier 0 (QEMU `qemu-xhci`) in CI; real controllers: awaiting reports |
 | Intel 82574L Ethernet | e1000e (ADR-0041) | Tier 0 (QEMU `e1000e`) in CI; real adapters: awaiting reports |
 | virtio-net (modern) | virtio-net (ADR-0023) | Tier 0 (virtual machines) |
@@ -44,7 +45,7 @@ Also driven, outside PCI: the 16550 UART (COM1), the PS/2 keyboard
 - Realtek Ethernet;
 - other Intel Ethernet (I219, I225, I226);
 - Wi-Fi;
-- audio (Intel HDA);
+- audio input (microphones) and HDMI audio;
 - GPUs;
 - USB 2-only controllers.
 

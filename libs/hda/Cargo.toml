@@ -1,0 +1,9 @@
+[package]
+name = "oceans-hda"
+description = "Intel High Definition Audio for Oceans: registers, codec verbs, the output path search, buffer descriptors and the cyclic buffer, without allocation (ADR-0079)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

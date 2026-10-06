@@ -3,7 +3,7 @@
 # user/.cargo/config.toml. Built by `cargo xtask`.
 [workspace]
 resolver = "3"
-members = ["rt", "fs-proto", "core-proto", "block-proto", "net-proto", "input-proto", "display-proto", "sdk", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "nvme", "ahci", "virtio-net", "e1000e", "xhci", "usb-storage", "usb-hid", "core", "display", "apps/hello", "apps/heartbeat", "apps/notes", "gohost", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
+members = ["rt", "fs-proto", "core-proto", "block-proto", "audio-proto", "net-proto", "input-proto", "display-proto", "sdk", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "nvme", "ahci", "hda", "virtio-net", "e1000e", "xhci", "usb-storage", "usb-hid", "core", "display", "apps/hello", "apps/heartbeat", "apps/notes", "gohost", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
 
 [workspace.package]
 version = "0.1.0"
@@ -32,6 +32,8 @@ oceans-tls = { path = "../libs/tls" }
 oceans-usb = { path = "../libs/usb" }
 oceans-nvme = { path = "../libs/nvme" }
 oceans-ahci = { path = "../libs/ahci" }
+oceans-hda = { path = "../libs/hda" }
+oceans-audio-proto = { path = "audio-proto" }
 oceans-e1000e = { path = "../libs/e1000e" }
 oceans-elf = { path = "../libs/elf" }
 oceans-volume = { path = "../libs/volume" }

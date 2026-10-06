@@ -12,6 +12,7 @@ test = false
 bench = false
 
 [dependencies]
-oceans-rt.workspace = true
+# The service table lives on the heap: it outgrew the 64 KiB stack.
+oceans-rt = { workspace = true, features = ["alloc"] }
 oceans-archive.workspace = true
 oceans-fs-proto.workspace = true

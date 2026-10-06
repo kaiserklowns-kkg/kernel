@@ -114,6 +114,12 @@ pub const MATRIX: &[Row] = &[
         support: Support::Driver("ahci (ADR-0069)"),
     },
     Row {
+        what: "Intel High Definition Audio controller (any vendor)",
+        id: None,
+        class: class(0x04, 0x03, None),
+        support: Support::Driver("hda (ADR-0079): output, 48 kHz stereo"),
+    },
+    Row {
         what: "USB 3 xHCI controller (any vendor)",
         id: None,
         class: class(0x0c, 0x03, Some(0x30)),
