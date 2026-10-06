@@ -326,48 +326,48 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"ai ask how much memory is free?\r\n",
     b"ai model https://models.oceans.test:$MODELS/v1 oceans-test --dns 10.0.2.2:$DNS --ca /keep/models-ca.pem\r\n",
     b"ai ask how much memory is free?\r\n",
-    // The desktop (ADR-0057, ADR-0076): with a mouse plugged in, the Start
-    // button (the middle of the taskbar) opens the Start menu, and Hello is
-    // clicked there; it needs a decision, so the desktop's own permission
-    // dialog asks, and Allow is clicked. The screen is captured for the
-    // host to check. Positions follow the layout on a 1280x800 screen
-    // (user/display/src/desktop.rs): Start at 618,776 with no windows open;
-    // tiles from 384,384, 102 by 100, the Terminal first (Hello is the
-    // fifth tile, Notes the sixth); Allow at 776,450.
+    // The desktop (ADR-0057, ADR-0078): with a mouse plugged in, the apps
+    // button (first in the dock) opens the apps panel, and Hello is clicked
+    // there; it needs a decision, so the desktop's own permission dialog
+    // asks, and Allow is clicked. The screen is captured for the host to
+    // check. Positions follow the layout on a 1280x800 screen
+    // (user/display/src/desktop.rs): the apps button at 612,760 with no
+    // windows open; tiles from 384,360, 102 by 100, the Terminal first
+    // (Hello is the fifth tile, Notes the sixth); Allow at 776,448.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     b"@monitor screendump build/smoke-desktop.ppm",
     b"@monitor mouse_move -3000 -3000",
-    b"@monitor mouse_move 618 776",
+    b"@monitor mouse_move 612 760",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 880 350 121a2b the Start menu",
-    b"@monitor mouse_move 225 -342",
+    b"@screen 880 320 f2f2f7 the apps panel",
+    b"@monitor mouse_move 231 -350",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-dialog.ppm",
-    b"@monitor mouse_move -7 34",
+    b"@monitor mouse_move -7 56",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // App windows and the keyboard focus (ADR-0059): Notes is started from
-    // the Start menu and opens a window in the middle of the screen, which
+    // the apps panel and opens a window in the middle of the screen, which
     // takes the focus; what the USB keyboard types goes to it, not to the
     // shell, and Enter keeps the line in its storage. Ctrl+Tab gives the
     // keyboard back to the Terminal; the close button ends Notes. The
     // screen is captured with each focus.
-    b"@monitor mouse_move -218 308",
+    b"@monitor mouse_move -224 294",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -183 -242",
+    b"@monitor mouse_move -177 -250",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-window.ppm",
     b"@keys note\r",
     b"@monitor sendkey ctrl-tab",
     b"@monitor screendump build/smoke-focus.ppm",
-    b"@monitor mouse_move 432 -279",
+    b"@monitor mouse_move -20 -257",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
@@ -385,8 +385,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@bridge store",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     b"@monitor mouse_move -3000 -3000",
-    b"@monitor mouse_move 836 468",
-    b"@screen 380 496 1b263f the install dialog",
+    b"@monitor mouse_move 836 466",
+    b"@screen 380 494 f9f9fb the install dialog",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
@@ -2262,46 +2262,47 @@ fn check_smoke_screens() -> Result {
         let at = (y * image.0 + x) * 3;
         u32::from(image.2[at]) << 16 | u32::from(image.2[at + 1]) << 8 | u32::from(image.2[at + 2])
     };
-    const SURFACE: u32 = 0x12_1a_2b;
-    const TERMINAL: u32 = 0x07_0b_14;
-    const DIALOG: u32 = 0x1b_26_3f;
-    // The wallpaper's top rows (ADR-0076).
-    const WALLPAPER: u32 = 0x0a_10_1d;
+    const TERMINAL: u32 = 0x1c_1c_1e;
+    const DIALOG: u32 = 0xf9_f9_fb;
+    // Every channel at least `min` (light), or at most `max` (dark).
+    let light = |colour: u32, min: u32| [16, 8, 0].iter().all(|s| (colour >> s) & 0xff >= min);
+    let dark = |colour: u32, max: u32| [16, 8, 0].iter().all(|s| (colour >> s) & 0xff <= max);
     let desktop = read_ppm(&root().join("build/smoke-desktop.ppm"))?;
-    let h = desktop.1;
-    // The Terminal is 960 x 600 at 160,76 on a 1280 x 800 screen.
-    for (what, x, y, want) in [
-        ("the wallpaper", 5, 5, WALLPAPER),
-        ("the taskbar", 5, h - 5, SURFACE),
-        ("the Terminal", 1100, 672, TERMINAL),
-    ] {
-        let got = pixel(&desktop, x, y);
-        if got != want {
-            return Err(format!(
-                "desktop capture: {what} at {x},{y} is {got:06x}, not {want:06x}"
-            ));
-        }
-    }
-    let dialog = read_ppm(&root().join("build/smoke-dialog.ppm"))?;
-    if pixel(&dialog, 380, 496) != DIALOG {
+    // The Terminal is 960 x 596 at 160,76 on a 1280 x 800 screen; the
+    // translucent menu bar is light over a dark sky (ADR-0078).
+    let terminal = pixel(&desktop, 1100, 668);
+    if terminal != TERMINAL {
         return Err(format!(
-            "dialog capture: no permission dialog at 380,496 ({:06x})",
-            pixel(&dialog, 380, 496)
+            "desktop capture: the Terminal at 1100,668 is {terminal:06x}, not {TERMINAL:06x}"
         ));
     }
-    if pixel(&dialog, 5, 5) == WALLPAPER {
+    let (menu, sky) = (pixel(&desktop, 640, 14), pixel(&desktop, 5, 40));
+    if !light(menu, 0xb0) || !dark(sky, 0x70) {
+        return Err(format!(
+            "desktop capture: the menu bar ({menu:06x}) is not light, or the sky ({sky:06x}) not dark"
+        ));
+    }
+    let dialog = read_ppm(&root().join("build/smoke-dialog.ppm"))?;
+    if pixel(&dialog, 380, 494) != DIALOG {
+        return Err(format!(
+            "dialog capture: no permission dialog at 380,494 ({:06x})",
+            pixel(&dialog, 380, 494)
+        ));
+    }
+    if pixel(&dialog, 640, 14) >= menu {
         return Err("dialog capture: the desktop behind the dialog is not dimmed".into());
     }
     // A window, and the keyboard focus (ADR-0059): Notes' frame is in the
-    // middle of the screen (at 399,241), its paper inside; the focused
-    // title bar has the focus colour, first Notes', then (Ctrl+Tab) the
+    // middle of the area (at 399,239), its paper inside; the focused title
+    // bar has the focus colour, first Notes', then (Ctrl+Tab) the
     // Terminal's.
-    const FOCUS_TITLE: u32 = 0x1f_3a_5f;
-    const IDLE_TITLE: u32 = 0x18_23_3a;
+    const FOCUS_TITLE: u32 = 0xe3_e3_e8;
+    const IDLE_TITLE: u32 = 0xf6_f6_f8;
     const PAPER: u32 = 0xf4_ef_e1;
-    let notes_title = (700, 250);
+    let notes_title = (850, 262);
     let notes_paper = (787, 450);
-    let terminal_title = (900, 90);
+    // Clear of the title text and of a notification's shadow (top right).
+    let terminal_title = (800, 90);
     for (file, checks) in [
         (
             "build/smoke-window.ppm",

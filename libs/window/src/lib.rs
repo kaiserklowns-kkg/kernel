@@ -25,8 +25,11 @@ use proto::{Event, MAX_WINDOWS_PER_APP, Status, kind};
 
 /// Height of the title bar the system draws above each window.
 pub const TITLE_HEIGHT: i32 = 28;
-/// Side of the close button, at the right of the title bar.
+/// Side of a title bar button's target (ADR-0078: round buttons at the
+/// left of the title bar, close first).
 pub const CLOSE_SIZE: i32 = 20;
+/// From one title bar button to the next.
+pub const BUTTON_STEP: i32 = 22;
 /// Windows on the screen at once, of all apps.
 pub const MAX_WINDOWS: usize = 16;
 /// Events kept per app until it takes them; later ones are dropped.
@@ -90,19 +93,27 @@ impl Frame {
         Rect::new(self.x, self.y, self.width + 2, TITLE_HEIGHT)
     }
 
+    /// At the left of the title bar (ADR-0078).
     pub fn close_button(&self) -> Rect {
         Rect::new(
-            self.x + self.width + 2 - CLOSE_SIZE - 4,
+            self.x + 6,
             self.y + (TITLE_HEIGHT - CLOSE_SIZE) / 2,
             CLOSE_SIZE,
             CLOSE_SIZE,
         )
     }
 
-    /// Left of the close button.
+    /// Right of the close button.
     pub fn minimize_button(&self) -> Rect {
         let close = self.close_button();
-        Rect::new(close.x - CLOSE_SIZE - 4, close.y, CLOSE_SIZE, CLOSE_SIZE)
+        Rect::new(close.x + BUTTON_STEP, close.y, CLOSE_SIZE, CLOSE_SIZE)
+    }
+
+    /// Right of the minimize button: resizing, not yet available (drawn
+    /// disabled, takes no clicks).
+    pub fn zoom_button(&self) -> Rect {
+        let minimize = self.minimize_button();
+        Rect::new(minimize.x + BUTTON_STEP, minimize.y, CLOSE_SIZE, CLOSE_SIZE)
     }
 
     /// Where the app's pixels go.

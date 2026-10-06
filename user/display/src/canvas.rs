@@ -91,6 +91,8 @@ pub struct Canvas {
     /// The interface's fonts; without them, text falls back to the bitmap
     /// font.
     typesetter: Option<Typesetter>,
+    /// The wallpaper, drawn once (empty until set).
+    wallpaper: Vec<u32>,
 }
 
 impl Canvas {
@@ -111,6 +113,7 @@ impl Canvas {
                 u32::from(shifts.2),
             ),
             typesetter: Typesetter::new(),
+            wallpaper: Vec::new(),
         }
     }
 
@@ -195,25 +198,93 @@ impl Canvas {
         }
     }
 
-    /// A vertical gradient from `top` to `bottom` over `r`.
-    pub fn gradient(&mut self, r: Rect, top: Rgb, bottom: Rgb) {
-        let span = (r.h - 1).max(1) as u32;
+    /// `color` laid over `r` with `alpha` (0..=255): a translucent surface
+    /// (ADR-0078), with rounded corners of `radius`.
+    pub fn tint(&mut self, r: Rect, radius: i32, color: Rgb, alpha: u32) {
+        let radius = radius.min(r.w / 2).min(r.h / 2).max(0);
         for dy in 0..r.h {
-            let alpha = dy as u32 * 255 / span;
-            self.fill(Rect::new(r.x, r.y + dy, r.w, 1), bottom.over(top, alpha));
+            let above = if dy < radius {
+                radius - dy
+            } else if dy >= r.h - radius {
+                dy - (r.h - radius) + 1
+            } else {
+                0
+            };
+            let inset = if above == 0 {
+                0
+            } else {
+                radius - isqrt(radius * radius - (above - 1) * (above - 1))
+            };
+            let row = Rect::new(r.x + inset, r.y + dy, r.w - 2 * inset, 1);
+            let Some((x0, y0, x1, _)) = self.clip(row) else {
+                continue;
+            };
+            let at = (y0 * self.width) as usize;
+            for pixel in &mut self.pixels[at + x0 as usize..at + x1 as usize] {
+                *pixel = color.over(Rgb(*pixel), alpha).0;
+            }
         }
     }
 
-    /// Darkens `r` by `alpha` (0..=255): a window's shadow.
-    pub fn darken(&mut self, r: Rect, alpha: u32) {
-        let Some((x0, y0, x1, y1)) = self.clip(r) else {
-            return;
-        };
-        for y in y0..y1 {
-            let row = (y * self.width) as usize;
-            for pixel in &mut self.pixels[row + x0 as usize..row + x1 as usize] {
-                *pixel = Rgb(0).over(Rgb(*pixel), alpha).0;
+    /// A filled circle of radius `r` around (`cx`, `cy`), its edge
+    /// anti-aliased.
+    pub fn circle(&mut self, cx: i32, cy: i32, r: i32, color: Rgb) {
+        // In quarter pixels, to soften the edge.
+        let r4 = r * 4;
+        for y in cy - r - 1..=cy + r + 1 {
+            for x in cx - r - 1..=cx + r + 1 {
+                if x < 0 || y < 0 || x >= self.width || y >= self.height {
+                    continue;
+                }
+                let mut inside = 0;
+                for sy in 0..2 {
+                    for sx in 0..2 {
+                        let dx = (x - cx) * 4 + sx * 2 - 1;
+                        let dy = (y - cy) * 4 + sy * 2 - 1;
+                        if dx * dx + dy * dy <= r4 * r4 {
+                            inside += 1;
+                        }
+                    }
+                }
+                if inside > 0 {
+                    let at = (y * self.width + x) as usize;
+                    self.pixels[at] = color.over(Rgb(self.pixels[at]), inside * 255 / 4).0;
+                }
             }
+        }
+    }
+
+    /// A soft shadow under `r`: darker near it, fading over `spread`
+    /// pixels, a little lower than the surface (ADR-0078).
+    pub fn shadow(&mut self, r: Rect, spread: i32, strength: u32) {
+        for step in (1..=spread).rev() {
+            let alpha = strength / spread as u32;
+            self.tint(
+                Rect::new(
+                    r.x - step,
+                    r.y - step + spread / 2,
+                    r.w + 2 * step,
+                    r.h + 2 * step,
+                ),
+                step + 6,
+                Rgb(0),
+                alpha,
+            );
+        }
+    }
+
+    /// Keeps `pixels` (the whole screen) as the wallpaper: drawn once,
+    /// copied on every frame.
+    pub fn set_wallpaper(&mut self, pixels: Vec<u32>) {
+        if pixels.len() == self.pixels.len() {
+            self.wallpaper = pixels;
+        }
+    }
+
+    /// The wallpaper, over everything (the frame's first step).
+    pub fn draw_wallpaper(&mut self) {
+        if self.wallpaper.len() == self.pixels.len() {
+            self.pixels.copy_from_slice(&self.wallpaper);
         }
     }
 
@@ -222,14 +293,6 @@ impl Canvas {
         for pixel in &mut self.pixels {
             *pixel = shade.over(Rgb(*pixel), alpha).0;
         }
-    }
-
-    /// A one-pixel outline.
-    pub fn outline(&mut self, r: Rect, color: Rgb) {
-        self.fill(Rect::new(r.x, r.y, r.w, 1), color);
-        self.fill(Rect::new(r.x, r.y + r.h - 1, r.w, 1), color);
-        self.fill(Rect::new(r.x, r.y, 1, r.h), color);
-        self.fill(Rect::new(r.x + r.w - 1, r.y, 1, r.h), color);
     }
 
     /// Text from (`x`, `y`) (top left), clipped to `clip`; returns the x

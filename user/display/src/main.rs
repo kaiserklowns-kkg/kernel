@@ -147,6 +147,8 @@ fn main(start: Start) -> i64 {
         info.pitch,
         (info.red_shift, info.green_shift, info.blue_shift),
     );
+    // Drawn once (ADR-0078); each frame starts from a copy.
+    canvas.set_wallpaper(desktop::wallpaper(canvas.width, canvas.height));
 
     let Ok(notification) = oceans_rt::notification_create() else {
         return EXIT_BAD_START;
@@ -325,7 +327,9 @@ impl Service {
                 // A permission dialog is modal: windows get nothing. The
                 // taskbar and an open Start menu lie over the windows, but
                 // a release always reaches them (it ends a drag).
-                let over = self.desktop.start_open || desktop::taskbar(w, h).contains(x, y);
+                let over = self.desktop.start_open
+                    || y < desktop::MENU_HEIGHT
+                    || y >= h - desktop::DOCK_RESERVE;
                 if self.desktop.dialog.is_none()
                     && (!pressed || !over)
                     && self.windows.button(button, pressed, x, y)
@@ -705,19 +709,10 @@ impl Service {
         changed
     }
 
-    /// The clock, the date and the status; `true` if they changed.
+    /// The clock and the status; `true` if they changed.
     fn refresh_clock(&mut self) -> bool {
-        let (clock, date) = match oceans_rt::unix_time_ms() {
-            Some(ms) => {
-                let minutes = ms / 60_000;
-                let (year, month, day) = oceans_package::date::civil((ms / 86_400_000) as u32);
-                (
-                    alloc::format!("{:02}:{:02}", minutes / 60 % 24, minutes % 60),
-                    alloc::format!("{year}-{month:02}-{day:02} UTC"),
-                )
-            }
-            None => (String::from("--:--"), String::from("time not set")),
-        };
+        let clock = oceans_rt::unix_time_ms()
+            .map_or_else(|| String::from("time not set"), desktop::clock_text);
         let mut status = String::new();
         if let Some(sysinfo) = self.sysinfo {
             let mut record = [0u8; 32];
@@ -729,11 +724,8 @@ impl Service {
                 }
             }
         }
-        let changed = clock != self.desktop.clock
-            || date != self.desktop.date
-            || status != self.desktop.status;
+        let changed = clock != self.desktop.clock || status != self.desktop.status;
         self.desktop.clock = clock;
-        self.desktop.date = date;
         self.desktop.status = status;
         changed
     }

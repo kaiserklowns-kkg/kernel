@@ -223,8 +223,9 @@ fn clicks_focus_raise_drag_and_close() {
     assert_eq!(m.frames()[0].id, b);
     m.set_focus(Focus::Window(b));
     let title = m.frames()[1].title_bar();
-    assert!(m.button(1, true, title.x + 40, title.y + 10));
-    assert!(m.pointer_moved(title.x + 140, title.y + 60));
+    // Clear of the buttons at the left (ADR-0078).
+    assert!(m.button(1, true, title.x + 100, title.y + 10));
+    assert!(m.pointer_moved(title.x + 200, title.y + 60));
     let moved = m.frames().iter().find(|f| f.id == b).unwrap();
     assert_eq!((moved.x, moved.y), (fb.x + 100, fb.y + 50));
     assert!(m.button(1, false, 0, 0));

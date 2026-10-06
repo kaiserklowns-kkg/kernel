@@ -83,7 +83,8 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0073](0073-alpha-hardening.md) | Alpha hardening: small BARs, reserved system ids | Accepted |
 | [0074](0074-kept-logs-on-disk.md) | The log kept on disk across reboots | Accepted |
 | [0075](0075-signed-release-checksums.md) | Signed release checksums and the published release key | Accepted |
-| [0076](0076-desktop-shell.md) | The desktop shell: taskbar, Start menu, windows that minimize | Accepted |
+| [0076](0076-desktop-shell.md) | The desktop shell: taskbar, Start menu, windows that minimize | Accepted (amended by 0078) |
 | [0077](0077-interface-text.md) | Interface text: Noto Sans, and Thai | Accepted |
+| [0078](0078-desktop-look.md) | The desktop's look: a menu bar, a dock, light windows | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.
