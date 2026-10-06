@@ -114,6 +114,17 @@ fn main(start: Start) -> i64 {
     core.serve(server)
 }
 
+/// A copy of a module's bytes (the whole object: rounded up to pages).
+fn module_bytes(memory: Handle) -> Option<Vec<u8>> {
+    let size = usize::try_from(oceans_rt::memory_size(memory).ok()?).ok()?;
+    let base = oceans_rt::memory_map(memory, 0, prot::READ).ok()?;
+    // SAFETY: the whole object (`size` bytes) is mapped readable at `base`
+    // until it is unmapped below.
+    let bytes = unsafe { core::slice::from_raw_parts(base, size) }.to_vec();
+    let _ = oceans_rt::memory_unmap(base);
+    Some(bytes)
+}
+
 fn say(log: Handle, args: core::fmt::Arguments<'_>) {
     let mut line = Buffer::<240>::new();
     let _ = line.write_fmt(args);
@@ -394,6 +405,7 @@ impl Core {
         };
         core.load_apps();
         core.load_decisions();
+        core.install_bundled(directory);
         core.load_enabled();
         say(
             log,
@@ -418,6 +430,47 @@ impl Core {
                 key: t.key,
             })
             .collect()
+    }
+
+    /// The apps the system image brings (ADR-0080): its `module:NAME.opk`
+    /// grants. Each is installed when missing or older than the image's,
+    /// through every check an install makes; one already as new is left.
+    fn install_bundled(&mut self, directory: &Directory) {
+        for line in directory.lines() {
+            let mut words = line.split_whitespace();
+            let (Some(_), Some("module"), Some(name)) = (words.next(), words.next(), words.next())
+            else {
+                continue;
+            };
+            if !name.ends_with(".opk") {
+                continue;
+            }
+            let Some(bytes) = directory.find("module", name).and_then(module_bytes) else {
+                say(
+                    self.log,
+                    format_args!("core: {name} from the image is unreadable"),
+                );
+                continue;
+            };
+            // A module is rounded up to whole pages: only the archive.
+            let len = oceans_archive::Archive::parse(&bytes)
+                .map_or(bytes.len(), |archive| archive.extent());
+            let mut reply = Vec::new();
+            match self.install_bytes(&bytes[..len], &mut reply) {
+                Ok(()) => say(
+                    self.log,
+                    format_args!("core: installed {name} from the system image"),
+                ),
+                Err(refusal) if refusal.status == Status::NotNewer => {}
+                Err(refusal) => say(
+                    self.log,
+                    format_args!(
+                        "core: {name} from the system image not installed: {}",
+                        refusal.text.as_deref().unwrap_or(refusal.status.message())
+                    ),
+                ),
+            }
+        }
     }
 
     /// Every `/apps/ID/package.opk` that still verifies.

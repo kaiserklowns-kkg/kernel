@@ -1,0 +1,12 @@
+[package]
+name = "oceans-ui"
+description = "The Oceans app toolkit: immediate-mode widgets in the desktop's look, with Thai text, and the window loop (ADR-0080)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-display-proto.workspace = true
+oceans-draw.workspace = true

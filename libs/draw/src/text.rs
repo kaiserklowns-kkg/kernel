@@ -1,9 +1,7 @@
 //! Interface text (ADR-0077): Noto Sans, proportional and anti-aliased,
 //! with Noto Sans Thai for Thai. Each character is rasterized once per
 //! style and kept.
-//!
-//! The Terminal keeps the monospaced bitmap font (`canvas`): it needs a
-//! grid, and redraws thousands of characters.
+//! (The display's Terminal keeps a monospaced bitmap font of its own.)
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

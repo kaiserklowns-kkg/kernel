@@ -414,7 +414,8 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("fs (satafs): formatted a blank disk: "),
     Expect::Contains("fs: /sata: a mounted filesystem"),
     Expect::Line("  hw-sata.txt"),
-    Expect::Line("app: no apps installed"),
+    // Only the app the image brings (ADR-0080), signed with its key.
+    Expect::Contains("app.oceans.calculator  1.0.0  Calculator"),
     // The boot stick itself, as removable media (ADR-0035): its ESP.
     Expect::Line("  EFI/"),
     Expect::Contains("cpu baseline (x86-64-v2, NX, APIC): SSE3 SSSE3"),

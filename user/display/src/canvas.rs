@@ -1,41 +1,14 @@
-//! Drawing: a back buffer in RAM, shapes and text, and presenting only the
-//! pixels that changed to the (uncached, slow) framebuffer.
+//! Drawing: a back buffer in RAM, and presenting only the pixels that
+//! changed to the (uncached, slow) framebuffer. The shapes and interface
+//! text are `oceans-draw`'s (ADR-0080), the same apps draw with; the
+//! Terminal's monospaced bitmap font, the pointer and presenting are here.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
-
-use crate::text::{Style, Typesetter};
-
-/// A colour, 0xRRGGBB.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Rgb(pub u32);
-
-impl Rgb {
-    fn channels(self) -> (u32, u32, u32) {
-        ((self.0 >> 16) & 0xff, (self.0 >> 8) & 0xff, self.0 & 0xff)
-    }
-
-    /// `self` over `under` with `alpha` (0..=255).
-    pub fn over(self, under: Rgb, alpha: u32) -> Rgb {
-        let (r1, g1, b1) = self.channels();
-        let (r0, g0, b0) = under.channels();
-        let mix = |a: u32, b: u32| (b * (255 - alpha) + a * alpha) / 255;
-        Rgb((mix(r1, r0) << 16) | (mix(g1, g0) << 8) | mix(b1, b0))
-    }
-}
-
-pub use oceans_window::Rect;
-
-/// The integer square root of a small non-negative number.
-fn isqrt(n: i32) -> i32 {
-    let mut root = 0;
-    while (root + 1) * (root + 1) <= n {
-        root += 1;
-    }
-    root
-}
+pub use oceans_draw::{Rect, Rgb};
+use oceans_draw::{Style, Surface, Typesetter};
 
 /// Text styles: the interface's (proportional, with Thai: ADR-0077), and
 /// the Terminal's monospaced grid.
@@ -117,6 +90,12 @@ impl Canvas {
         }
     }
 
+    /// The back buffer, to draw on.
+    fn surface(&mut self) -> Surface<'_> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        Surface::new(&mut self.pixels, w, h).expect("the back buffer is the screen's size")
+    }
+
     /// The width of `text` in `font`.
     pub fn measure(&mut self, text: &str, font: Font) -> i32 {
         match (font.style(), self.typesetter.as_mut()) {
@@ -125,35 +104,43 @@ impl Canvas {
         }
     }
 
-    fn clip(&self, r: Rect) -> Option<(i32, i32, i32, i32)> {
-        let x0 = r.x.max(0);
-        let y0 = r.y.max(0);
-        let x1 = (r.x + r.w).min(self.width);
-        let y1 = (r.y + r.h).min(self.height);
-        (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+    pub fn fill(&mut self, r: Rect, colour: Rgb) {
+        self.surface().fill(r, colour);
     }
 
-    pub fn fill(&mut self, r: Rect, color: Rgb) {
-        let Some((x0, y0, x1, y1)) = self.clip(r) else {
-            return;
-        };
-        for y in y0..y1 {
-            let row = (y * self.width) as usize;
-            self.pixels[row + x0 as usize..row + x1 as usize].fill(color.0);
-        }
+    pub fn round_fill(&mut self, r: Rect, radius: i32, colour: Rgb) {
+        self.surface().round_fill(r, radius, colour);
+    }
+
+    pub fn tint(&mut self, r: Rect, radius: i32, colour: Rgb, alpha: u32) {
+        self.surface().tint(r, radius, colour, alpha);
+    }
+
+    pub fn circle(&mut self, cx: i32, cy: i32, r: i32, colour: Rgb) {
+        self.surface().circle(cx, cy, r, colour);
+    }
+
+    pub fn shadow(&mut self, r: Rect, spread: i32, strength: u32) {
+        self.surface().shadow(r, spread, strength);
+    }
+
+    /// Darkens everything (behind a modal dialog).
+    pub fn dim(&mut self, shade: Rgb, alpha: u32) {
+        self.surface().dim(shade, alpha);
     }
 
     /// Copies an app's pixels (`width` per row, `0x00RRGGBB`) into `to`,
     /// clipped to the screen. `pixels` is shared memory the app may be
     /// writing: a frame may tear, nothing worse.
     pub fn blit(&mut self, to: Rect, pixels: *const u32, width: usize) {
-        let Some((x0, y0, x1, y1)) = self.clip(to) else {
-            return;
-        };
+        let x0 = to.x.max(0);
+        let y0 = to.y.max(0);
+        let x1 = (to.x + to.w).min(self.width);
+        let y1 = (to.y + to.h).min(self.height);
         for y in y0..y1 {
             let source = (y - to.y) as usize * width + (x0 - to.x) as usize;
             let row = (y * self.width) as usize;
-            for (i, pixel) in self.pixels[row + x0 as usize..row + x1 as usize]
+            for (i, pixel) in self.pixels[row + x0 as usize..row + x1.max(x0) as usize]
                 .iter_mut()
                 .enumerate()
             {
@@ -162,114 +149,6 @@ impl Canvas {
                 // writes them.
                 *pixel = unsafe { pixels.add(source + i).read_volatile() } & 0x00ff_ffff;
             }
-        }
-    }
-
-    /// A rectangle with rounded corners of `radius` pixels (ADR-0076): the
-    /// corners' pixels outside the circle are left as they are, and the
-    /// edge pixel of each corner row is blended for a smoother curve.
-    pub fn round_fill(&mut self, r: Rect, radius: i32, color: Rgb) {
-        let radius = radius.min(r.w / 2).min(r.h / 2).max(0);
-        for dy in 0..r.h {
-            // The row's distance above (or below) the corners' centres.
-            let above = if dy < radius {
-                radius - dy
-            } else if dy >= r.h - radius {
-                dy - (r.h - radius) + 1
-            } else {
-                0
-            };
-            let inset = if above == 0 {
-                0
-            } else {
-                radius - isqrt(radius * radius - (above - 1) * (above - 1))
-            };
-            let y = r.y + dy;
-            self.fill(Rect::new(r.x + inset, y, r.w - 2 * inset, 1), color);
-            if inset > 0 {
-                // Soften the step at each end.
-                for x in [r.x + inset - 1, r.x + r.w - inset] {
-                    if x >= 0 && x < self.width && y >= 0 && y < self.height {
-                        let at = (y * self.width + x) as usize;
-                        self.pixels[at] = color.over(Rgb(self.pixels[at]), 110).0;
-                    }
-                }
-            }
-        }
-    }
-
-    /// `color` laid over `r` with `alpha` (0..=255): a translucent surface
-    /// (ADR-0078), with rounded corners of `radius`.
-    pub fn tint(&mut self, r: Rect, radius: i32, color: Rgb, alpha: u32) {
-        let radius = radius.min(r.w / 2).min(r.h / 2).max(0);
-        for dy in 0..r.h {
-            let above = if dy < radius {
-                radius - dy
-            } else if dy >= r.h - radius {
-                dy - (r.h - radius) + 1
-            } else {
-                0
-            };
-            let inset = if above == 0 {
-                0
-            } else {
-                radius - isqrt(radius * radius - (above - 1) * (above - 1))
-            };
-            let row = Rect::new(r.x + inset, r.y + dy, r.w - 2 * inset, 1);
-            let Some((x0, y0, x1, _)) = self.clip(row) else {
-                continue;
-            };
-            let at = (y0 * self.width) as usize;
-            for pixel in &mut self.pixels[at + x0 as usize..at + x1 as usize] {
-                *pixel = color.over(Rgb(*pixel), alpha).0;
-            }
-        }
-    }
-
-    /// A filled circle of radius `r` around (`cx`, `cy`), its edge
-    /// anti-aliased.
-    pub fn circle(&mut self, cx: i32, cy: i32, r: i32, color: Rgb) {
-        // In quarter pixels, to soften the edge.
-        let r4 = r * 4;
-        for y in cy - r - 1..=cy + r + 1 {
-            for x in cx - r - 1..=cx + r + 1 {
-                if x < 0 || y < 0 || x >= self.width || y >= self.height {
-                    continue;
-                }
-                let mut inside = 0;
-                for sy in 0..2 {
-                    for sx in 0..2 {
-                        let dx = (x - cx) * 4 + sx * 2 - 1;
-                        let dy = (y - cy) * 4 + sy * 2 - 1;
-                        if dx * dx + dy * dy <= r4 * r4 {
-                            inside += 1;
-                        }
-                    }
-                }
-                if inside > 0 {
-                    let at = (y * self.width + x) as usize;
-                    self.pixels[at] = color.over(Rgb(self.pixels[at]), inside * 255 / 4).0;
-                }
-            }
-        }
-    }
-
-    /// A soft shadow under `r`: darker near it, fading over `spread`
-    /// pixels, a little lower than the surface (ADR-0078).
-    pub fn shadow(&mut self, r: Rect, spread: i32, strength: u32) {
-        for step in (1..=spread).rev() {
-            let alpha = strength / spread as u32;
-            self.tint(
-                Rect::new(
-                    r.x - step,
-                    r.y - step + spread / 2,
-                    r.w + 2 * step,
-                    r.h + 2 * step,
-                ),
-                step + 6,
-                Rgb(0),
-                alpha,
-            );
         }
     }
 
@@ -288,56 +167,22 @@ impl Canvas {
         }
     }
 
-    /// Darkens everything (behind a modal dialog).
-    pub fn dim(&mut self, shade: Rgb, alpha: u32) {
-        for pixel in &mut self.pixels {
-            *pixel = shade.over(Rgb(*pixel), alpha).0;
-        }
-    }
-
     /// Text from (`x`, `y`) (top left), clipped to `clip`; returns the x
     /// after it.
-    pub fn text(&mut self, x: i32, y: i32, text: &str, font: Font, color: Rgb, clip: Rect) -> i32 {
-        match font.style() {
-            Some(style) if self.typesetter.is_some() => {
-                self.typeset(x, y, text, style, color, clip)
+    pub fn text(&mut self, x: i32, y: i32, text: &str, font: Font, colour: Rgb, clip: Rect) -> i32 {
+        match (font.style(), self.typesetter.take()) {
+            (Some(style), Some(mut typesetter)) => {
+                let end = self
+                    .surface()
+                    .text(&mut typesetter, (x, y), text, style, colour, clip);
+                self.typesetter = Some(typesetter);
+                end
             }
-            _ => self.bitmap_text(x, y, text, font, color, clip),
+            (_, typesetter) => {
+                self.typesetter = typesetter;
+                self.bitmap_text(x, y, text, font, colour, clip)
+            }
         }
-    }
-
-    /// Interface text (ADR-0077): each character's coverage, blended.
-    fn typeset(&mut self, x: i32, y: i32, text: &str, style: Style, color: Rgb, clip: Rect) -> i32 {
-        let Some(mut typesetter) = self.typesetter.take() else {
-            return x;
-        };
-        let mut pen = x;
-        for c in text.chars() {
-            if pen >= clip.x + clip.w {
-                break;
-            }
-            let glyph = typesetter.glyph(style, c);
-            for gy in 0..glyph.height {
-                for gx in 0..glyph.width {
-                    let alpha = glyph.coverage[gy * glyph.width + gx];
-                    let (px, py) = (pen + glyph.left + gx as i32, y + glyph.top + gy as i32);
-                    if alpha == 0
-                        || !clip.contains(px, py)
-                        || px < 0
-                        || py < 0
-                        || px >= self.width
-                        || py >= self.height
-                    {
-                        continue;
-                    }
-                    let at = (py * self.width + px) as usize;
-                    self.pixels[at] = color.over(Rgb(self.pixels[at]), u32::from(alpha)).0;
-                }
-            }
-            pen += glyph.advance;
-        }
-        self.typesetter = Some(typesetter);
-        pen
     }
 
     /// The bitmap font: a fixed cell per character; characters outside
@@ -348,7 +193,7 @@ impl Canvas {
         y: i32,
         text: &str,
         font: Font,
-        color: Rgb,
+        colour: Rgb,
         clip: Rect,
     ) -> i32 {
         let (weight, height, _) = font.spec();
@@ -371,7 +216,7 @@ impl Canvas {
                             continue;
                         }
                         let at = (py * self.width + px) as usize;
-                        self.pixels[at] = color.over(Rgb(self.pixels[at]), u32::from(alpha)).0;
+                        self.pixels[at] = colour.over(Rgb(self.pixels[at]), u32::from(alpha)).0;
                     }
                 }
             }
@@ -402,12 +247,12 @@ impl Canvas {
         ];
         for (dy, row) in ARROW.iter().enumerate() {
             for (dx, &cell) in row.iter().enumerate() {
-                let color = match cell {
+                let colour = match cell {
                     b'X' => edge,
                     b'.' => fill,
                     _ => continue,
                 };
-                self.fill(Rect::new(x + dx as i32, y + dy as i32, 1, 1), color);
+                self.fill(Rect::new(x + dx as i32, y + dy as i32, 1, 1), colour);
             }
         }
     }
@@ -425,7 +270,7 @@ impl Canvas {
                     continue;
                 }
                 self.front[row + x] = value;
-                let (cr, cg, cb) = Rgb(value).channels();
+                let (cr, cg, cb) = ((value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff);
                 let native = (cr << r) | (cg << g) | (cb << b);
                 // SAFETY: (x, y) lies inside the framebuffer (`width` x
                 // `height` pixels of 4 bytes, `pitch` bytes a line), mapped

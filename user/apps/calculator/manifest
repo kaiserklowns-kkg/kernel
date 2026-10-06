@@ -1,0 +1,15 @@
+# Calculator's package manifest (ADR-0080), an app that comes with the
+# system: `cargo xtask` packages it with the `calculator-app` program as
+# `calculator`, signs it with the image's key and bundles it into the boot
+# image, where Oceans Core installs it. The publisher is the image's key's
+# (filled in by xtask).
+id = app.oceans.calculator
+name = Calculator
+version = 1.0.0
+publisher = {{PUBLISHER}}
+description = Adds, subtracts, multiplies and divides
+architecture = x86_64
+api = 1
+entry = calculator
+permission = window
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/calculator

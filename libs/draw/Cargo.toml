@@ -1,0 +1,11 @@
+[package]
+name = "oceans-draw"
+description = "Drawing for Oceans: shapes and interface text (Noto Sans, Thai) on pixel buffers, shared by the desktop and apps (ADR-0080)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-window.workspace = true
+ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"] }

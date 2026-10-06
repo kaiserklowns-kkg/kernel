@@ -1,0 +1,16 @@
+[package]
+name = "calculator-app"
+description = "Calculator: a basic app on the Oceans app toolkit, shipped with the system (ADR-0080)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "calculator-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-ui.workspace = true

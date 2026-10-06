@@ -87,5 +87,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0077](0077-interface-text.md) | Interface text: Noto Sans, and Thai | Accepted |
 | [0078](0078-desktop-look.md) | The desktop's look: a menu bar, a dock, light windows | Accepted |
 | [0079](0079-audio.md) | Sound: Intel High Definition Audio | Accepted |
+| [0080](0080-app-toolkit-and-system-apps.md) | The app toolkit, and apps that come with the system | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

@@ -339,8 +339,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // asks, and Allow is clicked. The screen is captured for the host to
     // check. Positions follow the layout on a 1280x800 screen
     // (user/display/src/desktop.rs): the apps button at 612,760 with no
-    // windows open; tiles from 384,360, 102 by 100, the Terminal first
-    // (Hello is the fifth tile, Notes the sixth); Allow at 776,448.
+    // windows open; tiles from 384,360, 102 by 100, the Terminal first,
+    // then Calculator (ADR-0080): Hello is the sixth tile, Notes the
+    // seventh; Allow at 776,448.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
@@ -351,11 +352,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@screen 880 320 f2f2f7 the apps panel",
-    b"@monitor mouse_move 231 -350",
+    b"@monitor mouse_move -177 -250",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-dialog.ppm",
-    b"@monitor mouse_move -7 56",
+    b"@monitor mouse_move 401 -44",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // App windows and the keyboard focus (ADR-0059): Notes is started from
@@ -367,14 +368,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move -224 294",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -177 -250",
+    b"@monitor mouse_move -75 -250",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-window.ppm",
     b"@keys note\r",
     b"@monitor sendkey ctrl-tab",
     b"@monitor screendump build/smoke-focus.ppm",
-    b"@monitor mouse_move -20 -257",
+    b"@monitor mouse_move -122 -257",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
@@ -407,6 +408,12 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey x",
     b"@screen 600 400 c75b39 Tiles' next colour, after a key",
     b"app stop app.oceans.tiles\r\n",
+    // An app the system brings, on the app toolkit (ADR-0080): Calculator,
+    // the third window opened (two steps on from the middle); its display
+    // is white.
+    b"app start app.oceans.calculator\r\n",
+    b"@screen 594 301 ffffff Calculator's display",
+    b"app stop app.oceans.calculator\r\n",
     // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
     // until the developer's key is trusted at the console; then the Rust
     // app and the Go app install and run.
@@ -582,7 +589,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // (ADR-0059), Tiles (ADR-0060) and the three third-party apps
     // (ADR-0062, ADR-0064), whose developer's key is still trusted
     // (ADR-0063).
-    Expect::Contains("core: ready, 9 apps installed, 2 trusted publisher keys"),
+    Expect::Contains("core: ready, 10 apps installed, 2 trusted publisher keys"),
     Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
@@ -731,7 +738,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("disk: 32768 sectors of 512 bytes (16 MiB)"),
     Expect::Line("  note.txt"),
     Expect::Line("  big.bin"),
-    Expect::Contains("core: ready, 0 apps installed, 1 trusted publisher keys"),
+    // The apps the system brings (ADR-0080), installed on a fresh disk.
+    Expect::Contains("core: installed calculator.opk from the system image"),
+    Expect::Contains("core: ready, 1 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
     Expect::Contains("gohello: goroutines computed 30"),
@@ -1257,6 +1266,9 @@ fn build_image_for(
         format!("{RELEASE_VERSION} {RELEASE_CHANNEL}\n").into_bytes(),
     ));
     files.push(("update.keys".to_string(), keys.update_keys().into_bytes()));
+    // The apps the system brings (ADR-0080), signed with the image's key;
+    // Core installs them.
+    files.extend(bundled_apps(&user, keys)?);
     // The trusted roots for TLS in Go services (ADR-0054): the AI's model
     // gateway gets them as a module.
     files.push(("ca-roots.pem".to_string(), ca_roots_pem()?.into_bytes()));
@@ -2090,6 +2102,32 @@ fn dev_seed() -> Result<[u8; 32]> {
             .map_err(|_| "tools/keys/oceans-dev.seed is not hex".to_string())?;
     }
     Ok(seed)
+}
+
+/// The apps that come with the system (ADR-0080): (program, manifest).
+const BUNDLED_APPS: &[(&str, &str, &str)] = &[(
+    "calculator",
+    "calculator-app",
+    include_str!("../../../user/apps/calculator/manifest"),
+)];
+
+/// The bundled apps as signed packages, `NAME.opk`, for the boot archive.
+fn bundled_apps(user: &Path, keys: &release::ImageKeys) -> Result<Vec<(String, Vec<u8>)>> {
+    BUNDLED_APPS
+        .iter()
+        .map(|&(name, program, manifest)| {
+            let path = user.join(program);
+            let program =
+                fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let manifest = manifest.replace("{{PUBLISHER}}", &keys.publisher);
+            let package = oceans_package::build(
+                &[("manifest", manifest.as_bytes()), (name, &program)],
+                &keys.seed,
+            )
+            .map_err(|e| format!("cannot package {name}: {e:?}"))?;
+            Ok((format!("{name}.opk"), package))
+        })
+        .collect()
 }
 
 /// The example packages in `build/packages`: Hello 1.0.0 and 2.0.0, two

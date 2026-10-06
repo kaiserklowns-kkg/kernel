@@ -17,18 +17,22 @@ const RELEASE_DIR: &str = "build/release";
 
 /// The keys an image trusts, for apps and for system updates.
 pub struct ImageKeys {
-    publisher: String,
+    pub publisher: String,
     public: String,
     release: bool,
+    /// Signs the apps the image brings (ADR-0080).
+    pub seed: [u8; 32],
 }
 
 impl ImageKeys {
     /// The development key (tools/keys): QEMU, the smoke tests, `usb`.
     pub fn development() -> Result<Self> {
+        let seed = dev_seed()?;
         Ok(Self {
             publisher: DEV_PUBLISHER.to_string(),
-            public: oceans_package::public_key_hex(&dev_seed()?),
+            public: oceans_package::public_key_hex(&seed),
             release: false,
+            seed,
         })
     }
 
@@ -38,6 +42,7 @@ impl ImageKeys {
             publisher: key.publisher.clone(),
             public: key.public_hex(),
             release: true,
+            seed: key.seed,
         }
     }
 

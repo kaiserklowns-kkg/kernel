@@ -152,6 +152,17 @@ impl<'a> Archive<'a> {
         )
     }
 
+    /// Where the archive ends: past its table and its last file's bytes.
+    /// What follows (a module's padding to whole pages) is not part of it.
+    pub fn extent(&self) -> usize {
+        (0..self.count)
+            .map(|index| {
+                let (_, offset, size, _) = self.entry(index);
+                (offset + size) as usize
+            })
+            .fold(HEADER + self.count * ENTRY, usize::max)
+    }
+
     pub fn len(&self) -> usize {
         self.count
     }
@@ -256,6 +267,19 @@ mod tests {
         assert_eq!(names, ["init", "services.conf", "empty"]);
         assert!(Archive::parse(&build(&[])).unwrap().is_empty());
         assert_eq!(crc32c(b"123456789"), 0xe306_9283);
+    }
+
+    #[test]
+    fn the_extent_ends_at_the_last_byte_of_the_archive() {
+        let files: [(&str, &[u8]); 2] = [("a", b"one"), ("b", b"three")];
+        let mut bytes = build(&files);
+        let len = bytes.len();
+        assert_eq!(Archive::parse(&bytes).unwrap().extent(), len);
+        // Padding after it (a module rounded up to pages) is not counted.
+        bytes.resize(4096, 0);
+        assert_eq!(Archive::parse(&bytes).unwrap().extent(), len);
+        let empty = build(&[]);
+        assert_eq!(Archive::parse(&empty).unwrap().extent(), empty.len());
     }
 
     #[test]
