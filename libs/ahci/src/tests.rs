@@ -134,6 +134,9 @@ fn commands_encode_as_fises() {
     assert_eq!(AtaCommand::flush(true).fis()[2], 0xea);
     assert_eq!(AtaCommand::flush(false).fis()[2], 0xe7);
     assert_eq!(AtaCommand::flush(true).data_len(), 0);
+    let standby = AtaCommand::standby_immediate();
+    assert_eq!(standby.fis()[2], 0xe0);
+    assert_eq!((standby.data_len(), standby.writes()), (0, false));
 }
 
 #[test]

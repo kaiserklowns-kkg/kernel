@@ -475,6 +475,12 @@ pub fn system_power(system: Handle, action: u64) -> Error {
     }
 }
 
+/// The bit init signals on a service's `stop` notification (`grant =
+/// stop`, ADR-0086): finish what is under way, leave things consistent,
+/// and exit. A service may also use the notification for its own bits
+/// (bind it to its endpoint, set timers on it, watch processes with it).
+pub const STOP: u64 = 1 << 62;
+
 /// Asks init, through a `power` grant, to stop the system and switch the
 /// machine off ([`power::OFF`]) or restart it ([`power::RESTART`]). `Ok`
 /// once init has accepted: the caller is stopped with everything else.

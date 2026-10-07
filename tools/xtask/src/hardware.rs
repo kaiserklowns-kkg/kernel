@@ -414,6 +414,10 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("init: disks synced"),
     Expect::Contains("services stopped"),
     Expect::Contains("power: restarting"),
+    // The disks were told (ADR-0086).
+    Expect::Contains("nvme: the controller is shut down"),
+    Expect::Contains("ahci: the disk is in standby"),
+    Expect::Contains("init: core stopped"),
     Expect::Contains("(ABI 16)"),
     Expect::Contains("fs: formatted a blank disk"),
     // The SATA disk (ADR-0069): identified, formatted, written.
@@ -467,6 +471,8 @@ const HW_REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("init: asked to switch off: stopping the system"),
     Expect::Contains("init: disks synced"),
     Expect::Contains("power: switching off (ACPI S5)"),
+    Expect::Contains("nvme: the controller is shut down"),
+    Expect::Contains("ahci: the disk is in standby"),
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept on the nvme root"),
     Expect::Contains("fs (satafs): mounted the disk: generation"),

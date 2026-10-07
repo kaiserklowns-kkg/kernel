@@ -195,6 +195,9 @@ pub mod ata {
     pub const WRITE_DMA_EXT: u8 = 0x35;
     pub const FLUSH_CACHE: u8 = 0xe7;
     pub const FLUSH_CACHE_EXT: u8 = 0xea;
+    /// Parks the heads and spins down (ADR-0086): what a disk expects
+    /// before its power goes.
+    pub const STANDBY_IMMEDIATE: u8 = 0xe0;
 }
 
 /// FIS types.
@@ -432,6 +435,16 @@ impl AtaCommand {
             } else {
                 ata::FLUSH_CACHE
             },
+            lba: 0,
+            count: 0,
+            device: 0,
+        }
+    }
+
+    /// `STANDBY IMMEDIATE`: no data.
+    pub fn standby_immediate() -> Self {
+        Self {
+            command: ata::STANDBY_IMMEDIATE,
             lba: 0,
             count: 0,
             device: 0,

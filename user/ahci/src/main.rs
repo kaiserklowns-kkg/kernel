@@ -24,6 +24,10 @@
 //!   (COMRESET); a port that cannot be brought back answers every request
 //!   with `IoError`. A disk with a write cache is flushed on `FLUSH` and
 //!   when the service stops.
+//! - **Stopping** (ADR-0086, `grant = stop`): asked by init before the
+//!   power goes, it flushes the cache, sends `STANDBY IMMEDIATE` (heads
+//!   parked, so the disk does not count an emergency power-off) and
+//!   exits.
 //! - **No disk** (or a controller it cannot use): the driver logs it once
 //!   and keeps running, answering every request with `IoError` (as
 //!   `usb-storage` does without a stick), so init does not restart it in a
@@ -87,6 +91,10 @@ fn main(start: Start) -> i64 {
     ) else {
         return EXIT_BAD_START;
     };
+    // Asked to stop (ADR-0086): the request arrives with the calls.
+    if let Some(stop) = directory.find("stop", "stop") {
+        let _ = oceans_rt::endpoint_bind(server, stop);
+    }
     let controller = match Controller::start(log, device) {
         Ok(controller) => controller,
         Err(problem) => {
@@ -717,10 +725,17 @@ impl Disk {
         }
     }
 
-    /// When the service stops: the cache reaches the medium, the port
-    /// goes idle.
+    /// When the service stops: the cache reaches the medium, the heads
+    /// park, the port goes idle.
     fn shutdown(&mut self) {
         let _ = self.flush();
+        match self.io(AtaCommand::standby_immediate(), "standby") {
+            Ok(()) => say(self.log, format_args!("ahci: the disk is in standby")),
+            Err(status) => say(
+                self.log,
+                format_args!("ahci: the disk did not go to standby: {status:?}"),
+            ),
+        }
         if let Err(problem) = self.port.stop() {
             say(self.log, format_args!("ahci: at shutdown: {problem}"));
         }
@@ -753,6 +768,13 @@ fn serve(log: Handle, server: Handle, disk: &mut Option<Disk>) -> i64 {
                 return EXIT_RECEIVE;
             }
         };
+        if got.signals & oceans_rt::STOP != 0 {
+            say(log, format_args!("ahci: stopping"));
+            return 0;
+        }
+        if got.signals != 0 {
+            continue;
+        }
         let find = |badge| {
             sessions
                 .iter()

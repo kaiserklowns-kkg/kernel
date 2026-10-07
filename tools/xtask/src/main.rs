@@ -581,7 +581,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
 const REBOOT_SCRIPT: &[&[u8]] = &[
     // The previous boot's log, kept on disk (ADR-0074): the crasher test
     // service's faults of the first boot are in it.
-    b"run diag out logs use:fs -- previous 3\r\n",
+    b"run diag out logs use:fs -- previous 5\r\n",
     b"app run app.example.counter\r\n",
     b"cat /keep/note.txt\r\n",
     b"ls /keep\r\n",
@@ -617,7 +617,10 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("logkeep: keeping the log in /system/logs/boot.log"),
     Expect::Contains("diag: the previous boot's log, "),
     Expect::Contains("  [WARN ] process: process init/crasher killed: page fault"),
-    Expect::Line("diag: its last 3 lines:"),
+    Expect::Line("diag: its last 5 lines:"),
+    // logkeep was asked to stop (ADR-0086): the first boot's kept log
+    // ends with its restart.
+    Expect::Contains("init: asked to restart: stopping the system"),
     Expect::Contains("fs (media): mounted the disk"),
     Expect::Line("  usb/"),
     Expect::Line("  big.bin"),
@@ -683,6 +686,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("init: asked to restart: stopping the system"),
     Expect::Contains("init: disks synced"),
     Expect::Contains("init: test mode: the kernel ends the boot instead"),
+    // Asked to stop first (ADR-0086): Core's apps, the kept log, the SSD.
+    Expect::Contains("apps stopped; the system is stopping"),
+    Expect::Contains("init: core stopped"),
+    Expect::Contains("init: logkeep stopped"),
+    Expect::Contains("nvme: the controller is shut down"),
+    Expect::Contains("init: nvme stopped"),
     Expect::Contains("init: all service expectations met"),
     // Diagnostics (ADR-0070).
     Expect::Contains("diag: needs the logs capability"),

@@ -5,8 +5,11 @@
 //! couple of seconds, synced. After a crash or a hang, the next boot finds
 //! it in `/system/logs/previous-boot.log` (`diag previous`).
 //!
+//! Asked to stop (ADR-0086, `grant = stop`), it copies and syncs once
+//! more, so the kept log ends with the shutdown's own lines.
+//!
 //! Its capabilities, in order: `grant = log`, `grant = log-read`,
-//! `use = fs`.
+//! `use = fs`, then optionally `grant = stop`.
 
 #![no_std]
 #![no_main]
@@ -19,6 +22,9 @@ use oceans_fs_proto::{FsError, Kind, Node, flags};
 use oceans_rt::{Handle, Start};
 
 oceans_rt::entry!(main);
+
+/// Its own timer bit on the stop notification.
+const TICK: u64 = 1 << 0;
 
 const DIR: &str = "system/logs";
 const CURRENT: &str = "boot.log";
@@ -36,6 +42,7 @@ fn main(start: Start) -> i64 {
     ) else {
         return 1;
     };
+    let stop = oceans_rt::Directory::from_start(&start).and_then(|d| d.find("stop", "stop"));
     let root = Node(fs);
     let file = match open(&root) {
         Ok(file) => file,
@@ -61,6 +68,7 @@ fn main(start: Start) -> i64 {
     let mut written = 0u64;
     let mut full = false;
     let mut chunk = [0u8; 4096];
+    let mut stopping = false;
     loop {
         let mut copied = false;
         while !full {
@@ -93,7 +101,18 @@ fn main(start: Start) -> i64 {
         if copied {
             let _ = file.sync();
         }
-        oceans_rt::sleep_ms(PERIOD_MS);
+        if stopping {
+            file.close();
+            return 0;
+        }
+        match stop {
+            Some(stop) => {
+                let _ = oceans_rt::timer_set(stop, TICK, PERIOD_MS);
+                let bits = oceans_rt::notification_wait(stop).unwrap_or(0);
+                stopping = bits & oceans_rt::STOP != 0;
+            }
+            None => oceans_rt::sleep_ms(PERIOD_MS),
+        }
     }
 }
 

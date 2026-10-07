@@ -114,7 +114,8 @@ interpreter, and adding one is a large project of its own.
   - **No AML is run.** `\_PTS`, `\_TTS` and a `\_S5` defined as a method
     are not supported; Oceans then says it cannot switch the machine off.
     Real AML is for an interpreter later, alongside suspend (S3).
-  - **Stopping is a kill, not a request.** A service gets no chance to
+  - **Stopping is a kill, not a request** (since ADR-0086, services
+    with `grant = stop` are asked first). A service gets no chance to
     finish. What it had not written or committed is lost, as in a crash,
     but the volume stays consistent. For the same reason `logkeep` may
     miss the last couple of seconds, which are the shutdown's own lines.

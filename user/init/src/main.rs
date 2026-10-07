@@ -28,6 +28,9 @@
 //!    service in reverse start order (the filesystem's clients first),
 //!    syncs the filesystem in between, stops the rest, and asks the kernel
 //!    (`SYSTEM_POWER`, which needs init's `MANAGE` on the system object).
+//!    A service with `grant = stop` (ADR-0086) is asked first: init
+//!    signals `oceans_rt::STOP` on its stop notification and gives it
+//!    `stop-timeout` milliseconds (default 5000) to exit before the kill.
 //!
 //! In smoke-test mode (argument 1) init exits once every non-`always`
 //! service has settled, or after stopping the system instead of switching
@@ -61,6 +64,11 @@ const MAX_ENDPOINTS: usize = 24;
 const DEFAULT_MAX_RESTARTS: u32 = 5;
 const BACKOFF_BASE_MS: u64 = 100;
 const BACKOFF_MAX_MS: u64 = 2000;
+/// How long a service asked to stop gets by default (ADR-0086).
+const DEFAULT_STOP_TIMEOUT_MS: u64 = 5000;
+/// init's own timer bit on its event notification (services use bits
+/// 0..MAX_SERVICES).
+const STOP_TIMER: u64 = 1 << 63;
 
 /// Rights handed to services. `DUPLICATE` lets a service (e.g. the shell)
 /// pass narrower copies on to programs it starts; it never widens rights.
@@ -118,6 +126,9 @@ enum Grant {
     Storage(&'static str),
     /// Asking init to switch the machine off or restart it (ADR-0085).
     Power,
+    /// Being asked to stop (ADR-0086): a notification init signals
+    /// `oceans_rt::STOP` on.
+    Stop,
 }
 
 #[derive(Clone, Copy)]
@@ -129,8 +140,11 @@ struct Service {
     grants: [Option<Grant>; MAX_GRANTS],
     expect_exit: Option<i64>,
     expect_runs: Option<u32>,
+    stop_timeout_ms: u64,
     // Runtime state.
     process: Option<Handle>,
+    /// init's end of the running instance's stop notification.
+    stop: Option<Handle>,
     runs: u32,
     restarts: u32,
     last_exit: Option<i64>,
@@ -147,7 +161,9 @@ impl Service {
             grants: [None; MAX_GRANTS],
             expect_exit: None,
             expect_runs: None,
+            stop_timeout_ms: DEFAULT_STOP_TIMEOUT_MS,
             process: None,
+            stop: None,
             runs: 0,
             restarts: 0,
             last_exit: None,
@@ -210,6 +226,11 @@ struct Init {
     /// The client end of init's `power` endpoint, handed out by
     /// `grant = power`.
     power: Handle,
+    /// Its server end: requests and (bound) service events arrive there.
+    power_server: Handle,
+    /// Exits seen while waiting for one service to stop (bits as on
+    /// `events`).
+    exited: u64,
     /// On the heap: `MAX_SERVICES` of them no longer fit on the stack.
     services: Vec<Service>,
     count: usize,
@@ -264,6 +285,8 @@ fn main(start: Start) -> i64 {
         image_count: 0,
         events,
         power,
+        power_server,
+        exited: 0,
         services: alloc::vec![NO_SERVICE; MAX_SERVICES],
         count: 0,
         registry: Registry {
@@ -400,6 +423,7 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                     ("grant", "console-input") => Grant::ConsoleInput,
                     ("grant", "display") => Grant::Display,
                     ("grant", "power") => Grant::Power,
+                    ("grant", "stop") => Grant::Stop,
                     ("grant", other) => {
                         if let Some(module) = other.strip_prefix("module:")
                             && !module.is_empty()
@@ -424,7 +448,7 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                             }
                         } else {
                             return error(
-                                "unknown grant (known: log, log-read, console, console-input, sysinfo, devices, display, power, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
+                                "unknown grant (known: log, log-read, console, console-input, sysinfo, devices, display, power, stop, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
                             );
                         }
                     }
@@ -449,6 +473,10 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
             "expect-exit" => match value.parse() {
                 Ok(code) => service.expect_exit = Some(code),
                 Err(_) => return error("expect-exit must be a number"),
+            },
+            "stop-timeout" => match value.parse() {
+                Ok(ms) => service.stop_timeout_ms = ms,
+                Err(_) => return error("stop-timeout must be a number of milliseconds"),
             },
             "expect-runs" => match value.parse() {
                 Ok(runs) => service.expect_runs = Some(runs),
@@ -547,6 +575,7 @@ impl Init {
         let mut handles = [Handle(0); MAX_GRANTS + 1];
         let mut directory = Buffer::<1024>::new();
         let mut count = 0;
+        let mut stop = None;
         let result = (|| {
             for grant in service.grants.iter().flatten() {
                 let (handle, kind, name) = match *grant {
@@ -628,6 +657,28 @@ impl Init {
                         "power",
                         "power",
                     ),
+                    // A fresh one per run; init keeps a SIGNAL end.
+                    Grant::Stop => {
+                        let notification = oceans_rt::notification_create()?;
+                        let given = oceans_rt::duplicate(
+                            notification,
+                            rights::SIGNAL | rights::WAIT | rights::DUPLICATE | rights::TRANSFER,
+                        );
+                        let kept = oceans_rt::duplicate(notification, rights::SIGNAL);
+                        let _ = oceans_rt::close(notification);
+                        match (given, kept) {
+                            (Ok(given), Ok(kept)) => {
+                                stop = Some(kept);
+                                (given, "stop", "stop")
+                            }
+                            (given, kept) => {
+                                for handle in [given, kept].into_iter().flatten() {
+                                    let _ = oceans_rt::close(handle);
+                                }
+                                return Err(Error::OutOfMemory);
+                            }
+                        }
+                    }
                 };
                 handles[count] = handle;
                 let _ = writeln!(directory, "{count} {kind} {name}");
@@ -646,6 +697,12 @@ impl Init {
             for &handle in &handles[..count] {
                 let _ = oceans_rt::close(handle);
             }
+            if let Some(stop) = stop.take() {
+                let _ = oceans_rt::close(stop);
+            }
+        }
+        if let Some(old) = core::mem::replace(&mut self.services[index].stop, stop) {
+            let _ = oceans_rt::close(old);
         }
         result
     }
@@ -757,12 +814,28 @@ impl Init {
     }
 
     /// Stops service `index` if it runs, and records how it ended; `true`
-    /// if it was running.
+    /// if it was running. A service with a stop notification is asked
+    /// first, and killed only if it has not exited in its `stop-timeout`.
     fn stop_service(&mut self, index: usize) -> bool {
         let Some(process) = self.services[index].process.take() else {
             return false;
         };
-        let _ = oceans_rt::process_kill(process);
+        let service = self.services[index];
+        if let Some(stop) = service.stop
+            && oceans_rt::notification_signal(stop, oceans_rt::STOP).is_ok()
+        {
+            if self.wait_exit(index, service.stop_timeout_ms) {
+                self.say(format_args!("{} stopped", service.name));
+            } else {
+                self.say(format_args!(
+                    "{} did not stop within {} ms",
+                    service.name, service.stop_timeout_ms
+                ));
+                let _ = oceans_rt::process_kill(process);
+            }
+        } else {
+            let _ = oceans_rt::process_kill(process);
+        }
         let code = oceans_rt::process_wait(process).unwrap_or(i64::MIN);
         let _ = oceans_rt::close(process);
         let service = &mut self.services[index];
@@ -770,6 +843,38 @@ impl Init {
         service.last_exit = Some(code);
         service.settled = true;
         true
+    }
+
+    /// Waits up to `ms` for service `index` to exit, answering power
+    /// requests that arrive meanwhile as not possible: the system is
+    /// already stopping.
+    fn wait_exit(&mut self, index: usize, ms: u64) -> bool {
+        let bit = 1u64 << index;
+        let _ = oceans_rt::timer_set(self.events, STOP_TIMER, ms.max(1));
+        let mut data = [0u8; 16];
+        let mut handles = [Handle(0); 4];
+        let exited = loop {
+            if self.exited & bit != 0 {
+                break true;
+            }
+            let Ok(got) = oceans_rt::ipc_receive_msg(self.power_server, &mut data, &mut handles)
+            else {
+                break false;
+            };
+            self.exited |= got.signals & !STOP_TIMER;
+            if got.signals & STOP_TIMER != 0 && self.exited & bit == 0 {
+                break false;
+            }
+            if got.signals == 0 && !got.closed {
+                for &handle in &handles[..got.handles_len] {
+                    let _ = oceans_rt::close(handle);
+                }
+                let _ = oceans_rt::ipc_reply(0, &[power::NOT_POSSIBLE]);
+            }
+        };
+        let _ = oceans_rt::timer_set(self.events, STOP_TIMER, 0);
+        self.exited &= !bit;
+        exited
     }
 
     /// Every service that is not meant to run forever has settled.

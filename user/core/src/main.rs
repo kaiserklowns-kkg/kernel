@@ -103,8 +103,14 @@ fn main(start: Start) -> i64 {
             return EXIT_NO_STORAGE;
         }
     };
-    let Ok(notification) = oceans_rt::notification_create() else {
-        return EXIT_BAD_START;
+    // init's stop notification (ADR-0086) when it gives one: Core's own
+    // bits (apps' exits, the restart timer) go on it too.
+    let notification = match directory.find("stop", "stop") {
+        Some(stop) => stop,
+        None => match oceans_rt::notification_create() {
+            Ok(notification) => notification,
+            Err(_) => return EXIT_BAD_START,
+        },
     };
     if oceans_rt::endpoint_bind(server, notification).is_err() {
         return EXIT_BAD_START;
@@ -772,6 +778,13 @@ impl Core {
                     return EXIT_RECEIVE;
                 }
             };
+            if got.signals & oceans_rt::STOP != 0 {
+                // The system is stopping (ADR-0086): apps end first, so
+                // their files are closed (and committed) before the disks
+                // are synced.
+                self.stop_all();
+                return 0;
+            }
             if got.signals != 0 {
                 self.reap(got.signals & !RESTART_TIMER);
                 if got.signals & RESTART_TIMER != 0 {
@@ -1841,6 +1854,23 @@ impl Core {
             code.unwrap_or(oceans_rt::EXIT_KILLED)
         ));
         true
+    }
+
+    /// Stops every running app and service (ADR-0086).
+    fn stop_all(&mut self) {
+        let ids: Vec<String> = self
+            .running
+            .iter()
+            .flatten()
+            .map(|running| running.id.clone())
+            .collect();
+        for id in &ids {
+            self.stop(id, "the system is stopping");
+        }
+        say(
+            self.log,
+            format_args!("core: {} apps stopped; the system is stopping", ids.len()),
+        );
     }
 
     /// Apps whose exit was signalled (one bit per slot).

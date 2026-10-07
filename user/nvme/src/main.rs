@@ -22,7 +22,9 @@
 //!   controller and brings it up again; a controller that cannot be
 //!   brought back answers every request with `IoError`. A controller with
 //!   a volatile write cache is flushed on `FLUSH`. When the service stops,
-//!   the controller is shut down cleanly.
+//!   the controller is shut down cleanly (`CC.SHN`): asked by init before
+//!   the power goes (ADR-0086, `grant = stop`), so the SSD does not count
+//!   an unsafe shutdown.
 //! - Without MSI-X it falls back to polling.
 
 #![no_std]
@@ -75,6 +77,10 @@ fn main(start: Start) -> i64 {
     ) else {
         return EXIT_BAD_START;
     };
+    // Asked to stop (ADR-0086): the request arrives with the calls.
+    if let Some(stop) = directory.find("stop", "stop") {
+        let _ = oceans_rt::endpoint_bind(server, stop);
+    }
     let (mut controller, identity) = match Controller::start(log, device) {
         Ok(started) => started,
         Err(problem) => {
@@ -622,11 +628,12 @@ impl Controller {
             |status| status & csts::SHUTDOWN_MASK == csts::SHUTDOWN_COMPLETE,
             true,
         );
-        if finished.is_err() {
-            say(
+        match finished {
+            Ok(_) => say(self.log, format_args!("nvme: the controller is shut down")),
+            Err(_) => say(
                 self.log,
                 format_args!("nvme: the shutdown did not complete"),
-            );
+            ),
         }
     }
 
@@ -643,6 +650,13 @@ impl Controller {
                     return EXIT_RECEIVE;
                 }
             };
+            if got.signals & oceans_rt::STOP != 0 {
+                say(self.log, format_args!("nvme: stopping"));
+                return 0;
+            }
+            if got.signals != 0 {
+                continue;
+            }
             let find = |badge| {
                 sessions
                     .iter()
