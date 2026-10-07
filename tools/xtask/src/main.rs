@@ -931,7 +931,10 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("Hello from app.oceans.hello 2.0.0"),
     Expect::Line("hello: run 3 (counted in my storage)"),
     Expect::Contains("app: started app.oceans.hello"),
-    Expect::Line("hello: waiting until stopped"),
+    // Started in the background, the app writes while the shell echoes the
+    // next command (on another CPU since ADR-0089): its line may follow
+    // echoed characters.
+    Expect::Contains("hello: waiting until stopped"),
     Expect::Line("  app.oceans.hello  2.0.0  Hello  (running)"),
     Expect::Contains(
         "app: network revoked for app.oceans.hello; it was running and has been stopped",
