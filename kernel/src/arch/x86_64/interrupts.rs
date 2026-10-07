@@ -246,9 +246,17 @@ unsafe extern "C" {
 /// Stack alignment: the CPU aligns RSP to 16 bytes before pushing its 5-word
 /// frame; with error code, vector and 15 registers the total is 22 words, so
 /// RSP is 16-byte aligned at the `call` as the SysV ABI requires.
+///
+/// From ring 3 (the saved CS's low bits), `swapgs` on the way in and out
+/// (ADR-0089): kernel code always runs with its CPU's block in `GS`.
 #[unsafe(naked)]
 unsafe extern "C" fn exception_common() {
     naked_asm!(
+        // [rsp]: vector, +8: error code, +16: RIP, +24: CS.
+        "test byte ptr [rsp + 24], 3",
+        "jz 2f",
+        "swapgs",
+        "2:",
         "push rax",
         "push rbx",
         "push rcx",
@@ -283,6 +291,13 @@ unsafe extern "C" fn exception_common() {
         "pop rbx",
         "pop rax",
         "add rsp, 16", // vector + error code
+        // [rsp]: RIP, +8: CS. Nothing may interrupt between `swapgs` and
+        // `iretq` (it would see a kernel CS with the user's GS).
+        "cli",
+        "test byte ptr [rsp + 8], 3",
+        "jz 3f",
+        "swapgs",
+        "3:",
         "iretq",
         dispatch = sym exception_dispatch,
     );

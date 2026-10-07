@@ -20,8 +20,8 @@ pub struct IoApic {
     entries: u32,
 }
 
-// SAFETY: the registers are only accessed with interrupts disabled during
-// routing setup on the single CPU.
+// SAFETY: the registers are only accessed with interrupts disabled, from
+// behind the mutex that holds the I/O APIC (`arch::io_apic`).
 unsafe impl Send for IoApic {}
 
 impl IoApic {

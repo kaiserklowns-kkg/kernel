@@ -63,7 +63,7 @@ measuring.
 - Spurious interrupts (vector 255) are ignored, as the APIC specification
   requires.
 
-### Concurrency protocol (single CPU)
+### Concurrency protocol (single CPU; on every CPU since ADR-0089)
 
 All scheduler state is touched with interrupts disabled. `schedule` decides
 under the scheduler lock, **releases the lock, then switches**. The outgoing

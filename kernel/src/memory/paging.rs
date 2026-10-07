@@ -14,7 +14,7 @@ use oceans_memory_map::{PAGE_SIZE, RegionKind};
 use spin::{Mutex, Once};
 
 use super::layout::{self, DIRECT_MAP, KERNEL_IMAGE, KERNEL_STACKS};
-use crate::arch::{self, AddressSpace};
+use crate::arch::{self, AddressSpace, MAX_CPUS};
 use crate::boot::{BootInfo, KernelImage};
 use crate::klog;
 
@@ -177,16 +177,67 @@ impl KernelStack {
 impl Drop for KernelStack {
     fn drop(&mut self) {
         unmap_stack_pages(Self::bottom(self.slot), KERNEL_STACK_SIZE);
-        arch::without_interrupts(|| FREE_STACK_SLOTS.lock().push(self.slot));
+        // Another CPU may still cache the old translation (kernel pages are
+        // global): the slot waits until every CPU has flushed (ADR-0089).
+        let generation = STACK_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        arch::without_interrupts(|| FREE_STACK_SLOTS.lock().push((self.slot, generation)));
     }
 }
 
-/// Slots of freed stacks, reused before new ones are taken.
-static FREE_STACK_SLOTS: Mutex<alloc::vec::Vec<u64>> = Mutex::new(alloc::vec::Vec::new());
+/// Slots of freed stacks, each with the generation it was freed in; reused
+/// before new ones are taken, once no CPU can still translate them.
+static FREE_STACK_SLOTS: Mutex<alloc::vec::Vec<(u64, u64)>> = Mutex::new(alloc::vec::Vec::new());
+/// Counts freed stacks: the newest generation a CPU must flush past.
+static STACK_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The generation each CPU had flushed its TLB past (`u64::MAX`: a CPU not
+/// running, which caches nothing).
+static FLUSHED: [AtomicU64; MAX_CPUS] = {
+    let mut flushed = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+    flushed[0] = AtomicU64::new(0);
+    flushed
+};
+
+/// CPU `index` starts translating kernel addresses (before its first
+/// kernel-stack use): it has flushed nothing yet.
+pub fn cpu_online(index: usize) {
+    FLUSHED[index].store(STACK_GENERATION.load(Ordering::Acquire), Ordering::Release);
+}
+
+/// On every timer tick of every CPU: if stacks were freed since this CPU
+/// last flushed its TLB, it flushes now, so their slots can be reused.
+pub fn tlb_tick() {
+    let cpu = arch::cpu_index();
+    let generation = STACK_GENERATION.load(Ordering::Acquire);
+    if FLUSHED[cpu].load(Ordering::Relaxed) < generation {
+        arch::flush_tlb_all();
+        FLUSHED[cpu].store(generation, Ordering::Release);
+    }
+}
+
+/// The oldest generation every running CPU has flushed past.
+fn flushed_everywhere() -> u64 {
+    FLUSHED
+        .iter()
+        .map(|flushed| flushed.load(Ordering::Acquire))
+        .min()
+        .unwrap_or(u64::MAX)
+}
+
+/// A freed slot no CPU can still translate, if there is one.
+fn reusable_slot() -> Option<u64> {
+    let safe = flushed_everywhere();
+    arch::without_interrupts(|| {
+        let mut free = FREE_STACK_SLOTS.lock();
+        let at = free
+            .iter()
+            .position(|&(_, generation)| generation <= safe)?;
+        Some(free.swap_remove(at).0)
+    })
+}
 
 /// Allocates and maps a new kernel stack.
 pub fn allocate_kernel_stack() -> Result<KernelStack, MapError> {
-    let reused = arch::without_interrupts(|| FREE_STACK_SLOTS.lock().pop());
+    let reused = reusable_slot();
     let slot = match reused {
         Some(slot) => slot,
         None => {
@@ -219,9 +270,11 @@ pub fn allocate_kernel_stack() -> Result<KernelStack, MapError> {
     match result {
         Ok(()) => Ok(KernelStack { slot }),
         Err(err) => {
-            // Undo the partial stack so neither frames nor the slot leak.
+            // Undo the partial stack so neither frames nor the slot leak;
+            // the slot waits for every CPU's flush like any freed one.
             unmap_stack_pages(bottom, mapped);
-            arch::without_interrupts(|| FREE_STACK_SLOTS.lock().push(slot));
+            let generation = STACK_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+            arch::without_interrupts(|| FREE_STACK_SLOTS.lock().push((slot, generation)));
             Err(err)
         }
     }

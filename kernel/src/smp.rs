@@ -1,4 +1,5 @@
-//! Bringing up the other CPUs (ADR-0088).
+//! Bringing up the other CPUs (ADR-0088), which then schedule threads
+//! like the boot CPU (ADR-0089).
 //!
 //! The bootloader starts every CPU it finds and parks it, on its own stack
 //! and page tables, in memory the kernel reclaims early. So before that
@@ -11,10 +12,10 @@
 //! 3. load its own GDT and TSS (with its own double-fault stack), the
 //!    shared IDT, and enable its local APIC.
 //!
-//! It then waits for interrupts. Threads are still scheduled on the boot
-//! CPU only; scheduling on every CPU is the next step (ADR-0089). Until
-//! then, the other CPUs answer inter-processor interrupts, which the boot
-//! self-test checks.
+//! Once the boot CPU runs the scheduler, the started CPU joins it: the
+//! code on its kernel stack becomes its idle thread, its timer starts, and
+//! it runs whatever is ready (ADR-0089). Inter-processor interrupts ask it
+//! to look at the ready queue.
 //!
 //! A CPU that does not leave bootloader memory in time is given up on, and
 //! that memory is then never reclaimed: the CPU may still be reading it.
@@ -46,8 +47,10 @@ static DOUBLE_FAULT_TOP: AtomicU64 = AtomicU64::new(0);
 static LEFT_BOOTLOADER: AtomicBool = AtomicBool::new(false);
 /// It is set up.
 static ARRIVED: AtomicBool = AtomicBool::new(false);
-/// The started CPUs' stacks, kept for good.
+/// The started CPUs' double-fault stacks, kept for good.
 static STACKS: Mutex<Vec<KernelStack>> = Mutex::new(Vec::new());
+/// The kernel stack of the CPU being started: it becomes its idle thread's.
+static STARTING_STACK: Mutex<Option<KernelStack>> = Mutex::new(None);
 
 /// Starts every other CPU the bootloader reported. Runs on the boot CPU,
 /// before bootloader memory is reclaimed. Returns `false` if a CPU may
@@ -105,11 +108,9 @@ fn start_one(slot: usize, index: usize, apic_id: u32) -> Result<(), Stuck> {
     ARRIVED.store(false, Ordering::Relaxed);
     APIC_IDS[index].store(u64::from(apic_id), Ordering::Relaxed);
     arch::register_cpu(index, apic_id);
-    {
-        let mut stacks = STACKS.lock();
-        stacks.push(stack);
-        stacks.push(double_fault);
-    }
+    paging::cpu_online(index);
+    STACKS.lock().push(double_fault);
+    *STARTING_STACK.lock() = Some(stack);
     boot::start_secondary(slot, secondary_entry, index as u64);
     if !wait(&LEFT_BOOTLOADER) {
         return Err(Stuck::InBootloader);
@@ -153,15 +154,18 @@ extern "C" fn secondary_main() -> ! {
     LEFT_BOOTLOADER.store(true, Ordering::Release);
     let index = STARTING.load(Ordering::Acquire);
     arch::init_secondary(index, DOUBLE_FAULT_TOP.load(Ordering::Acquire));
+    let stack = STARTING_STACK
+        .lock()
+        .take()
+        .expect("the boot CPU set this CPU's stack");
     ARRIVED.store(true, Ordering::Release);
-    loop {
-        arch::wait_for_interrupt();
-    }
+    crate::sched::enter_secondary(stack)
 }
 
-/// Inter-processor interrupt: counted.
+/// Inter-processor interrupt: counted, and a look at the ready queue.
 fn on_ipi() {
     IPIS[arch::cpu_index()].fetch_add(1, Ordering::Relaxed);
+    crate::sched::on_reschedule_ipi();
 }
 
 /// CPUs running the kernel.
@@ -190,10 +194,38 @@ pub fn self_test() {
             crate::sched::sleep_ms(1);
         }
     }
-    assert_eq!(
-        IPIS[0].load(Ordering::Relaxed),
-        0,
-        "the boot CPU took another's IPI"
-    );
     klog::info!("self-test passed: {} CPUs answered an interrupt", cpus - 1);
+    scheduling_self_test(cpus);
+}
+
+/// Smoke test (ADR-0089): threads that never yield run on several CPUs at
+/// once, and all of them finish.
+fn scheduling_self_test(cpus: usize) {
+    const SPIN_TICKS: u64 = 20;
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+    fn spinner(_: usize) {
+        let until = crate::time::ticks() + SPIN_TICKS;
+        while crate::time::ticks() < until {
+            let cpu = arch::without_interrupts(arch::cpu_index);
+            SEEN.fetch_or(1 << cpu, Ordering::Relaxed);
+            core::hint::spin_loop();
+        }
+        DONE.fetch_add(1, Ordering::Release);
+    }
+    let threads = cpus.min(4);
+    for _ in 0..threads {
+        crate::sched::spawn("test-cpu-spinner", spinner, 0).expect("spawn spinner");
+    }
+    let deadline = crate::time::ticks() + crate::time::ms_to_ticks(10_000);
+    while DONE.load(Ordering::Acquire) < threads {
+        assert!(
+            crate::time::ticks() < deadline,
+            "spinning threads did not finish"
+        );
+        crate::sched::sleep_ms(10);
+    }
+    let seen = SEEN.load(Ordering::Relaxed).count_ones();
+    assert!(seen >= 2, "{threads} spinning threads ran on {seen} CPU(s)");
+    klog::info!("self-test passed: {threads} threads ran on {seen} CPUs");
 }

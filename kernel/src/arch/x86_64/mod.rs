@@ -8,6 +8,7 @@ mod interrupts;
 mod ioapic;
 mod keyboard;
 mod paging;
+mod percpu;
 mod pic;
 pub mod power;
 mod rtc;
@@ -43,27 +44,54 @@ pub fn register_cpu(index: usize, apic_id: u32) {
     CPU_APIC_IDS[index].store(apic_id, Ordering::Release);
 }
 
-/// The calling CPU's index: 0 (the boot CPU) until local APICs are up and
-/// CPUs registered.
+/// The calling CPU's index (ADR-0089): from its per-CPU block, behind
+/// `GS` whenever the CPU runs kernel code. Stable only while the caller
+/// cannot move to another CPU (interrupts disabled, or no preemption).
 pub fn cpu_index() -> usize {
-    if !apic::ready() {
-        return 0;
-    }
-    let id = u32::from(apic::id());
-    CPU_APIC_IDS
-        .iter()
-        .position(|slot| slot.load(Ordering::Acquire) == id)
-        .unwrap_or(0)
+    percpu::index()
 }
 
 /// Brings this CPU (index `index`, not the boot CPU) to where the boot CPU
-/// is: its own GDT and TSS (double faults on the stack ending at
-/// `double_fault_top`), the shared IDT, its local APIC. Its protections
-/// ([`set_cpu_protections`]) must already be on.
+/// is: its per-CPU block, its own GDT and TSS (double faults on the stack
+/// ending at `double_fault_top`), the shared IDT, its local APIC, the
+/// `syscall` instruction. Its protections ([`set_cpu_protections`]) must
+/// already be on.
 pub fn init_secondary(index: usize, double_fault_top: u64) {
+    percpu::init(index);
     gdt::init_cpu(index, double_fault_top);
     interrupts::load();
     apic::init();
+    syscall::init_cpu();
+}
+
+/// Interrupts CPU `index` (its IPI handler runs there).
+pub fn send_ipi_to_cpu(index: usize) {
+    let apic_id = CPU_APIC_IDS[index].load(Ordering::Acquire);
+    if apic_id != u32::MAX {
+        send_ipi(apic_id);
+    }
+}
+
+/// Starts this CPU's periodic timer with the boot CPU's calibration (the
+/// local APIC timers of one machine run at one rate).
+pub fn start_secondary_timer() {
+    apic::start_timer_calibrated();
+}
+
+/// Throws away every TLB entry of this CPU, the kernel's global ones too.
+pub fn flush_tlb_all() {
+    use ::x86_64::registers::control::{Cr4, Cr4Flags};
+    let flags = Cr4::read();
+    if flags.contains(Cr4Flags::PAGE_GLOBAL) {
+        // SAFETY: turning PGE off and on again flushes the TLB, global
+        // entries included; nothing else changes.
+        unsafe {
+            Cr4::write(flags - Cr4Flags::PAGE_GLOBAL);
+            Cr4::write(flags);
+        }
+    } else {
+        ::x86_64::instructions::tlb::flush_all();
+    }
 }
 
 /// [`enable_protections`] on another CPU, quietly.
@@ -80,6 +108,9 @@ pub fn send_ipi(apic_id: u32) {
 /// Brings up what logging needs. Runs before anything else, so it must not
 /// log, allocate or fault.
 pub fn early_init() {
+    // Logging asks for the CPU's index (`percpu`): the boot CPU's block
+    // comes first.
+    percpu::init(0);
     serial::init();
 }
 

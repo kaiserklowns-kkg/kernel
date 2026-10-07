@@ -5,7 +5,7 @@
 - Depends on: ADR-0003 (Limine), ADR-0009 (kernel address space),
   ADR-0012 (scheduling), ADR-0017 (local APIC)
 - First of two steps to SMP; the second (ADR-0089) schedules threads on
-  every CPU.
+  every CPU, and replaces the `cpu_index` and idle loop described here.
 
 ## Context
 

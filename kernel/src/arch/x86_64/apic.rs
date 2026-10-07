@@ -42,6 +42,9 @@ const CALIBRATION_MS: u32 = 10;
 
 /// Virtual address of the local APIC registers.
 static BASE: Once<usize> = Once::new();
+/// The timer's initial count for the tick rate, measured once by the boot
+/// CPU (ADR-0089).
+static TIMER_INITIAL_COUNT: Once<u32> = Once::new();
 
 fn write(offset: usize, value: u32) {
     let base = *BASE.get().expect("apic::init runs first");
@@ -77,11 +80,6 @@ pub fn init() {
     write(SPURIOUS, SPURIOUS_ENABLE | u32::from(VECTOR_SPURIOUS));
     write(LVT_TIMER, LVT_MASKED);
     klog::debug!("local APIC at {phys:#x} enabled");
-}
-
-/// Whether [`init`] has run on some CPU (the registers are mapped).
-pub fn ready() -> bool {
-    BASE.get().is_some()
 }
 
 /// This CPU's local APIC ID (I/O APIC routing destination).
@@ -125,9 +123,20 @@ pub fn start_timer(hz: u32) {
     let initial = (per_second / u64::from(hz)).max(1);
     let initial = u32::try_from(initial).unwrap_or(u32::MAX);
 
+    TIMER_INITIAL_COUNT.call_once(|| initial);
     write(LVT_TIMER, LVT_PERIODIC | u32::from(VECTOR_TIMER));
     write(TIMER_INITIAL, initial);
     klog::info!("APIC timer: {} kHz bus/16, {hz} Hz tick", per_second / 1000);
+}
+
+/// Starts this CPU's periodic timer at the rate the boot CPU measured.
+pub fn start_timer_calibrated() {
+    let initial = *TIMER_INITIAL_COUNT
+        .get()
+        .expect("the boot CPU starts its timer first");
+    write(TIMER_DIVIDE, DIVIDE_BY_16);
+    write(LVT_TIMER, LVT_PERIODIC | u32::from(VECTOR_TIMER));
+    write(TIMER_INITIAL, initial);
 }
 
 /// Busy-waits `ms` milliseconds using PIT channel 2 in one-shot mode.

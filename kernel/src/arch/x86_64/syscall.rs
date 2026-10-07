@@ -6,17 +6,19 @@
 //! kernel stack, saves the user registers in a [`SyscallFrame`] and calls the
 //! registered handler.
 //!
-//! Single CPU: the kernel stack and user-RSP scratch are plain statics,
-//! valid because the stub runs with interrupts disabled until the user RSP
-//! is safely on the kernel stack. SMP moves them to per-CPU data (`swapgs`).
+//! Each CPU (ADR-0089): the stub's first instruction is `swapgs`, which
+//! brings in the CPU's block (`percpu`); the user RSP is kept there while
+//! the stub moves to the kernel stack the block names. The last before
+//! `sysret` puts the user's `GS` back. Interrupts stay disabled until the
+//! user RSP is on the kernel stack, and again from the restore on.
 
 use core::arch::{asm, naked_asm};
-use core::cell::UnsafeCell;
 
 use ::x86_64::registers::model_specific::{Efer, EferFlags, Msr};
 use spin::Once;
 
 use super::gdt::{KERNEL_CODE, KERNEL_DATA, USER_CODE, USER_DATA};
+use super::percpu;
 
 const IA32_STAR: u32 = 0xc000_0081;
 const IA32_LSTAR: u32 = 0xc000_0082;
@@ -48,20 +50,17 @@ pub struct SyscallFrame {
     pub user_rsp: u64,
 }
 
-struct Scratch(UnsafeCell<u64>);
-
-// SAFETY: accessed only by the entry stub (interrupts disabled) and by
-// `set_kernel_stack` (interrupts disabled), on one CPU.
-unsafe impl Sync for Scratch {}
-
-static KERNEL_RSP: Scratch = Scratch(UnsafeCell::new(0));
-static USER_RSP: Scratch = Scratch(UnsafeCell::new(0));
-
 static HANDLER: Once<fn(&mut SyscallFrame)> = Once::new();
 
-/// Enables `syscall` with `handler` as the dispatcher.
+/// Enables `syscall` with `handler` as the dispatcher, on this CPU (the
+/// others call [`init_cpu`]).
 pub fn init(handler: fn(&mut SyscallFrame)) {
     HANDLER.call_once(|| handler);
+    init_cpu();
+}
+
+/// Enables `syscall` on this CPU.
+pub fn init_cpu() {
     // SAFETY: the MSRs exist on every x86_64 CPU; the selectors match the
     // GDT layout (asserted in `gdt::init`): sysret uses STAR[63:48] + 8 for
     // SS and + 16 for CS, syscall uses STAR[47:32] and + 8.
@@ -76,20 +75,20 @@ pub fn init(handler: fn(&mut SyscallFrame)) {
     debug_assert_eq!(USER_CODE, (KERNEL_DATA + 16) | 3);
 }
 
-/// Stack used for syscalls and ring-3 interrupts: the running thread's
-/// kernel stack. Interrupts must be disabled.
+/// Stack used for syscalls and ring-3 interrupts on this CPU: the running
+/// thread's kernel stack. Interrupts must be disabled.
 pub fn set_kernel_stack(top: u64) {
-    // SAFETY: see `Scratch`.
-    unsafe { KERNEL_RSP.0.get().write(top) };
+    percpu::set_kernel_rsp(top);
     super::gdt::set_kernel_stack(super::cpu_index(), top);
 }
 
 #[unsafe(naked)]
 unsafe extern "C" fn syscall_entry() {
     naked_asm!(
-        "mov [rip + {user_rsp}], rsp",
-        "mov rsp, [rip + {kernel_rsp}]",
-        "push qword ptr [rip + {user_rsp}]",
+        "swapgs",
+        "mov gs:[{user_rsp}], rsp",
+        "mov rsp, gs:[{kernel_rsp}]",
+        "push qword ptr gs:[{user_rsp}]",
         "push r11",
         "push rcx",
         "push r9",
@@ -114,9 +113,10 @@ unsafe extern "C" fn syscall_entry() {
         "pop rcx",
         "pop r11",
         "pop rsp",
+        "swapgs",
         "sysretq",
-        user_rsp = sym USER_RSP,
-        kernel_rsp = sym KERNEL_RSP,
+        user_rsp = const percpu::USER_RSP,
+        kernel_rsp = const percpu::KERNEL_RSP,
         dispatch = sym dispatch,
     );
 }
@@ -146,6 +146,9 @@ pub unsafe fn enter_user(entry: u64, user_rsp: u64, args: [u64; 3]) -> ! {
     // SAFETY: caller contract; the iretq frame selects ring 3 code and stack.
     unsafe {
         asm!(
+            // No interrupt between `swapgs` and `iretq`: it would find a
+            // kernel CS with the user's GS (`percpu`).
+            "cli",
             "push {ss}",
             "push {user_stack}",
             "push {rflags}",
@@ -163,6 +166,7 @@ pub unsafe fn enter_user(entry: u64, user_rsp: u64, args: [u64; 3]) -> ! {
             "xor r13d, r13d",
             "xor r14d, r14d",
             "xor r15d, r15d",
+            "swapgs",
             "iretq",
             ss = const USER_DATA as u64,
             cs = const USER_CODE as u64,

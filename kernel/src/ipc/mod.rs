@@ -7,8 +7,9 @@
 //!
 //! Blocking protocol: every operation disables interrupts, checks its
 //! condition and registers the waiting thread under the object's lock, then
-//! calls `sched::block`. On a single CPU this makes check-register-block
-//! atomic (see `sched::block`).
+//! calls `sched::block`. A wake from another CPU between the registration
+//! and the block is not lost: the block then returns at once (ADR-0089,
+//! see `sched`).
 
 pub mod endpoint;
 mod message;
