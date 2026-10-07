@@ -33,6 +33,11 @@ usage:
       checks a downloaded Oceans release in DIR: SHA256SUMS signed by the
       release key KEY-HEX (from the project, not from the download), then
       every file it lists
+  oceans secure-boot-key NAME --out FILE
+      a Secure Boot key (RSA-2048) and its certificate, named NAME; the
+      certificate also goes to FILE.cer, for firmware to enrol (ADR-0091)
+  oceans secure-boot-sign EFI --key FILE --out OUT
+      signs the UEFI executable EFI for Secure Boot with that key
 
 environment: OCEANS_SDK (the SDK's root; default: where this tool was built),
 OCEANS_GO (the Go command, default `go`), OCEANS_BUN (Bun, default `bun`)";
@@ -81,6 +86,8 @@ fn run(args: &[String]) -> Result {
     match command.as_str() {
         "new" => new(rest),
         "keygen" => keygen(rest),
+        "secure-boot-key" => secure_boot_key(rest),
+        "secure-boot-sign" => secure_boot_sign(rest),
         "build" => build(rest),
         "trust" => {
             let (_, found) = options(rest, &["--key", "--until"])?;
@@ -206,6 +213,61 @@ fn keygen(args: &[String]) -> Result {
     );
     println!("to let an Oceans system install your apps, run in its shell:");
     println!("  {}", key.trust_command());
+    Ok(())
+}
+
+/// `secure-boot-key NAME --out FILE` (ADR-0091).
+fn secure_boot_key(args: &[String]) -> Result {
+    let (positional, found) = options(args, &["--out"])?;
+    if positional.is_empty() {
+        return Err("secure-boot-key needs a name for the certificate".into());
+    }
+    let name = positional.join(" ");
+    let out = home_path(option(&found, "--out").ok_or("where? (--out FILE)")?);
+    let certificate = out.with_extension("cer");
+    for path in [&out, &certificate] {
+        if path.exists() {
+            return Err(format!("{} exists: not overwriting a key", path.display()));
+        }
+    }
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let key = oceans_dev::secure_boot::SecureBootKey::generate(&name)?;
+    fs::write(&out, key.to_file()?).map_err(|e| format!("{}: {e}", out.display()))?;
+    fs::write(&certificate, &key.certificate)
+        .map_err(|e| format!("{}: {e}", certificate.display()))?;
+    println!(
+        "a Secure Boot key \"{name}\" is in {}: keep it secret",
+        out.display()
+    );
+    println!(
+        "its certificate, for firmware to enrol in db: {}",
+        certificate.display()
+    );
+    println!("fingerprint (SHA-256): {}", key.fingerprint());
+    Ok(())
+}
+
+/// `secure-boot-sign EFI --key FILE --out OUT` (ADR-0091).
+fn secure_boot_sign(args: &[String]) -> Result {
+    let (positional, found) = options(args, &["--key", "--out"])?;
+    let [input] = positional.as_slice() else {
+        return Err("secure-boot-sign needs one UEFI executable".into());
+    };
+    let key_path = home_path(option(&found, "--key").ok_or("which key? (--key FILE)")?);
+    let out = home_path(option(&found, "--out").ok_or("where? (--out FILE)")?);
+    let text = fs::read_to_string(&key_path).map_err(|e| format!("{}: {e}", key_path.display()))?;
+    let key = oceans_dev::secure_boot::SecureBootKey::from_file(&text)?;
+    let image = fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+    let signed = key.sign(&image)?;
+    oceans_dev::secure_boot::verify(&signed, &key)?;
+    fs::write(&out, signed).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!(
+        "{input} signed into {} (certificate {})",
+        out.display(),
+        key.fingerprint()
+    );
     Ok(())
 }
 

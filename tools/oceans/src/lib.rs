@@ -8,6 +8,7 @@ use std::path::Path;
 use oceans_package::{Manifest, Runtime};
 
 pub mod release;
+pub mod secure_boot;
 
 /// A project template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

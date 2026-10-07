@@ -89,6 +89,45 @@ pub fn test_release_key() -> DeveloperKey {
 
 /// Reads the release key, refusing one that cannot be private: inside
 /// the repository, or the development key.
+/// The Secure Boot key for a release (ADR-0091): outside the repository,
+/// not the development one, and the one whose certificate is published in
+/// [`PUBLISHED_SECURE_BOOT_CERTIFICATE`].
+fn load_secure_boot_key(
+    path: &Path,
+    repository: &Path,
+) -> Result<oceans_dev::secure_boot::SecureBootKey> {
+    let full = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let repository = fs::canonicalize(repository).map_err(|e| e.to_string())?;
+    if full.starts_with(&repository) {
+        return Err(format!(
+            "{} is inside the repository: keep the Secure Boot key elsewhere",
+            path.display()
+        ));
+    }
+    let text = fs::read_to_string(&full).map_err(|e| format!("{}: {e}", path.display()))?;
+    let key = oceans_dev::secure_boot::SecureBootKey::from_file(&text)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if key.certificate == crate::secure_boot::development_key()?.certificate {
+        return Err("that is the development Secure Boot key, which is public".into());
+    }
+    let published = fs::read(root().join(PUBLISHED_SECURE_BOOT_CERTIFICATE)).map_err(|_| {
+        format!(
+            "publish the Secure Boot certificate first: commit the key's .cer as \
+             {PUBLISHED_SECURE_BOOT_CERTIFICATE} (what users enrol)"
+        )
+    })?;
+    if published != key.certificate {
+        return Err(format!(
+            "that Secure Boot key's certificate is not the one published in \
+             {PUBLISHED_SECURE_BOOT_CERTIFICATE}"
+        ));
+    }
+    Ok(key)
+}
+
+/// The release Secure Boot certificate, published like the release key.
+const PUBLISHED_SECURE_BOOT_CERTIFICATE: &str = "tools/keys/oceans-secure-boot.cer";
+
 fn load_release_key(path: &Path, repository: &Path) -> Result<DeveloperKey> {
     let full = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let repository = fs::canonicalize(repository).map_err(|e| e.to_string())?;
@@ -153,6 +192,14 @@ fn published_key_matches(published: &str, key: &DeveloperKey) -> bool {
 /// SHA256SUMS
 /// SHA256SUMS.sig                   the checksums, signed (ADR-0075)
 /// ```
+///
+/// With `OCEANS_SECURE_BOOT_KEY` (ADR-0091), also the image signed for
+/// Secure Boot and its certificate:
+///
+/// ```text
+/// oceans-VERSION-CHANNEL-secure-boot-usb.img
+/// oceans-secure-boot.cer
+/// ```
 pub fn release() -> Result {
     let path = env::var_os("OCEANS_RELEASE_KEY").ok_or(
         "set OCEANS_RELEASE_KEY to the release key file: make one with \
@@ -183,6 +230,10 @@ pub fn release() -> Result {
         Setup::Hardware,
         &ImageKeys::release(&key),
     )?;
+    let secure_boot_key = match env::var_os("OCEANS_SECURE_BOOT_KEY") {
+        Some(path) => Some(load_secure_boot_key(Path::new(&path), &root())?),
+        None => None,
+    };
     hardware::write_usb_image(&esp)?;
     let update = hardware::system_package(&esp, RELEASE_VERSION, &key, "Oceans")?;
 
@@ -192,7 +243,7 @@ pub fn release() -> Result {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let image = fs::read(root().join(hardware::USB_IMAGE)).map_err(|e| e.to_string())?;
-    let files: [(String, Vec<u8>); 4] = [
+    let mut files: Vec<(String, Vec<u8>)> = vec![
         (format!("{stem}-usb.img"), image),
         (format!("{stem}.opk"), update),
         (
@@ -208,6 +259,18 @@ pub fn release() -> Result {
             .into_bytes(),
         ),
     ];
+    // The same release, signed for Secure Boot: its configuration and
+    // Limine change, the update package (made above) does not.
+    if let Some(secure_boot_key) = &secure_boot_key {
+        crate::secure_boot::secure_esp(&esp, secure_boot_key)?;
+        hardware::write_usb_image(&esp)?;
+        let signed = fs::read(root().join(hardware::USB_IMAGE)).map_err(|e| e.to_string())?;
+        files.push((format!("{stem}-secure-boot-usb.img"), signed));
+        files.push((
+            crate::secure_boot::CERTIFICATE_FILE.to_string(),
+            secure_boot_key.certificate.clone(),
+        ));
+    }
     let mut sums = String::new();
     for (name, bytes) in &files {
         fs::write(dir.join(name), bytes).map_err(|e| format!("cannot write {name}: {e}"))?;

@@ -16,9 +16,13 @@ use std::time::{Duration, Instant};
 
 mod hardware;
 mod release;
+mod secure_boot;
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_PACKAGE: &str = "oceans-kernel";
+/// The UEFI program that enrols the development Secure Boot certificate
+/// (ADR-0091), built for UEFI only.
+const ENROLL_PACKAGE: &str = "oceans-enroll";
 /// User programs (in the `user/` workspace) shipped as boot modules.
 const USER_PROGRAMS: &[&str] = &[
     "init",
@@ -1094,6 +1098,11 @@ commands:
   smoke     boot Oceans headless in QEMU and verify it comes online
   usb       build/oceans-usb.img: the image a real machine boots from (ADR-0068)
   smoke-hw  boot that image in QEMU as a real PC would (no virtio)
+  usb-secure-boot  build/oceans-usb.img signed for Secure Boot with the
+            development Secure Boot key (ADR-0091)
+  smoke-secure-boot  boot a signed image on QEMU's Secure Boot firmware with
+            the development certificate enrolled; check that an unsigned
+            Limine and a changed kernel are refused
   release   build/release: a release's USB image, update and checksums,
             trusting only the release key (ADR-0072)
 
@@ -1106,7 +1115,9 @@ environment:
   OCEANS_BUN    path to bun, which builds the web experience (ui/)
   OCEANS_BRIDGE_PORT the host port `run` forwards to the web experience (8080)
   OCEANS_RELEASE_KEY the release key file for `release` (`oceans keygen`;
-                kept outside the repository)";
+                kept outside the repository)
+  OCEANS_SECURE_BOOT_KEY the Secure Boot key for `release`'s signed image
+                (`oceans secure-boot-key`; kept outside the repository)";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -1131,6 +1142,8 @@ fn main() -> ExitCode {
         Some("smoke") => smoke(profile),
         Some("usb") => hardware::usb(profile),
         Some("smoke-hw") => hardware::smoke_hw(profile),
+        Some("usb-secure-boot") => hardware::usb_secure_boot(profile),
+        Some("smoke-secure-boot") => secure_boot::smoke_secure_boot(profile),
         Some("release") => release::release(),
         Some("help" | "--help" | "-h") | None => {
             println!("{USAGE}");
@@ -1195,21 +1208,28 @@ fn check() -> Result {
         "--workspace",
         "--exclude",
         KERNEL_PACKAGE,
+        "--exclude",
+        ENROLL_PACKAGE,
         "--",
         "-D",
         "warnings",
     ]))?;
+    for (package, target) in [
+        (KERNEL_PACKAGE, KERNEL_TARGET),
+        (ENROLL_PACKAGE, secure_boot::UEFI_TARGET),
+    ] {
+        run_command(cargo().args([
+            "clippy", "-p", package, "--target", target, "--", "-D", "warnings",
+        ]))?;
+    }
     run_command(cargo().args([
-        "clippy",
-        "-p",
+        "test",
+        "--workspace",
+        "--exclude",
         KERNEL_PACKAGE,
-        "--target",
-        KERNEL_TARGET,
-        "--",
-        "-D",
-        "warnings",
+        "--exclude",
+        ENROLL_PACKAGE,
     ]))?;
-    run_command(cargo().args(["test", "--workspace", "--exclude", KERNEL_PACKAGE]))?;
     run_command(user_cargo().args(["fmt", "--all", "--check"]))?;
     run_command(user_cargo().args(["clippy", "--release", "--", "-D", "warnings"]))?;
     check_ui()?;
@@ -2383,7 +2403,7 @@ fn build_packages(user: &Path, go_apps: &[(String, Vec<u8>)]) -> Result {
 
 /// A blank (zero-filled) image of `size` bytes; an existing one is
 /// replaced only if `fresh`.
-fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
+pub(crate) fn prepare_blank(path: &str, size: usize, fresh: bool) -> Result {
     let path = root().join(path);
     if path.is_file() && !fresh {
         return Ok(());

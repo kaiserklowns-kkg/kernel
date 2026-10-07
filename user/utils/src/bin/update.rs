@@ -19,6 +19,13 @@
 //! the second is replaced first, then the first, so whatever moment power
 //! fails, one complete configuration is there.
 //!
+//! A boot partition signed for **Secure Boot** (ADR-0091, `/boot/secure-boot`)
+//! is not updated in place: its Limine checks the configuration against a
+//! hash enrolled at release, so a configuration written here would stop
+//! the machine from starting. Such a system is updated by writing the new
+//! release's Secure Boot image, until updates bring their own signed
+//! configuration (ADR-0092).
+//!
 //! Needs `use:fs` (`run update out use:fs -- apply /usb/update.opk`).
 
 #![no_std]
@@ -42,6 +49,8 @@ const USAGE: &str = "usage: update status | apply PATH   (run update out use:fs 
 /// The boot partition: the stick Oceans started from.
 const ESP: &str = "usb";
 const SYSTEM_ID: &str = "system.oceans";
+/// On a boot partition signed for Secure Boot (ADR-0091).
+const SECURE_BOOT_MARKER: &str = "usb/boot/secure-boot";
 /// Bytes moved per request.
 const CHUNK: usize = 256 * 1024;
 /// The largest update read.
@@ -223,6 +232,15 @@ fn status(out: &mut Out, root: &Node) -> Result<(), String> {
 }
 
 fn apply(out: &mut Out, root: &Node, path: &str) -> Result<(), String> {
+    if let Ok((marker, _)) = root.walk(SECURE_BOOT_MARKER, 0) {
+        marker.close();
+        return Err(
+            "this system boots with Secure Boot (ADR-0091): its boot configuration \
+                    is signed and cannot be changed here; write the new release's Secure Boot \
+                    image instead"
+                .into(),
+        );
+    }
     let path = path.trim_start_matches('/');
     let bytes = read_file(root, path, MAX_UPDATE)?;
     let keys_text = image_text(root, "bin/update.keys")?;

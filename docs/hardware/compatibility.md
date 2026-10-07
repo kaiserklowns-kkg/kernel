@@ -72,8 +72,10 @@ Real machines are added here from their reports.
    is the hardware profile: the root filesystem goes on the NVMe SSD, and
    the first SATA disk (AHCI mode) is shown as `/sata`.
 2. **Write the image to a USB stick** (Rufus, `dd`, balenaEtcher).
-3. **Boot the machine from the stick** (UEFI; Secure Boot off; SATA in
-   AHCI mode, not RAID or legacy IDE).
+3. **Boot the machine from the stick** (UEFI; SATA in AHCI mode, not RAID
+   or legacy IDE). Secure Boot off, or on with an image signed for it
+   once its certificate (`oceans-secure-boot.cer`, at the stick's root)
+   is enrolled in the firmware's `db` (ADR-0091).
 4. **What happens to the NVMe SSD and the SATA disk:** Oceans formats a
    disk **only if its start is blank**. A disk holding anything (a
    partition table, Windows, Linux) is left untouched, and files stay in

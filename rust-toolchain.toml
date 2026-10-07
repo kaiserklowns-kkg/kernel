@@ -1,5 +1,5 @@
 [toolchain]
 # ADR-0004: Oceans builds on stable Rust. No nightly features.
 channel = "stable"
-targets = ["x86_64-unknown-none"]
+targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]
 components = ["rustfmt", "clippy"]

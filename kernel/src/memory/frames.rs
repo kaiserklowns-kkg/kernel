@@ -13,7 +13,7 @@ use oceans_memory_map::{PAGE_SIZE, RegionKind};
 use spin::{Mutex, Once};
 
 use super::{MIB, phys_to_virt};
-use crate::boot::BootInfo;
+use crate::boot::{BootInfo, MAX_MODULES};
 use crate::{arch, klog};
 
 /// Physical memory below 1 MiB is never allocated: it holds firmware data on
@@ -62,8 +62,17 @@ pub fn init(boot: &BootInfo) {
     FRAMES.call_once(|| Mutex::new(allocator));
 }
 
-/// Adds every bootloader-reclaimable region to the allocator.
+/// Adds every bootloader-reclaimable region to the allocator, except the
+/// boot modules: Limine leaves a module it checked against a hash
+/// (`path#hash`, ADR-0091) in the reclaimable buffer it hashed, and the
+/// kernel reads its modules for as long as it runs.
 pub fn reclaim_bootloader_memory(boot: &BootInfo) {
+    let mut exclusions = [LOW_MEMORY; MAX_MODULES + 1];
+    for (slot, module) in exclusions[1..].iter_mut().zip(boot.modules()) {
+        *slot = module.physical_base - module.physical_base % PAGE_SIZE
+            ..(module.physical_base + module.size).next_multiple_of(PAGE_SIZE);
+    }
+    let exclusions = &exclusions[..=boot.modules().len()];
     let mut reclaimed = 0;
     for region in boot
         .memory_regions()
@@ -71,7 +80,7 @@ pub fn reclaim_bootloader_memory(boot: &BootInfo) {
         .filter(|r| r.kind() == RegionKind::BootloaderReclaimable)
     {
         match with_allocator(|frames| {
-            frames.add_free_range(region.base()..region.end(), &[LOW_MEMORY])
+            frames.add_free_range(region.base()..region.end(), exclusions)
         }) {
             Ok(frames) => reclaimed += frames,
             Err(err) => panic!("reclaiming bootloader memory {:#x}: {err:?}", region.base()),

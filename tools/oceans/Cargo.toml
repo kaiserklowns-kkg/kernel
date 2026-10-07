@@ -16,4 +16,7 @@ oceans-package = { workspace = true, features = ["build"] }
 getrandom = "0.2"
 # Signing and checking release checksums (ADR-0075).
 ed25519-dalek = { version = "2.2.0", default-features = false }
-sha2 = { version = "0.10.9", default-features = false }
+sha2 = { version = "0.10.9", default-features = false, features = ["oid"] }
+# The Secure Boot key and Authenticode signatures (ADR-0091): UEFI firmware
+# checks RSA only.
+rsa = { version = "0.9.10", default-features = false, features = ["std", "getrandom"] }

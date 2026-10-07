@@ -1,0 +1,18 @@
+[package]
+name = "oceans-enroll"
+description = "A UEFI program that enrols the development Secure Boot certificate (db, KEK, PK) in firmware in Setup Mode, for `cargo xtask smoke-secure-boot` (ADR-0091)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "oceans-enroll"
+test = false
+bench = false
+
+[dependencies]
+
+[build-dependencies]
+# Signs the variables it enrols, on the host (build.rs).
+oceans-dev = { path = "../oceans" }

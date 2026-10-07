@@ -111,20 +111,33 @@ pub fn init(boot: &BootInfo) {
     map_kernel_image(&mut space, image);
     let mapped = map_direct_map(&mut space, boot, direct_map_offset, features.gigabyte_pages);
 
-    // Boot modules (program images) sit in kernel+modules memory, which the
-    // direct map skips; map just the modules, read-only.
+    // Boot modules (program images) usually sit in kernel+modules memory,
+    // which the direct map skips: map those pages, read-only. A module
+    // Limine checked against a hash (ADR-0091) stays in the reclaimable
+    // buffer it hashed, already in the direct map: those pages are skipped.
     for module in boot.modules() {
         let start = module.physical_base - module.physical_base % PAGE_SIZE;
         let end = (module.physical_base + module.size).next_multiple_of(PAGE_SIZE);
-        map_range(
-            &mut space,
-            direct_map_offset + start,
-            start,
-            end - start,
-            MapFlags::KERNEL_RODATA,
-            false,
-        )
-        .unwrap_or_else(|err| panic!("mapping boot module {}: {err:?}", module.name()));
+        let mut page = start;
+        while page < end {
+            if space.translate(direct_map_offset + page).is_some() {
+                page += PAGE_SIZE;
+                continue;
+            }
+            let gap = page;
+            while page < end && space.translate(direct_map_offset + page).is_none() {
+                page += PAGE_SIZE;
+            }
+            map_range(
+                &mut space,
+                direct_map_offset + gap,
+                gap,
+                page - gap,
+                MapFlags::KERNEL_RODATA,
+                false,
+            )
+            .unwrap_or_else(|err| panic!("mapping boot module {}: {err:?}", module.name()));
+        }
     }
 
     // Every top-level kernel slot that will ever be used exists now, so

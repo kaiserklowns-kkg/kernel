@@ -178,6 +178,27 @@ pub fn usb(profile: Profile) -> Result {
     Ok(())
 }
 
+/// `cargo xtask usb-secure-boot`: the same image, signed for Secure Boot
+/// with the development Secure Boot key (ADR-0091).
+pub fn usb_secure_boot(profile: Profile) -> Result {
+    let esp = build_image_for(
+        profile,
+        None,
+        Setup::Hardware,
+        &release::ImageKeys::development()?,
+    )?;
+    let key = crate::secure_boot::development_key()?;
+    crate::secure_boot::secure_esp(&esp, &key)?;
+    write_usb_image(&esp)?;
+    println!(
+        "{USB_IMAGE} is signed for Secure Boot with the development Secure Boot key: enrol \
+         tools/keys/oceans-dev-secure-boot.cer (on the stick, {}) in the firmware's db to boot \
+         it with Secure Boot on",
+        crate::secure_boot::CERTIFICATE_FILE
+    );
+    Ok(())
+}
+
 /// Packs `esp` into [`USB_IMAGE`]: GPT, then FAT32 in the partition (with
 /// mkfs.fat and mtools, as `pack_esp`).
 pub fn write_usb_image(esp: &Path) -> Result {
@@ -210,6 +231,12 @@ pub fn write_usb_image(esp: &Path) -> Result {
         .arg(host_path_for_tool(&esp.join("EFI")))
         .arg(host_path_for_tool(&esp.join("boot")))
         .arg(host_path_for_tool(&esp.join("limine.conf")))
+        .args(
+            // A Secure Boot image's certificate, at the root (ADR-0091).
+            Some(esp.join(crate::secure_boot::CERTIFICATE_FILE))
+                .filter(|p| p.is_file())
+                .map(|p| host_path_for_tool(&p)),
+        )
         .arg("::/")
         .output()
         .map_err(|e| format!("cannot run mcopy (mtools): {e}"))?;

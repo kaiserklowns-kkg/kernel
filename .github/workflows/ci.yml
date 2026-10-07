@@ -46,3 +46,6 @@ jobs:
         run: cargo xtask smoke
       - name: Hardware smoke test (the USB image, booted as a real PC)
         run: cargo xtask smoke-hw
+      # ADR-0091: the signed boot chain on OVMF's Secure Boot firmware.
+      - name: Secure Boot smoke test
+        run: cargo xtask smoke-secure-boot
