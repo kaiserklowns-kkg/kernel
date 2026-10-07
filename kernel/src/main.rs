@@ -27,6 +27,7 @@ mod memory;
 mod object;
 mod panic;
 mod pci;
+mod power;
 mod process;
 mod random;
 mod sched;
@@ -115,6 +116,7 @@ fn self_test() {
     random::self_test();
     time::self_test();
     pci::self_test();
+    power::self_test();
     process::self_test(boot::info());
     process::init_self_test(boot::info());
     klog::info!("self-tests passed");

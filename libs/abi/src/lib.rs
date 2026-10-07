@@ -23,9 +23,10 @@
 /// (39: wall time); 11 = ADR-0032 (40: console input; class selectors for
 /// `DEVICE_OPEN`); 12 = ADR-0044 (41: kill); 13 = ADR-0057 (42–44:
 /// display); 14 = ADR-0059 (45–46: the keyboard to the desktop); 15 =
-/// ADR-0070 (47: reading the log). Versions only
-/// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 15;
+/// ADR-0070 (47: reading the log); 16 = ADR-0085 (48:
+/// switching off and restarting). Versions only add; existing numbers keep
+/// their meaning.
+pub const ABI_VERSION: u64 = 16;
 
 /// System call numbers.
 pub mod nr {
@@ -245,6 +246,34 @@ pub mod nr {
     /// [`LOG_READ_MAX`](super::LOG_READ_MAX) per call. Needs `READ` on the
     /// log, which init grants only on request (`grant = log-read`).
     pub const LOG_READ: u64 = 47;
+
+    // ABI 16 (ADR-0085)
+
+    /// `(system, action) -> can` — the machine's power
+    /// ([`power`](super::power)). `QUERY` answers what this machine can do
+    /// (`CAN_*` bits) and needs `READ` on the system information object.
+    /// `OFF` and `RESTART` need `MANAGE` on it, which only init holds;
+    /// they do not return (`NotFound` if `OFF` is not possible here,
+    /// before anything happens).
+    pub const SYSTEM_POWER: u64 = 48;
+}
+
+/// The machine's power (ADR-0085): `SYSTEM_POWER` actions, which are also
+/// the requests init answers on its `power` endpoint.
+pub mod power {
+    pub const QUERY: u64 = 0;
+    /// Switch off (ACPI S5).
+    pub const OFF: u64 = 1;
+    pub const RESTART: u64 = 2;
+    /// `QUERY` bits.
+    pub const CAN_OFF: u64 = 1 << 0;
+    pub const CAN_RESTART: u64 = 1 << 1;
+
+    /// init's answer on the `power` endpoint (one byte): the system is
+    /// stopping; this machine cannot do that; not a request.
+    pub const ACCEPTED: u8 = 0;
+    pub const NOT_POSSIBLE: u8 = 1;
+    pub const INVALID: u8 = 2;
 }
 
 /// The display (ADR-0057).

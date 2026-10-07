@@ -12,7 +12,7 @@ use core::fmt;
 pub use oceans_abi::EXIT_KILLED;
 pub use oceans_abi::Error;
 pub use oceans_abi::display::Info as DisplayInfo;
-pub use oceans_abi::{MessageDesc, prot, rights};
+pub use oceans_abi::{MessageDesc, power, prot, rights};
 use oceans_abi::{nr, start::MAX_INITIAL_HANDLES};
 
 /// A capability handle in this process's table.
@@ -455,6 +455,38 @@ pub fn log_read(log: Handle, from: u64, buffer: &mut [u8]) -> Result<(usize, u64
         ],
     )
     .map(|(count, start)| (count as usize, start))
+}
+
+/// What this machine can do with its power (ABI 16, ADR-0085):
+/// [`power::CAN_OFF`] and [`power::CAN_RESTART`] bits. Needs `READ` on the
+/// system information object.
+pub fn power_query(system: Handle) -> Result<u64, Error> {
+    call(nr::SYSTEM_POWER, [system.0, power::QUERY, 0, 0, 0, 0]).map(|(can, _)| can)
+}
+
+/// Switches the machine off ([`power::OFF`]) or restarts it
+/// ([`power::RESTART`]) at once. Needs `MANAGE` on the system information
+/// object, which only init holds; everyone else asks init
+/// ([`request_power`]). Returns only if it could not.
+pub fn system_power(system: Handle, action: u64) -> Error {
+    match call(nr::SYSTEM_POWER, [system.0, action, 0, 0, 0, 0]) {
+        Err(error) => error,
+        Ok(_) => Error::InvalidArgument,
+    }
+}
+
+/// Asks init, through a `power` grant, to stop the system and switch the
+/// machine off ([`power::OFF`]) or restart it ([`power::RESTART`]). `Ok`
+/// once init has accepted: the caller is stopped with everything else.
+/// `NotFound` if this machine cannot do it.
+pub fn request_power(power: Handle, action: u64) -> Result<(), Error> {
+    let mut reply = [0u8; 1];
+    let (len, _) = ipc_call(power, action, &[], &mut reply)?;
+    match (len, reply[0]) {
+        (1, power::ACCEPTED) => Ok(()),
+        (1, power::NOT_POSSIBLE) => Err(Error::NotFound),
+        _ => Err(Error::InvalidArgument),
+    }
 }
 
 /// Blocks until any bit is set; returns and clears them (needs `WAIT`).

@@ -139,7 +139,10 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::READ)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
+        // MANAGE: switching the machine off and restarting it (ADR-0085);
+        // init keeps it.
         ObjectKind::SystemInfo => Rights::READ
+            .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         ObjectKind::Console => Rights::READ

@@ -234,6 +234,8 @@ impl Shell {
             ["cp", source, destination] => self.copy(source, destination, false),
             ["cp", "-r", source, destination] => self.copy(source, destination, true),
             ["sync"] => self.sync(),
+            ["shutdown"] => self.power(oceans_rt::power::OFF),
+            ["reboot"] => self.power(oceans_rt::power::RESTART),
             ["app", words @ ..] => self.app(words),
             ["ai", words @ ..] => self.ai(words),
             ["ui", words @ ..] => self.ui(words),
@@ -288,6 +290,7 @@ impl Shell {
              \x20 ai activity                what the AI did, and what you decided\r\n\
              \x20 ui pair | unpair | status  let a browser use the Oceans web experience\r\n\
              \x20                              (it may list, start and stop apps, never decide)\r\n\
+             \x20 shutdown | reboot          stop the system, then switch off or restart\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
         );
@@ -472,6 +475,35 @@ impl Shell {
             .and_then(|root| root.sync().map_err(FsError::message));
         if let Err(problem) = result {
             self.print(format_args!("sync: {problem}\r\n"));
+        }
+    }
+
+    /// `shutdown` and `reboot` (ADR-0085): init stops the system (this
+    /// shell too) and the machine switches off or restarts.
+    fn power(&self, action: u64) {
+        let Some(power) = self.directory.find("power", "power") else {
+            return self.print(format_args!(
+                "this shell may not switch the machine off\r\n"
+            ));
+        };
+        let what = if action == oceans_rt::power::OFF {
+            "switching off"
+        } else {
+            "restarting"
+        };
+        // Said first: once init accepts, it stops this shell at once.
+        self.print(format_args!("Stopping the system, then {what}...\r\n"));
+        match oceans_rt::request_power(power, action) {
+            Ok(()) => {
+                // init stops this shell with everything else.
+                loop {
+                    oceans_rt::sleep_ms(60_000);
+                }
+            }
+            Err(oceans_rt::Error::NotFound) => self.print(format_args!(
+                "this machine cannot be switched off by Oceans: turn it off yourself\r\n"
+            )),
+            Err(error) => self.print(format_args!("cannot ask init: {error:?}\r\n")),
         }
     }
 

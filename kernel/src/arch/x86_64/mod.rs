@@ -9,6 +9,7 @@ mod ioapic;
 mod keyboard;
 mod paging;
 mod pic;
+pub mod power;
 mod rtc;
 mod serial;
 mod syscall;

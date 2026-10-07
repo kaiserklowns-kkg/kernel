@@ -27,9 +27,12 @@
 //! The pointer comes from the input service (ADR-0042). If this service
 //! ends, the kernel console takes the screen back.
 //!
+//! - **Restart and Shut Down** (ADR-0085): confirmed in a system dialog,
+//!   then asked of init (`grant = power`), which stops the system.
+//!
 //! Grants: `log`, `display`, `console-input` (to hand keys to the
 //! console), `use = core` (the user's agent, like the shell), `use =
-//! input`, `sysinfo`.
+//! input`, `sysinfo`, `power`.
 
 #![no_std]
 #![no_main]
@@ -95,6 +98,8 @@ struct Service {
     owners: BTreeMap<u64, Owner>,
     /// Each window's pixel memory, by window.
     pixels: BTreeMap<u32, Pixels>,
+    /// Asking init to switch off or restart (ADR-0085).
+    power: Option<Handle>,
 }
 
 fn main(start: Start) -> i64 {
@@ -181,6 +186,7 @@ fn main(start: Start) -> i64 {
         desktop: Desktop {
             pointer: (canvas.width / 2, canvas.height / 2),
             terminal_focused: true,
+            can_power: directory.find("power", "power").is_some(),
             ..Desktop::default()
         },
         pending: Vec::new(),
@@ -189,6 +195,7 @@ fn main(start: Start) -> i64 {
         windows: Manager::new(area, 2 * screen_pixels),
         owners: BTreeMap::new(),
         pixels: BTreeMap::new(),
+        power: directory.find("power", "power"),
     };
     service.register_windows(server);
     // The keyboard comes here only if it can be handed on to the console.
@@ -379,7 +386,8 @@ impl Service {
     fn click(&mut self, x: i32, y: i32, width: i32, height: i32) -> bool {
         let mut windows: Vec<u32> = self.windows.frames().iter().map(|f| f.id).collect();
         windows.sort_unstable();
-        match self.desktop.hit(x, y, width, height, &windows) {
+        let hit = self.desktop.hit(x, y, width, height, &windows);
+        match hit {
             Hit::Start => {
                 self.desktop.start_open = !self.desktop.start_open;
                 true
@@ -392,6 +400,29 @@ impl Service {
                 self.desktop.start_open = false;
                 let id = self.desktop.apps[index].id.clone();
                 self.launch(&id);
+                true
+            }
+            Hit::Restart | Hit::ShutDown => {
+                self.desktop.start_open = false;
+                let off = hit == Hit::ShutDown;
+                self.desktop.dialog = Some(Dialog {
+                    question: Question::Power(if off {
+                        oceans_rt::power::OFF
+                    } else {
+                        oceans_rt::power::RESTART
+                    }),
+                    title: if off {
+                        "Shut down Oceans?"
+                    } else {
+                        "Restart Oceans?"
+                    },
+                    app: String::from("Every app and service stops first."),
+                    ask: "Files are saved to disk before the machine",
+                    description: String::from(if off { "switches off." } else { "restarts." }),
+                    note: String::new(),
+                    deny: "Cancel",
+                    allow: if off { "Shut Down" } else { "Restart" },
+                });
                 true
             }
             Hit::StartTerminal => {
@@ -549,10 +580,17 @@ impl Service {
     }
 
     fn answer(&mut self, allow: bool) {
-        let (Some(core), Some(dialog)) = (self.core, self.desktop.dialog.take()) else {
+        let Some(dialog) = self.desktop.dialog.take() else {
+            return;
+        };
+        if let Question::Power(action) = dialog.question {
+            return self.answer_power(action, allow);
+        }
+        let Some(core) = self.core else {
             return;
         };
         let (id, permission) = match dialog.question {
+            Question::Power(_) => return,
             Question::Permission { id, permission } => (id, permission),
             Question::Install { number, name } => {
                 return self.answer_install(core, number, &name, allow);
@@ -589,6 +627,27 @@ impl Service {
             }
         }
         self.next_question(core, &id);
+    }
+
+    /// Restart or Shut Down, confirmed (ADR-0085): init stops the system,
+    /// this desktop too.
+    fn answer_power(&mut self, action: u64, confirmed: bool) {
+        let Some(power) = self.power.filter(|_| confirmed) else {
+            return;
+        };
+        let what = if action == oceans_rt::power::OFF {
+            "switch off"
+        } else {
+            "restart"
+        };
+        match oceans_rt::request_power(power, action) {
+            Ok(()) => say(self.log, format_args!("desktop: asked to {what}")),
+            Err(oceans_rt::Error::NotFound) => self.toast(
+                "Oceans cannot switch this machine off: turn it off yourself".to_string(),
+                true,
+            ),
+            Err(error) => self.toast(alloc::format!("Could not {what}: {error:?}"), true),
+        }
     }
 
     /// A Store install waiting for the user (ADR-0061): asked in a dialog.

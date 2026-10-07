@@ -1,25 +1,29 @@
-//! ACPI discovery (ADR-0017, ADR-0021): the MADT for interrupt routing and
-//! the MCFG for PCI Express configuration space.
+//! ACPI discovery (ADR-0017, ADR-0021, ADR-0085): the MADT for interrupt
+//! routing, the MCFG for PCI Express configuration space, and the FADT and
+//! the `\_S5` sleep types for switching off and restarting (`power`).
 //!
 //! Parsing and validation live in `oceans-acpi`; this module only reads the
 //! physical tables. Only what the kernel needs is used: the I/O APICs, the
-//! ISA interrupt overrides and the ECAM regions. Everything else (power
-//! management, AML) belongs to userspace services later.
+//! ISA interrupt overrides, the ECAM regions and the power registers. No
+//! AML is interpreted: the DSDT and SSDTs are only searched for `\_S5`.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 use oceans_acpi::{
-    EcamRegion, Madt, MadtEntry, RootTable, SDT_HEADER_LEN, Table, mcfg_regions, parse_rsdp,
-    root_entries, table_length,
+    AcpiError, EcamRegion, Fadt, Madt, MadtEntry, RootTable, SDT_HEADER_LEN, Table, mcfg_regions,
+    parse_rsdp, root_entries, sleep_type, table_length,
 };
 
 use crate::boot::BootInfo;
-use crate::klog;
 use crate::memory::read_physical;
+use crate::{klog, power};
 
 /// Largest table the kernel copies (MADTs are a few hundred bytes).
 const MAX_TABLE: usize = 64 * 1024;
+/// Largest DSDT or SSDT searched for `\_S5` (a PC's DSDT is up to a few
+/// hundred KiB); copied only for the search.
+const MAX_AML: usize = 4 * 1024 * 1024;
 
 /// What the kernel keeps from the firmware tables.
 pub struct Acpi {
@@ -72,9 +76,40 @@ impl Acpi {
     }
 }
 
-/// Reads and validates the tables. `None` (logged) if the firmware has no
-/// usable ACPI.
+/// Reads and validates the tables, and tells `power` how this machine
+/// switches off. `None` (logged) if the firmware has no usable ACPI.
 pub fn discover(boot: &BootInfo) -> Option<Acpi> {
+    let mut fadt = None;
+    let mut ssdts = Vec::new();
+    let acpi = discover_tables(boot, &mut fadt, &mut ssdts);
+    let types = fadt.as_ref().and_then(|fadt: &Fadt| {
+        let dsdt = (fadt.dsdt != 0).then_some(fadt.dsdt);
+        dsdt.into_iter()
+            .chain(ssdts.iter().copied())
+            .find_map(sleep_type_s5)
+    });
+    power::init(fadt.as_ref(), types);
+    acpi
+}
+
+/// The `\_S5` sleep types of the definition block at `address`, if it has
+/// them.
+fn sleep_type_s5(address: u64) -> Option<(u8, u8)> {
+    let bytes = read_table_up_to(address, MAX_AML)?;
+    let body = match Table::parse(&bytes) {
+        Ok(table) => table.body(),
+        // Firmware ships DSDTs with wrong checksums; the search is
+        // bounds-checked and its result cut to 3 bits, so it still runs.
+        Err(AcpiError::BadChecksum) => {
+            klog::warn!("ACPI: definition block at {address:#x} has a bad checksum");
+            &bytes[SDT_HEADER_LEN..]
+        }
+        Err(_) => return None,
+    };
+    sleep_type(body, *b"_S5_")
+}
+
+fn discover_tables(boot: &BootInfo, fadt: &mut Option<Fadt>, ssdts: &mut Vec<u64>) -> Option<Acpi> {
     let rsdp_address = boot.rsdp().or_else(|| {
         klog::warn!("bootloader reported no ACPI RSDP");
         None
@@ -113,6 +148,16 @@ pub fn discover(boot: &BootInfo) -> Option<Acpi> {
                     Err(err) => klog::warn!("invalid MADT: {err:?}"),
                 }
             }
+            b"FACP" if fadt.is_none() => {
+                let Some(bytes) = read_table(address) else {
+                    continue;
+                };
+                match Table::parse(&bytes).and_then(Fadt::parse) {
+                    Ok(parsed) => *fadt = Some(parsed),
+                    Err(err) => klog::warn!("invalid FADT: {err:?}"),
+                }
+            }
+            b"SSDT" => ssdts.push(address),
             b"MCFG" if acpi.ecam.is_empty() => {
                 let Some(mcfg) = read_table(address) else {
                     continue;
@@ -151,10 +196,14 @@ fn read(address: u64, out: &mut [u8]) -> Option<()> {
 
 /// Copies the whole table at `address` (header first, to learn its length).
 fn read_table(address: u64) -> Option<Vec<u8>> {
+    read_table_up_to(address, MAX_TABLE)
+}
+
+fn read_table_up_to(address: u64, max: usize) -> Option<Vec<u8>> {
     let mut header = [0u8; SDT_HEADER_LEN];
     read(address, &mut header)?;
     let length = table_length(&header).ok()?;
-    if length > MAX_TABLE {
+    if length > max {
         klog::warn!("ACPI table at {address:#x} too large ({length} bytes)");
         return None;
     }

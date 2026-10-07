@@ -22,10 +22,17 @@
 //! 4. Supervises: one notification, a bit per service, signalled by the
 //!    kernel when a service exits. Restart policies `always`, `on-failure`
 //!    and `never`, with exponential backoff and a restart limit.
+//! 5. **Stops the system** (ADR-0085). init serves the `power` endpoint
+//!    (`grant = power`; the notification is bound to it): asked to switch
+//!    off or restart, and if the machine can, it answers, stops every
+//!    service in reverse start order (the filesystem's clients first),
+//!    syncs the filesystem in between, stops the rest, and asks the kernel
+//!    (`SYSTEM_POWER`, which needs init's `MANAGE` on the system object).
 //!
 //! In smoke-test mode (argument 1) init exits once every non-`always`
-//! service has settled, with 0 only if every `expect-exit` / `expect-runs`
-//! line of the manifest holds.
+//! service has settled, or after stopping the system instead of switching
+//! off, with 0 only if every `expect-exit` / `expect-runs` line of the
+//! manifest holds.
 //!
 //! No allocator: everything is fixed-size, and strings borrow the mapped,
 //! read-only archive, which stays mapped for init's lifetime.
@@ -41,7 +48,7 @@ use core::fmt::Write;
 use oceans_archive::Archive;
 use oceans_fs_proto::{Kind, Node, flags};
 
-use oceans_rt::{Buffer, Error, Handle, Start, prot, rights};
+use oceans_rt::{Buffer, Error, Handle, Start, power, prot, rights};
 
 oceans_rt::entry!(main);
 
@@ -109,6 +116,8 @@ enum Grant {
     /// if missing, opened writable and handed over as `use storage`: the
     /// service's own files and nothing else.
     Storage(&'static str),
+    /// Asking init to switch the machine off or restart it (ADR-0085).
+    Power,
 }
 
 #[derive(Clone, Copy)]
@@ -198,6 +207,9 @@ struct Init {
     images: [(&'static str, Handle); MAX_IMAGES],
     image_count: usize,
     events: Handle,
+    /// The client end of init's `power` endpoint, handed out by
+    /// `grant = power`.
+    power: Handle,
     /// On the heap: `MAX_SERVICES` of them no longer fit on the stack.
     services: Vec<Service>,
     count: usize,
@@ -234,6 +246,13 @@ fn main(start: Start) -> i64 {
     let Ok(events) = oceans_rt::notification_create() else {
         return EXIT_BAD_START;
     };
+    // The power endpoint (ADR-0085): service exits arrive on it too.
+    let Ok((power_server, power)) = oceans_rt::endpoint_create() else {
+        return EXIT_BAD_START;
+    };
+    if oceans_rt::endpoint_bind(power_server, events).is_err() {
+        return EXIT_BAD_START;
+    }
     let mut init = Init {
         log,
         console,
@@ -244,6 +263,7 @@ fn main(start: Start) -> i64 {
         images: [("", Handle(0)); MAX_IMAGES],
         image_count: 0,
         events,
+        power,
         services: alloc::vec![NO_SERVICE; MAX_SERVICES],
         count: 0,
         registry: Registry {
@@ -277,18 +297,38 @@ fn main(start: Start) -> i64 {
         init.start_service(index);
     }
 
+    let mut data = [0u8; 16];
+    let mut handles = [Handle(0); 4];
     loop {
         if test_mode && init.settled() {
             return init.verify();
         }
-        let Ok(bits) = oceans_rt::notification_wait(init.events) else {
-            say(format_args!("cannot wait for service events"));
-            return EXIT_SUPERVISION_FAILED;
-        };
-        for index in 0..init.count {
-            if bits & (1 << index) != 0 {
-                init.on_exit(index);
+        let got = match oceans_rt::ipc_receive_msg(power_server, &mut data, &mut handles) {
+            Ok(got) => got,
+            Err(error) => {
+                say(format_args!("cannot wait for service events: {error:?}"));
+                return EXIT_SUPERVISION_FAILED;
             }
+        };
+        if got.signals != 0 {
+            for index in 0..init.count {
+                if got.signals & (1 << index) != 0 {
+                    init.on_exit(index);
+                }
+            }
+            continue;
+        }
+        if got.closed {
+            continue;
+        }
+        // Handles have no place in a power request.
+        for &handle in &handles[..got.handles_len] {
+            let _ = oceans_rt::close(handle);
+        }
+        let answer = init.power_answer(got.label);
+        let _ = oceans_rt::ipc_reply(0, &[answer]);
+        if answer == power::ACCEPTED {
+            return init.stop_system(got.label, test_mode);
         }
     }
 }
@@ -359,6 +399,7 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                     ("grant", "devices") => Grant::Devices,
                     ("grant", "console-input") => Grant::ConsoleInput,
                     ("grant", "display") => Grant::Display,
+                    ("grant", "power") => Grant::Power,
                     ("grant", other) => {
                         if let Some(module) = other.strip_prefix("module:")
                             && !module.is_empty()
@@ -383,7 +424,7 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                             }
                         } else {
                             return error(
-                                "unknown grant (known: log, log-read, console, console-input, sysinfo, devices, display, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
+                                "unknown grant (known: log, log-read, console, console-input, sysinfo, devices, display, power, device:VVVV:DDDD, device-class:CCSSPP, module:NAME, storage:/PATH)",
                             );
                         }
                     }
@@ -582,6 +623,11 @@ impl Init {
                         let fs = self.registry.get("fs").ok_or(Error::NotFound)?;
                         (open_storage(fs, path)?, "use", "storage")
                     }
+                    Grant::Power => (
+                        oceans_rt::duplicate(self.power, USE_RIGHTS)?,
+                        "power",
+                        "power",
+                    ),
                 };
                 handles[count] = handle;
                 let _ = writeln!(directory, "{count} {kind} {name}");
@@ -640,6 +686,90 @@ impl Init {
                 self.say(format_args!("{name} exited with {code}"));
             }
         }
+    }
+
+    /// The answer to power request `action`: accepted only if this machine
+    /// can do it (the kernel says), before anything stops.
+    fn power_answer(&self, action: u64) -> u8 {
+        let needed = match action {
+            power::OFF => power::CAN_OFF,
+            power::RESTART => power::CAN_RESTART,
+            _ => return power::INVALID,
+        };
+        match oceans_rt::power_query(self.sysinfo) {
+            Ok(can) if can & needed != 0 => power::ACCEPTED,
+            Ok(_) => {
+                self.say(format_args!("this machine cannot be switched off"));
+                power::NOT_POSSIBLE
+            }
+            Err(error) => {
+                self.say(format_args!("cannot ask the kernel about power: {error:?}"));
+                power::NOT_POSSIBLE
+            }
+        }
+    }
+
+    /// Stops the system, then switches off or restarts (`action`). Every
+    /// service is stopped in reverse start order: the filesystem's clients
+    /// (those started after the service providing `fs`), then the
+    /// filesystem is synced, then the rest. Returns only in test mode
+    /// (with the expectations' verdict; the kernel ends the boot) or if the
+    /// kernel could not do it.
+    fn stop_system(&mut self, action: u64, test_mode: bool) -> i64 {
+        let what = if action == power::OFF {
+            "switch off"
+        } else {
+            "restart"
+        };
+        self.say(format_args!("asked to {what}: stopping the system"));
+        let fs = self.services[..self.count].iter().position(|service| {
+            service
+                .grants
+                .iter()
+                .flatten()
+                .any(|grant| matches!(grant, Grant::Provide("fs")))
+        });
+        let clients = fs.map_or(0, |index| index + 1);
+        let mut stopped = 0;
+        for index in (clients..self.count).rev() {
+            stopped += usize::from(self.stop_service(index));
+        }
+        // Their open files were closed as they stopped, which commits them;
+        // `SYNC` commits the rest and reaches every mounted disk.
+        match self.registry.get("fs").map(|fs| Node(fs).sync()) {
+            Some(Ok(())) => self.say(format_args!("disks synced")),
+            Some(Err(error)) => {
+                self.say(format_args!("cannot sync the disks: {}", error.message()))
+            }
+            None => {}
+        }
+        for index in (0..clients).rev() {
+            stopped += usize::from(self.stop_service(index));
+        }
+        self.say(format_args!("{stopped} services stopped"));
+        if test_mode {
+            self.say(format_args!("test mode: the kernel ends the boot instead"));
+            return self.verify();
+        }
+        let error = oceans_rt::system_power(self.sysinfo, action);
+        self.say(format_args!("the kernel could not {what}: {error:?}"));
+        EXIT_SUPERVISION_FAILED
+    }
+
+    /// Stops service `index` if it runs, and records how it ended; `true`
+    /// if it was running.
+    fn stop_service(&mut self, index: usize) -> bool {
+        let Some(process) = self.services[index].process.take() else {
+            return false;
+        };
+        let _ = oceans_rt::process_kill(process);
+        let code = oceans_rt::process_wait(process).unwrap_or(i64::MIN);
+        let _ = oceans_rt::close(process);
+        let service = &mut self.services[index];
+        service.runs += 1;
+        service.last_exit = Some(code);
+        service.settled = true;
+        true
     }
 
     /// Every service that is not meant to run forever has settled.

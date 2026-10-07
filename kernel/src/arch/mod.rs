@@ -15,3 +15,7 @@ pub use self::x86_64::{
     set_user_return_hook, start_timer, switch_context, switch_stack, wait_for_interrupt,
     without_interrupts,
 };
+
+/// Switching off and restarting (ADR-0085).
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::power;

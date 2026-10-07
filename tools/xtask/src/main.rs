@@ -571,7 +571,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 0",
     b"@monitor device_del hub",
     b"run lsusb out use:usb\r\n",
-    b"exit\r\n",
+    // The boot ends as a user would end it (ADR-0085): init stops the
+    // system and, in test mode, hands the end to the kernel.
+    b"reboot\r\n",
 ];
 /// The second smoke boot, on the disk the first one left, with an Intel
 /// 82574L in place of the virtio NIC (ADR-0041): the same stack, unchanged,
@@ -605,9 +607,13 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     // IPv6 over the Intel NIC: its multicast reaches the stack (ADR-0043).
     b"run ping out use:net -- fec0::2 1\r\n",
     b"sync\r\n",
-    b"exit\r\n",
+    b"shutdown\r\n",
 ];
 const REBOOT_EXPECT: &[Expect] = &[
+    // Switching off (ADR-0085): the system stopped in order.
+    Expect::Line("Stopping the system, then switching off..."),
+    Expect::Contains("init: asked to switch off: stopping the system"),
+    Expect::Contains("init: disks synced"),
     Expect::Contains("logkeep: keeping the log in /system/logs/boot.log"),
     Expect::Contains("diag: the previous boot's log, "),
     Expect::Contains("  [WARN ] process: process init/crasher killed: page fault"),
@@ -646,7 +652,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 15)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 16)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -668,6 +674,16 @@ const REBOOT_EXPECT: &[Expect] = &[
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
 const SHELL_EXPECT: &[Expect] = &[
+    // Power (ADR-0085): what QEMU's firmware describes, and a restart
+    // asked from the shell, the system stopped in order.
+    Expect::Contains("ACPI: switching off through PM1 control at io 0x604 (SLP_TYP 0/0)"),
+    Expect::Contains("ACPI: restarting through the reset register at io 0xcf9"),
+    Expect::Contains("power: self-test passed"),
+    Expect::Line("Stopping the system, then restarting..."),
+    Expect::Contains("init: asked to restart: stopping the system"),
+    Expect::Contains("init: disks synced"),
+    Expect::Contains("init: test mode: the kernel ends the boot instead"),
+    Expect::Contains("init: all service expectations met"),
     // Diagnostics (ADR-0070).
     Expect::Contains("diag: needs the logs capability"),
     // Sound (ADR-0079).
@@ -694,7 +710,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 15)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 16)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),

@@ -404,9 +404,17 @@ const HW_SCRIPT: &[&[u8]] = &[
     b"run update out use:fs -- status\r\n",
     b"run update out use:fs -- apply /usb/untrusted.opk\r\n",
     b"run update out use:fs -- apply /usb/update.opk\r\n",
+    // Restarting into the update (ADR-0085): the real ACPI reset.
+    b"reboot\r\n",
 ];
 const HW_EXPECT: &[Expect] = &[
-    Expect::Contains("(ABI 15)"),
+    Expect::Contains("ACPI: switching off through PM1 control at io 0x604"),
+    Expect::Line("Stopping the system, then restarting..."),
+    Expect::Contains("init: asked to restart: stopping the system"),
+    Expect::Contains("init: disks synced"),
+    Expect::Contains("services stopped"),
+    Expect::Contains("power: restarting"),
+    Expect::Contains("(ABI 16)"),
     Expect::Contains("fs: formatted a blank disk"),
     // The SATA disk (ADR-0069): identified, formatted, written.
     Expect::Contains("ahci: port 0: QEMU HARDDISK (serial oceans-sata, firmware "),
@@ -451,8 +459,14 @@ const HW_REBOOT_SCRIPT: &[&[u8]] = &[
     b"run update out use:fs -- apply /usb/update.opk\r\n",
     // Core never installs a system package as an app.
     b"app install /usb/system.opk\r\n",
+    // Switching off (ADR-0085): ACPI S5, which ends QEMU.
+    b"shutdown\r\n",
 ];
 const HW_REBOOT_EXPECT: &[Expect] = &[
+    Expect::Line("Stopping the system, then switching off..."),
+    Expect::Contains("init: asked to switch off: stopping the system"),
+    Expect::Contains("init: disks synced"),
+    Expect::Contains("power: switching off (ACPI S5)"),
     Expect::Contains("fs: mounted the disk: generation"),
     Expect::Line("kept on the nvme root"),
     Expect::Contains("fs (satafs): mounted the disk: generation"),
@@ -492,6 +506,8 @@ pub fn smoke_hw(profile: Profile) -> Result {
 
 /// One boot of the USB image: the shell (on the serial line) gets each
 /// script line at a prompt; the boot passes when every expectation is met.
+/// A script ending with `reboot` or `shutdown` (ADR-0085) must make QEMU
+/// exit by itself (`-no-reboot`), cleanly, with no power fallback used.
 fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let qemu = find_qemu()?;
     let firmware = find_firmware(&qemu)?;
@@ -577,6 +593,10 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let deadline = Instant::now() + HW_TIMEOUT;
     let mut unmet: Vec<Expect> = expected.to_vec();
     let mut commands = script.iter();
+    let ends_with_power = script
+        .last()
+        .is_some_and(|last| matches!(*last, b"reboot\r\n" | b"shutdown\r\n"));
+    let mut power_sent = false;
     let mut done_at: Option<Instant> = None;
     let outcome = loop {
         if let Some(at) = done_at
@@ -594,6 +614,10 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                 if line.contains("KERNEL PANIC") {
                     break Err(format!("the kernel panicked: {line}"));
                 }
+                // The ACPI way failed and a fallback ran (ADR-0085).
+                if line.contains("power: the ") || line.contains("power: forcing") {
+                    break Err(format!("switching off or restarting failed: {line}"));
+                }
                 unmet.retain(|expect| !expect.matches(&line));
             }
             // A prompt: the next command, or (all sent) a moment for the
@@ -604,6 +628,7 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                         let _ = input.write_all(&[byte]).and_then(|()| input.flush());
                         thread::sleep(Duration::from_millis(5));
                     }
+                    power_sent = ends_with_power && commands.len() == 0;
                 }
                 None => {
                     done_at.get_or_insert(Instant::now() + Duration::from_secs(2));
@@ -616,12 +641,21 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                     HW_TIMEOUT.as_secs()
                 ));
             }
+            // Switched off or restarted: QEMU ends by itself.
+            Err(mpsc::RecvTimeoutError::Disconnected) if power_sent => break Ok(()),
             Err(mpsc::RecvTimeoutError::Disconnected) => break Err("QEMU exited".into()),
         }
     };
-    // The hardware profile has no test exit: the boot ends here.
-    let _ = child.kill();
-    let _ = child.wait();
+    if power_sent && outcome.is_ok() {
+        let status = child.wait().map_err(|e| format!("waiting for QEMU: {e}"))?;
+        if !status.success() {
+            return Err(format!("QEMU ended with {status} after the power request"));
+        }
+    } else {
+        // The hardware profile has no test exit: the boot ends here.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     outcome?;
     if !unmet.is_empty() {
         return Err(format!("hardware boot output missing: {unmet:?}"));

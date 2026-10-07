@@ -81,6 +81,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DISPLAY_KEYBOARD => display_keyboard(&process, a0, a1, a2),
         nr::DISPLAY_KEYS => display_keys(&process, a0, a1, a2),
         nr::LOG_READ => log_read(&process, a0, a1, a2, a3),
+        nr::SYSTEM_POWER => system_power(&process, a0, a1),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
         nr::MEMORY_SIZE => memory_size(&process, a0),
         nr::SYSTEM_INFO => system_info(&process, a0, a1, a2, a3),
@@ -174,6 +175,40 @@ fn log_read(process: &Process, log: u64, from: u64, ptr: u64, capacity: u64) -> 
     let (count, start) = klog::read(from, &mut buffer);
     process.copy_to_user(ptr, &buffer[..count])?;
     Ok((count as u64, start))
+}
+
+/// `SYSTEM_POWER` (ADR-0085): what this machine can do (`READ` on the
+/// system information object), or switching it off or restarting it
+/// (`MANAGE`, init's alone).
+fn system_power(process: &Process, raw: u64, action: u64) -> SyscallResult {
+    use oceans_abi::power;
+
+    let needed = match action {
+        power::QUERY => Rights::READ,
+        power::OFF | power::RESTART => Rights::MANAGE,
+        _ => return Err(Error::InvalidArgument),
+    };
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let capability = table.get(handle(raw), Rights::NONE).map_err(cap_error)?;
+        match capability.object() {
+            KernelObject::SystemInfo => capability.check(needed).map_err(cap_error),
+            _ => Err(Error::WrongType),
+        }
+    })?;
+    match action {
+        power::OFF => {
+            klog::info!("power: {} asks to switch off", process.name());
+            crate::power::off();
+            // Still here: this machine cannot be switched off.
+            Err(Error::NotFound)
+        }
+        power::RESTART => {
+            klog::info!("power: {} asks to restart", process.name());
+            crate::power::restart()
+        }
+        _ => Ok((crate::power::capabilities(), 0)),
+    }
 }
 
 fn close(process: &Process, raw: u64) -> SyscallResult {

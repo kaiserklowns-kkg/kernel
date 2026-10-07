@@ -10,7 +10,8 @@
 //!   button, the Terminal and the open windows, with a dot under what is
 //!   open and the name in a label over the one pointed at;
 //! - the **apps** panel above the dock: the Terminal and the installed
-//!   apps as tiles;
+//!   apps as tiles, and Restart and Shut Down (ADR-0085), each confirmed
+//!   in a system dialog;
 //! - **windows** (the Terminal's too) with light title bars, the title in
 //!   the middle and round buttons at the left: close, minimize and
 //!   resize (not yet available, drawn disabled);
@@ -106,6 +107,9 @@ pub enum Question {
     Permission { id: String, permission: u8 },
     /// Installing a package proposed through the Store (ADR-0061).
     Install { number: u32, name: String },
+    /// Switching off or restarting (ADR-0085): `oceans_rt::power::OFF`
+    /// or `RESTART`.
+    Power(u64),
 }
 
 /// A question to the user, drawn by the system.
@@ -151,6 +155,9 @@ pub struct Desktop {
     pub terminal_hidden: bool,
     /// The apps panel is open.
     pub start_open: bool,
+    /// This desktop may switch the machine off (`grant = power`): the apps
+    /// panel shows Restart and Shut Down.
+    pub can_power: bool,
 }
 
 /// An app window to draw.
@@ -170,6 +177,9 @@ pub enum Hit {
     StartTerminal,
     /// An app's tile in the apps panel.
     StartApp(usize),
+    /// Restart and Shut Down, in the apps panel.
+    Restart,
+    ShutDown,
     /// Somewhere else while the apps panel is open: it closes.
     Outside,
     /// The Terminal in the dock.
@@ -268,6 +278,19 @@ pub fn tile(width: i32, height: i32, index: usize) -> Rect {
         panel.y + 64 + row as i32 * TILE_HEIGHT,
         TILE_WIDTH,
         TILE_HEIGHT,
+    )
+}
+
+/// Restart (0) and Shut Down (1), at the right of the apps panel's
+/// footer.
+pub fn power_button(width: i32, height: i32, index: i32) -> Rect {
+    let panel = start_menu(width, height);
+    let (w, gap) = (104, 8);
+    Rect::new(
+        panel.x + panel.w - 24 - 2 * w - gap + index * (w + gap),
+        panel.y + panel.h - 40,
+        w,
+        30,
     )
 }
 
@@ -406,6 +429,14 @@ impl Desktop {
             if start_menu(width, height).contains(x, y) {
                 if tile(width, height, 0).contains(x, y) {
                     return Hit::StartTerminal;
+                }
+                if self.can_power {
+                    if power_button(width, height, 0).contains(x, y) {
+                        return Hit::Restart;
+                    }
+                    if power_button(width, height, 1).contains(x, y) {
+                        return Hit::ShutDown;
+                    }
                 }
                 let shown = self.apps.len().min(MAX_TILES - 1);
                 return (0..shown)
@@ -648,6 +679,20 @@ impl Desktop {
             )
         };
         canvas.text(panel.x + 24, footer_y + 16, &note, Font::Body, MUTED, panel);
+        if self.can_power {
+            for (index, label) in [(0, "Restart"), (1, "Shut Down")] {
+                let button = power_button(w, h, index);
+                let hovered = button.contains(pointer.0, pointer.1) && self.dialog.is_none();
+                let fill = if hovered {
+                    Rgb(0xd5_d5_db)
+                } else {
+                    BUTTON_SECONDARY
+                };
+                canvas.round_fill(button, 8, fill);
+                let tx = button.x + (button.w - canvas.measure(label, Font::Body)) / 2;
+                canvas.text(tx, button.y + 6, label, Font::Body, TEXT, button);
+            }
+        }
     }
 
     fn draw_dialog(&self, canvas: &mut Canvas, dialog: &Dialog) {
