@@ -116,9 +116,19 @@ pub fn init(acpi: Option<&Acpi>) {
     }
 }
 
+/// The serial line's diagnostic key, Ctrl+\\ (0x1C): the kernel logs what
+/// every CPU runs and every process's thread waits on, instead of passing
+/// the byte on (ADR-0089).
+const DIAGNOSTIC_KEY: u8 = 0x1c;
+
 /// A received byte (interrupt context, interrupts disabled).
 fn on_input(byte: u8) {
     crate::random::sample();
+    if byte == DIAGNOSTIC_KEY {
+        crate::sched::dump();
+        crate::process::dump();
+        return;
+    }
     let reader = {
         let mut input = INPUT.lock();
         if input.len == CAPACITY {

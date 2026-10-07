@@ -1,0 +1,15 @@
+# Image Viewer's package manifest (ADR-0090), an app that comes with the
+# system: `cargo xtask` packages it with the `viewer-app` program as
+# `viewer`, signs it with the image's key and bundles it into the boot
+# image.
+id = app.oceans.viewer
+name = Image Viewer
+version = 1.0.0
+publisher = {{PUBLISHER}}
+description = PNG and BMP pictures: look at them, one after another
+architecture = x86_64
+api = 1
+entry = viewer
+permission = window
+permission = files: open your pictures
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/viewer

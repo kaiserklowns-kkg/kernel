@@ -268,6 +268,29 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// their last reference goes; dead entries are pruned on snapshot).
 static PROCESSES: Mutex<Vec<alloc::sync::Weak<Process>>> = Mutex::new(Vec::new());
 
+/// Logs every live process and the state of its thread (the diagnostic
+/// key, ADR-0089). Interrupt context is fine: only spinlocks, taken with
+/// interrupts disabled everywhere.
+pub fn dump() {
+    let processes: Vec<Arc<Process>> = {
+        let mut list = PROCESSES.lock();
+        list.retain(|weak| weak.strong_count() > 0);
+        list.iter().filter_map(alloc::sync::Weak::upgrade).collect()
+    };
+    for process in processes.iter().filter(|p| p.exit_status().is_none()) {
+        let thread = process.thread.lock().as_ref().and_then(Weak::upgrade);
+        match thread {
+            Some(thread) => klog::diagnostic!(
+                "process {} ({}): {}",
+                process.id.0,
+                process.name,
+                sched::describe(&thread)
+            ),
+            None => klog::diagnostic!("process {} ({}): no thread", process.id.0, process.name),
+        }
+    }
+}
+
 /// A process as reported by `SYSTEM_INFO` (ADR-0020).
 pub struct Summary {
     pub id: u64,

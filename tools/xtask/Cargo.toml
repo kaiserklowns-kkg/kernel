@@ -26,3 +26,7 @@ oceans-volume.workspace = true
 sha2 = { version = "0.10.9", default-features = false }
 rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12"] }
 webpki-root-certs = "1.0.9"
+
+[dev-dependencies]
+# The smoke test's picture is checked with the decoder that shows it (ADR-0090).
+oceans-image.workspace = true

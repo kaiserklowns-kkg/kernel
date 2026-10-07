@@ -3,7 +3,7 @@
 # user/.cargo/config.toml. Built by `cargo xtask`.
 [workspace]
 resolver = "3"
-members = ["rt", "fs-proto", "core-proto", "block-proto", "audio-proto", "net-proto", "input-proto", "display-proto", "ui", "sdk", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "nvme", "ahci", "hda", "virtio-net", "e1000e", "xhci", "usb-storage", "usb-hid", "core", "display", "apps/hello", "apps/heartbeat", "apps/notes", "apps/calculator", "apps/settings", "apps/files", "apps/activity", "apps/editor", "gohost", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
+members = ["rt", "fs-proto", "core-proto", "block-proto", "audio-proto", "net-proto", "input-proto", "display-proto", "ui", "sdk", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "nvme", "ahci", "hda", "virtio-net", "e1000e", "xhci", "usb-storage", "usb-hid", "core", "display", "apps/hello", "apps/heartbeat", "apps/notes", "apps/calculator", "apps/settings", "apps/files", "apps/activity", "apps/editor", "apps/viewer", "gohost", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,6 +36,7 @@ oceans-hda = { path = "../libs/hda" }
 oceans-audio-proto = { path = "audio-proto" }
 oceans-draw = { path = "../libs/draw" }
 oceans-edit = { path = "../libs/edit" }
+oceans-image = { path = "../libs/image" }
 oceans-ui = { path = "ui" }
 oceans-e1000e = { path = "../libs/e1000e" }
 oceans-elf = { path = "../libs/elf" }

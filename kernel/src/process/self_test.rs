@@ -120,8 +120,9 @@ fn wait_all(processes: &[&Arc<Process>], seconds: u64) {
 pub fn init_self_test(boot: &BootInfo) {
     let init = super::init::start(boot, true).expect("smoke image ships init");
     // The whole scripted shell session runs inside this init; the host
-    // side (xtask) allows it 480 s as well.
-    wait_all(&[&init], 480);
+    // side (xtask) allows it 600 s as well (480 until the debug build of a
+    // grown script came too close, ADR-0090).
+    wait_all(&[&init], 600);
     assert_eq!(init.exit_status(), Some(0), "init's service test failed");
     klog::info!("init self-test passed: services started, supervised and restarted per manifest");
 }

@@ -189,6 +189,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run diag out -- crashes\r\n",
     b"run diag out logs -- crashes\r\n",
     b"run diag out logs sysinfo use:fs -- save /docs/diag.txt\r\n",
+    // The kernel's diagnostic key (Ctrl+\\, ADR-0089): it reports every
+    // CPU and process; the shell sees only the Enter after it.
+    b"\x1c\r\n",
     // Sound (ADR-0079): the HD Audio driver's output, and a tone, which
     // QEMU records for the host to find.
     b"run play out -- tone\r\n",
@@ -447,6 +450,16 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey ctrl-s",
     b"app stop app.oceans.editor\r\n",
     b"cat /home/untitled.txt\r\n",
+    // Image Viewer (ADR-0090): a PNG from the host, opened by the name it
+    // is started with, in the eighth window. Its left half is orange; its
+    // right half is transparent, so the checkerboard shows through.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/picture.png /home/picture.png\r\n",
+    b"app start app.oceans.viewer picture.png\r\n",
+    b"@screen 800 451 e8613c Image Viewer's picture",
+    // The checkerboard is laid out from the window's corner (484,159):
+    // there, 446,292 is a darker square.
+    b"@screen 930 451 cccccc Image Viewer's checkerboard",
+    b"app stop app.oceans.viewer\r\n",
     // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
     // until the developer's key is trusted at the console; then the Rust
     // app and the Go app install and run.
@@ -634,7 +647,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // (ADR-0059), Tiles (ADR-0060) and the three third-party apps
     // (ADR-0062, ADR-0064), whose developer's key is still trusted
     // (ADR-0063).
-    Expect::Contains("core: ready, 14 apps installed, 2 trusted publisher keys"),
+    Expect::Contains("core: ready, 15 apps installed, 2 trusted publisher keys"),
     Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
@@ -680,6 +693,9 @@ const REBOOT_EXPECT: &[Expect] = &[
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
 const SHELL_EXPECT: &[Expect] = &[
+    // The diagnostic key (ADR-0089).
+    Expect::Contains("diag: cpu 0 runs "),
+    Expect::Contains("(init/shell): thread "),
     // Every CPU up (ADR-0088).
     Expect::Contains("smp: 4 CPUs online"),
     Expect::Contains("smp: self-test passed: 3 CPUs answered an interrupt"),
@@ -815,7 +831,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed activity.opk from the system image"),
     Expect::Contains("text edited in oceans"),
     Expect::Contains("core: installed editor.opk from the system image"),
-    Expect::Contains("core: ready, 5 apps installed, 1 trusted publisher keys"),
+    Expect::Contains("core: installed viewer.opk from the system image"),
+    Expect::Contains("app: started app.oceans.viewer"),
+    Expect::Contains("core: ready, 6 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
     Expect::Contains("gohello: goroutines computed 30"),
@@ -1056,7 +1074,7 @@ impl Expect {
 }
 /// Each smoke boot, start to finish. Boot 1 runs ~150 scripted steps, many
 /// with QEMU monitor pauses; CI runners without KVM are slow.
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(480);
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long the last command waits for the host's echo probes.
 const PROBE_WAIT: Duration = Duration::from_secs(30);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).
@@ -2229,6 +2247,11 @@ const BUNDLED_APPS: &[(&str, &str, &str)] = &[
         "editor-app",
         include_str!("../../../user/apps/editor/manifest"),
     ),
+    (
+        "viewer",
+        "viewer-app",
+        include_str!("../../../user/apps/viewer/manifest"),
+    ),
 ];
 
 /// The bundled apps as signed packages, `NAME.opk`, for the boot archive.
@@ -2927,6 +2950,21 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             // Reader finished: QEMU closed stdout, i.e. exited.
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // What every thread waits on (the kernel's diagnostic key,
+                // Ctrl+\\), then where each CPU is: for a hang to be found
+                // afterwards.
+                let _ = serial_input
+                    .write_all(&[0x1c])
+                    .and_then(|()| serial_input.flush());
+                let until = Instant::now() + Duration::from_secs(3);
+                while let Ok(event) =
+                    events_rx.recv_timeout(until.saturating_duration_since(Instant::now()))
+                {
+                    if let Console::Line(line) = event {
+                        println!("  | {line}");
+                    }
+                }
+                report_cpus(monitor_port);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -3352,6 +3390,54 @@ fn json_string_after(text: &str, marker: &str) -> Option<String> {
 }
 
 /// The body of `/big`: 1 MiB in a pattern that catches reordering.
+/// The picture Image Viewer shows in the smoke test (ADR-0090): 200 x 120
+/// RGBA, the left half orange (#e8613c), the right half transparent. A
+/// PNG of stored DEFLATE blocks, with its CRCs and Adler-32.
+fn picture_png() -> Vec<u8> {
+    let (width, height) = (200u32, 120u32);
+    // Every row the same: no filter, then the pixels.
+    let mut row = vec![0u8];
+    for x in 0..width {
+        row.extend_from_slice(&if x < width / 2 {
+            [0xe8, 0x61, 0x3c, 0xff]
+        } else {
+            [0, 0, 0, 0]
+        });
+    }
+    let raw = row.repeat(height as usize);
+    let mut zlib = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        zlib.push(u8::from(i + 1 == blocks.len()));
+        let len = block.len() as u16;
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let chunk = |kind: &[u8; 4], body: &[u8]| {
+        let mut typed = kind.to_vec();
+        typed.extend_from_slice(body);
+        let mut out = (body.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(&typed);
+        out.extend_from_slice(&hardware::crc32(&typed).to_be_bytes());
+        out
+    };
+    let mut header = width.to_be_bytes().to_vec();
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    png.extend(chunk(b"IHDR", &header));
+    png.extend(chunk(b"IDAT", &zlib));
+    png.extend(chunk(b"IEND", &[]));
+    png
+}
+
 fn big_body() -> Vec<u8> {
     (0..1_048_576u32).map(|i| (i % 251) as u8).collect()
 }
@@ -3444,6 +3530,42 @@ fn expect_pixel(port: u16, probe: &[u8]) -> Result {
 }
 
 /// Gives QEMU's (human) monitor one command line.
+/// Asks QEMU's monitor for every CPU's registers and prints where each one
+/// is (its instruction pointer, and whether interrupts are on): what a hung
+/// smoke test leaves to look at. Resolve the addresses against the kernel
+/// with `llvm-addr2line` or `nm`.
+fn report_cpus(port: u16) {
+    use std::io::Read as _;
+    let Ok(mut monitor) = TcpStream::connect(("127.0.0.1", port)) else {
+        return;
+    };
+    let _ = monitor.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = monitor.write_all(b"info registers -a\n");
+    let mut text = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match monitor.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => text.extend_from_slice(&chunk[..n]),
+            Err(_) if !text.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    // QEMU prints "CPU#n" before each CPU's registers, and a line
+    // "RIP=... RFL=... [flags] CPL=... HLT=..." for each.
+    let text = String::from_utf8_lossy(&text);
+    let mut cpu = String::from("?");
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("CPU#") {
+            cpu = rest.chars().take_while(char::is_ascii_digit).collect();
+        }
+        if line.contains("RIP=") {
+            println!("cpu {cpu}: {}", line.trim());
+        }
+    }
+}
+
 fn monitor_command(port: u16, line: &[u8]) -> Result {
     let mut monitor = TcpStream::connect(("127.0.0.1", port))
         .map_err(|e| format!("cannot reach QEMU's monitor: {e}"))?;
@@ -3661,6 +3783,7 @@ fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
         "/redirect" => b"HTTP/1.1 302 Found\r\nLocation: /moved.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
         "/big" => fixed("200 OK", &big_body()),
+        "/picture.png" => fixed("200 OK", &picture_png()),
         "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
         "/models-ca.pem" => fixed("200 OK", MODELS_CA),
         "/v1/chat/completions" => {
@@ -4123,6 +4246,16 @@ fn check_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_smoke_picture_decodes_as_served() {
+        let (format, image) = oceans_image::decode(&picture_png()).unwrap();
+        assert_eq!(format, oceans_image::Format::Png);
+        assert_eq!((image.width, image.height), (200, 120));
+        assert_eq!(image.pixels[0], 0xffe8_613c);
+        assert_eq!(image.pixels[199], 0);
+        assert_eq!(image.pixels[119 * 200 + 99], 0xffe8_613c);
+    }
 
     #[test]
     fn base64_matches_rfc_4648() {

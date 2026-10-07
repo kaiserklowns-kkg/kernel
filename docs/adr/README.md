@@ -97,5 +97,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0087](0087-audio-input.md) | Sound input: recording from HD Audio | Accepted |
 | [0088](0088-every-cpu-up.md) | Every CPU up | Accepted |
 | [0089](0089-scheduling-on-every-cpu.md) | Scheduling on every CPU | Accepted |
+| [0090](0090-image-viewer.md) | Image Viewer | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

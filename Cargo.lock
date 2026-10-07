@@ -573,6 +573,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-image"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-inet"
 version = "0.1.0"
 
@@ -681,6 +685,7 @@ dependencies = [
  "oceans-dev",
  "oceans-dns",
  "oceans-fat",
+ "oceans-image",
  "oceans-package",
  "oceans-random",
  "oceans-tls",

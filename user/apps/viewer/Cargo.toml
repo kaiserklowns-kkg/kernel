@@ -1,0 +1,19 @@
+[package]
+name = "viewer-app"
+description = "Image Viewer: PNG and BMP pictures in /home, shipped with the system (ADR-0090)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "viewer-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-fs-proto.workspace = true
+oceans-ui.workspace = true
+oceans-image.workspace = true
+oceans-abi.workspace = true

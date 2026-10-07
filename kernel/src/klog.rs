@@ -157,6 +157,14 @@ pub fn read(from: u64, out: &mut [u8]) -> (usize, u64) {
     RING.lock().read(from, out)
 }
 
+/// A diagnostic line from interrupt context (the diagnostic key,
+/// ADR-0089): through [`emergency`], so it never waits for the console.
+macro_rules! diagnostic {
+    ($($arg:tt)+) => {
+        $crate::klog::emergency($crate::klog::Level::Info, "diag", format_args!($($arg)+))
+    };
+}
+
 macro_rules! log_at {
     ($level:ident, $($arg:tt)+) => {
         $crate::klog::write($crate::klog::Level::$level, module_path!(), format_args!($($arg)+))
@@ -172,4 +180,4 @@ macro_rules! debug { ($($arg:tt)+) => { $crate::klog::log_at!(Debug, $($arg)+) }
 // `warn` collides with the built-in lint attribute, so it is defined under a
 // different name and re-exported.
 #[allow(unused_imports)]
-pub(crate) use {debug, error, info, log_at, warn_ as warn};
+pub(crate) use {debug, diagnostic, error, info, log_at, warn_ as warn};

@@ -123,6 +123,27 @@ on, all of them true only on one CPU:
   - **One thread per process** remains. Several would need TLB shootdown
     for user mappings too.
 
+## Addendum: diagnosing a hang (2026-10-07)
+
+Once, among some fifteen smoke runs since this change, a run hung: `app
+install` never answered, while the rest of the system ran on. It did not
+come back in nine runs after it, six of them with the CPU loaded on
+purpose, and reading every wait and wake path found no way to lose a
+wake-up. So that the next one can be found:
+
+- **The diagnostic key:** Ctrl+\\ (0x1C) on the serial line makes the
+  kernel log, instead of passing the byte on:
+  - what each CPU runs, and how many threads are ready or asleep;
+  - every live process's thread: on a CPU, blocked, holding a wake
+    token, killed, answering a call.
+
+  It logs through `klog::emergency`, so it never waits for the console
+  from the interrupt handler.
+- **A smoke test that times out** presses it, prints what follows, then
+  prints every CPU's registers from QEMU's monitor (`info registers -a`:
+  the instruction pointer, the flags, whether it halted).
+- The smoke test presses the key once on every boot, to keep it working.
+
 ## Alternatives considered
 
 - **Per-CPU run queues now:** more scalable, but load balancing and

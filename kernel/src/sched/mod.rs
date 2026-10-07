@@ -396,6 +396,50 @@ pub fn interrupt(thread: &Arc<Thread>) {
     });
 }
 
+/// Logs what each CPU runs and how many threads are ready (the
+/// diagnostic key, ADR-0089). Interrupts must be disabled.
+pub fn dump() {
+    let scheduler = SCHEDULER.lock();
+    klog::diagnostic!(
+        "{} ready, {} asleep",
+        scheduler.queue.ready_len(),
+        scheduler.queue.sleeping_len()
+    );
+    for (index, cpu) in scheduler.cpus.iter().enumerate() {
+        if let Some(current) = &cpu.current {
+            klog::diagnostic!(
+                "cpu {index} runs {} {}{}",
+                current.id.0,
+                current.name,
+                if cpu.is_idle() { " (idle)" } else { "" }
+            );
+        }
+    }
+}
+
+/// A thread's state in words, for diagnostics.
+pub fn describe(thread: &Thread) -> alloc::string::String {
+    let mut words = alloc::format!("thread {} ", thread.id.0);
+    for (flag, word) in [
+        (&thread.on_cpu, "on-cpu "),
+        (&thread.blocked, "blocked "),
+        (&thread.wake_pending, "wake-pending "),
+        (&thread.interrupted, "killed "),
+    ] {
+        if flag.load(Ordering::Acquire) {
+            words.push_str(word);
+        }
+    }
+    if thread
+        .pending_call
+        .try_lock()
+        .is_some_and(|call| call.is_some())
+    {
+        words.push_str("answering-a-call ");
+    }
+    words
+}
+
 /// Whether the running thread has been interrupted.
 pub fn interrupted() -> bool {
     current().interrupted.load(Ordering::Acquire)

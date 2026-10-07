@@ -435,6 +435,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("app.oceans.files  1.0.0  Files"),
     Expect::Contains("app.oceans.activity  1.0.0  Activity Monitor"),
     Expect::Contains("app.oceans.editor  1.0.0  Text Editor"),
+    Expect::Contains("app.oceans.viewer  1.0.0  Image Viewer"),
     // The boot stick itself, as removable media (ADR-0035): its ESP.
     Expect::Line("  EFI/"),
     Expect::Contains("cpu baseline (x86-64-v2, NX, APIC): SSE3 SSSE3"),

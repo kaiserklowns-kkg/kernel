@@ -761,6 +761,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-image"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-inet"
 version = "0.1.0"
 
@@ -1302,6 +1306,17 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "viewer-app"
+version = "0.1.0"
+dependencies = [
+ "oceans-abi",
+ "oceans-fs-proto",
+ "oceans-image",
+ "oceans-rt",
+ "oceans-ui",
+]
 
 [[package]]
 name = "virtio-blk"
