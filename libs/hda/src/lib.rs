@@ -1,7 +1,8 @@
-//! Intel High Definition Audio (ADR-0079), host-tested: the controller's
-//! registers, the codec commands ("verbs") and what their answers mean,
-//! the search for a path from a converter to an output jack, stream
-//! formats and buffer descriptor lists. The driver (`user/hda`) moves the
+//! Intel High Definition Audio (ADR-0079, ADR-0087), host-tested: the
+//! controller's registers, the codec commands ("verbs") and what their
+//! answers mean, the search for a path from a converter to an output jack
+//! and from an input jack to a converter, stream formats, buffer
+//! descriptor lists and the accounting of both cyclic buffers. The driver (`user/hda`) moves the
 //! bytes; the decisions are made here.
 //!
 //! HD Audio (2004) is the sound controller of nearly every PC since: one
@@ -80,6 +81,11 @@ impl Capabilities {
         (self.output_streams > 0)
             .then(|| reg::SD_BASE + usize::from(self.input_streams) * reg::SD_STRIDE)
     }
+
+    /// The register offset of the first input stream's descriptor.
+    pub fn first_input(&self) -> Option<usize> {
+        (self.input_streams > 0).then_some(reg::SD_BASE)
+    }
 }
 
 // ---- Codec commands ------------------------------------------------------
@@ -122,6 +128,7 @@ pub mod param {
     pub const FUNCTION_TYPE: u8 = 0x05;
     pub const WIDGET_CAPS: u8 = 0x09;
     pub const PIN_CAPS: u8 = 0x0c;
+    pub const INPUT_AMP_CAPS: u8 = 0x0d;
     pub const CONNECTION_LENGTH: u8 = 0x0e;
     pub const OUTPUT_AMP_CAPS: u8 = 0x12;
 }
@@ -184,7 +191,10 @@ pub enum Jack {
     LineOut,
     Speaker,
     Headphone,
-    /// Inputs and the rest.
+    LineIn,
+    /// A microphone: built in, or a jack for one.
+    Mic,
+    /// The rest (S/PDIF, modem lines, ...).
     Other,
     /// Nothing is connected.
     None,
@@ -199,7 +209,18 @@ impl Jack {
             0 => Self::LineOut,
             1 => Self::Speaker,
             2 => Self::Headphone,
+            0x8 => Self::LineIn,
+            0xa => Self::Mic,
             _ => Self::Other,
+        }
+    }
+
+    /// Which input to prefer: a microphone, then line in (lower is better).
+    pub fn input_preference(self) -> Option<u8> {
+        match self {
+            Self::Mic => Some(0),
+            Self::LineIn => Some(1),
+            _ => None,
         }
     }
 
@@ -210,7 +231,7 @@ impl Jack {
             Self::Speaker => Some(0),
             Self::LineOut => Some(1),
             Self::Headphone => Some(2),
-            Self::Other | Self::None => None,
+            _ => None,
         }
     }
 
@@ -219,6 +240,8 @@ impl Jack {
             Self::LineOut => "line out",
             Self::Speaker => "speaker",
             Self::Headphone => "headphones",
+            Self::LineIn => "line in",
+            Self::Mic => "microphone",
             Self::Other => "other",
             Self::None => "not connected",
         }
@@ -228,6 +251,11 @@ impl Jack {
 /// `PIN_CAPS`: the pin can drive an output.
 pub fn pin_can_output(answer: u32) -> bool {
     answer & (1 << 4) != 0
+}
+
+/// `PIN_CAPS`: the pin can take an input.
+pub fn pin_can_input(answer: u32) -> bool {
+    answer & (1 << 5) != 0
 }
 
 /// `CONNECTION_LENGTH`: how many, and whether entries are long (16-bit).
@@ -257,7 +285,14 @@ pub fn pin_output_control(jack: Jack) -> u8 {
     0x40 | if jack == Jack::Headphone { 0x80 } else { 0 }
 }
 
-/// The format Oceans plays: 48 kHz, 16 bits, two channels.
+/// Pin control: take the input; a microphone also gets its bias voltage
+/// (80 %) when the pin offers it (`PIN_CAPS` VRef bit 12).
+pub fn pin_input_control(jack: Jack, pin_caps: u32) -> u8 {
+    let bias = jack == Jack::Mic && pin_caps & (1 << 12) != 0;
+    0x20 | if bias { 0x04 } else { 0 }
+}
+
+/// The format Oceans plays and records: 48 kHz, 16 bits, two channels.
 pub const FORMAT_48K_16_STEREO: u16 = (0b001 << 4) | 1;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u32 = 2;
@@ -271,9 +306,11 @@ pub const BYTES_PER_SECOND: u32 = SAMPLE_RATE * CHANNELS * 2;
 pub struct Widget {
     pub node: u8,
     pub caps: WidgetCaps,
-    /// For pins: what it is wired to and whether it can drive an output.
+    /// For pins: what it is wired to and whether it can drive an output or
+    /// take an input.
     pub jack: Jack,
     pub can_output: bool,
+    pub can_input: bool,
     /// Its inputs, in connection list order.
     pub inputs: [u8; 8],
     pub input_count: u8,
@@ -285,8 +322,13 @@ impl Widget {
     }
 }
 
-/// The way from a converter to a jack: the nodes from the pin back to the
-/// converter, and at each step which of the node's inputs leads on.
+/// The way between a converter and a jack, against the flow of the sound
+/// (connection lists name where sound comes from), and at each step which
+/// of the node's inputs leads on:
+/// - an **output** path ([`find_output`]) runs from the pin back to the
+///   output converter: `pin()` first, `converter()` last;
+/// - an **input** path ([`find_input`]) runs from the input converter back
+///   to the pin: `nodes()[0]` is the converter, the pin is last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Path {
     pub nodes: [u8; 6],
@@ -301,11 +343,12 @@ impl Path {
         &self.nodes[..usize::from(self.len)]
     }
 
-    /// The converter at the end.
+    /// The converter at the end (an output path's).
     pub fn converter(&self) -> u8 {
         self.nodes[usize::from(self.len) - 1]
     }
 
+    /// The pin at the start (an output path's).
     pub fn pin(&self) -> u8 {
         self.nodes[0]
     }
@@ -338,20 +381,75 @@ pub fn find_output(widgets: &[Widget]) -> Option<Path> {
             jack: pin.jack,
         };
         path.nodes[0] = pin.node;
-        if search(&find, &mut path) {
+        let goal = |w: &Widget| w.caps.kind == WidgetType::Output;
+        let through = |w: &Widget| {
+            matches!(
+                w.caps.kind,
+                WidgetType::Output | WidgetType::Mixer | WidgetType::Selector
+            )
+        };
+        if search(&find, &mut path, &goal, &through) {
             return Some(path);
         }
     }
     None
 }
 
-/// Depth first from the path's last node towards a converter.
-fn search<'a>(find: &impl Fn(u8) -> Option<&'a Widget>, path: &mut Path) -> bool {
+/// The best input: among pins that can take an input and are wired to a
+/// microphone or line in (in that order of preference), the first reached
+/// from an input converter in at most six widgets. The path starts at the
+/// converter and ends at the pin.
+pub fn find_input(widgets: &[Widget]) -> Option<Path> {
+    let find = |node: u8| widgets.iter().find(|w| w.node == node);
+    let mut pins: [Option<&Widget>; 32] = [None; 32];
+    let mut count = 0;
+    for w in widgets {
+        if w.caps.kind == WidgetType::Pin
+            && w.can_input
+            && w.jack.input_preference().is_some()
+            && count < pins.len()
+        {
+            pins[count] = Some(w);
+            count += 1;
+        }
+    }
+    let pins = &mut pins[..count];
+    pins.sort_unstable_by_key(|w| w.map(|w| (w.jack.input_preference(), w.node)));
+    for pin in pins.iter().flatten() {
+        for converter in widgets.iter().filter(|w| w.caps.kind == WidgetType::Input) {
+            let mut path = Path {
+                nodes: [0; 6],
+                selects: [0; 6],
+                len: 1,
+                jack: pin.jack,
+            };
+            path.nodes[0] = converter.node;
+            let goal = |w: &Widget| w.node == pin.node;
+            let through = |w: &Widget| {
+                w.node == pin.node
+                    || matches!(w.caps.kind, WidgetType::Mixer | WidgetType::Selector)
+            };
+            if search(&find, &mut path, &goal, &through) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Depth first from the path's last node, through widgets `through`
+/// accepts, until one `goal` accepts.
+fn search<'a>(
+    find: &impl Fn(u8) -> Option<&'a Widget>,
+    path: &mut Path,
+    goal: &impl Fn(&Widget) -> bool,
+    through: &impl Fn(&Widget) -> bool,
+) -> bool {
     let len = usize::from(path.len);
     let Some(here) = find(path.nodes[len - 1]) else {
         return false;
     };
-    if here.caps.kind == WidgetType::Output {
+    if len > 1 && goal(here) {
         return true;
     }
     if len == path.nodes.len() {
@@ -364,16 +462,13 @@ fn search<'a>(find: &impl Fn(u8) -> Option<&'a Widget>, path: &mut Path) -> bool
         let Some(widget) = find(next) else {
             continue;
         };
-        if !matches!(
-            widget.caps.kind,
-            WidgetType::Output | WidgetType::Mixer | WidgetType::Selector
-        ) {
+        if !through(widget) {
             continue;
         }
         path.nodes[len] = next;
         path.selects[len - 1] = index as u8;
         path.len += 1;
-        if search(find, path) {
+        if search(find, path, goal, through) {
             return true;
         }
         path.len -= 1;
@@ -446,6 +541,54 @@ impl Ring {
     /// Everything written has been played.
     pub fn drained(&self) -> bool {
         self.played >= self.written
+    }
+}
+
+/// The capture side's view of its cyclic buffer (ADR-0087): how much the
+/// controller has written in and how much was taken out, as running
+/// totals, from its position register. What is not taken in time is
+/// overwritten: the oldest is dropped and counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Capture {
+    pub size: u64,
+    pub captured: u64,
+    pub taken: u64,
+    /// Bytes overwritten before they were taken.
+    pub lost: u64,
+    last_position: u32,
+}
+
+impl Capture {
+    pub fn new(size: u32) -> Self {
+        Self {
+            size: u64::from(size),
+            ..Self::default()
+        }
+    }
+
+    /// The controller's position moved to `position`. Call it at least
+    /// once per buffer length of sound, or whole buffers go unnoticed.
+    pub fn advance(&mut self, position: u32) {
+        let size = self.size as u32;
+        let position = position % size.max(1);
+        let moved = (position + size - self.last_position) % size.max(1);
+        self.last_position = position;
+        self.captured += u64::from(moved);
+        let held = self.captured - self.taken;
+        if held > self.size {
+            self.lost += held - self.size;
+            self.taken = self.captured - self.size;
+        }
+    }
+
+    /// Bytes ready to be taken.
+    pub fn available(&self) -> u64 {
+        self.captured - self.taken
+    }
+
+    /// Where the next byte to take is in the buffer.
+    pub fn read_offset(&self) -> usize {
+        (self.taken % self.size) as usize
     }
 }
 

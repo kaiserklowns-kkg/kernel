@@ -56,6 +56,17 @@ fn answers_are_decoded() {
     assert_eq!(Jack::decode(0x0011_0000), Jack::Speaker);
     assert_eq!(Jack::decode(0x0221_4010), Jack::Headphone);
     assert_eq!(Jack::decode(0x0101_4010), Jack::LineOut);
+    assert_eq!(Jack::decode(0x0181_3020), Jack::LineIn);
+    assert_eq!(Jack::decode(0x01a1_9020), Jack::Mic);
+    assert_eq!(Jack::decode(0x90a7_0130), Jack::Mic);
+    assert_eq!(Jack::Mic.input_preference(), Some(0));
+    assert_eq!(Jack::LineIn.input_preference(), Some(1));
+    assert_eq!(Jack::Speaker.input_preference(), None);
+    assert_eq!(Jack::Mic.preference(), None);
+    assert!(pin_can_input(1 << 5) && !pin_can_input(1 << 4));
+    assert_eq!(pin_input_control(Jack::LineIn, 1 << 12), 0x20);
+    assert_eq!(pin_input_control(Jack::Mic, 1 << 12), 0x24);
+    assert_eq!(pin_input_control(Jack::Mic, 0), 0x20);
     assert!(pin_can_output(0x0000_0010));
     assert_eq!(connection_length(0x0000_0002), (2, false));
     assert_eq!(connections(0x0000_0302), [2, 3, 0, 0]);
@@ -69,7 +80,8 @@ fn widget(node: u8, kind: u32, jack: Jack, inputs: &[u8]) -> Widget {
         node,
         caps: WidgetCaps::decode(kind << 20 | 1 << 8),
         jack,
-        can_output: kind == 4,
+        can_output: kind == 4 && jack.input_preference().is_none(),
+        can_input: kind == 4 && jack.input_preference().is_some(),
         inputs: list,
         input_count: inputs.len() as u8,
     }
@@ -123,6 +135,77 @@ fn no_path_without_an_output_pin_or_a_converter() {
     ];
     assert_eq!(find_output(&only_inputs), None);
     assert_eq!(find_output(&[]), None);
+}
+
+#[test]
+fn the_input_path_goes_from_a_converter_back_to_the_preferred_pin() {
+    // Like QEMU's hda-duplex: an input converter (4) straight from a
+    // line-in pin (5); its output side does not get in the way.
+    let duplex = [
+        widget(2, 0, Jack::Other, &[]),
+        widget(3, 4, Jack::LineOut, &[2]),
+        widget(4, 1, Jack::Other, &[5]),
+        widget(5, 4, Jack::LineIn, &[]),
+    ];
+    let path = find_input(&duplex).unwrap();
+    assert_eq!(path.nodes(), [4, 5]);
+    assert_eq!(path.jack, Jack::LineIn);
+    assert_eq!(find_output(&duplex).unwrap().nodes(), [3, 2]);
+
+    // A laptop-like codec: two input converters, each behind a selector of
+    // the line-in jack (0x1a) and the built-in microphone (0x12). The
+    // microphone is preferred, through the first converter's selector.
+    let laptop = [
+        widget(0x08, 1, Jack::Other, &[0x23]),
+        widget(0x09, 1, Jack::Other, &[0x22]),
+        widget(0x12, 4, Jack::Mic, &[]),
+        widget(0x14, 4, Jack::Speaker, &[]),
+        widget(0x1a, 4, Jack::LineIn, &[]),
+        widget(0x22, 3, Jack::Other, &[0x1a, 0x12]),
+        widget(0x23, 3, Jack::Other, &[0x1a, 0x12]),
+    ];
+    let path = find_input(&laptop).unwrap();
+    assert_eq!(path.nodes(), [0x08, 0x23, 0x12]);
+    assert_eq!(path.selects[1], 1, "the selector's second input");
+    assert_eq!(path.jack, Jack::Mic);
+}
+
+#[test]
+fn no_input_path_without_an_input_pin_or_converter() {
+    // An output-only codec (QEMU's hda-output).
+    let output_only = [
+        widget(2, 0, Jack::Other, &[]),
+        widget(3, 4, Jack::LineOut, &[2]),
+    ];
+    assert_eq!(find_input(&output_only), None);
+    // A microphone no converter reaches.
+    let unreached = [
+        widget(4, 1, Jack::Other, &[6]),
+        widget(5, 4, Jack::Mic, &[]),
+        widget(6, 4, Jack::LineOut, &[]),
+    ];
+    assert_eq!(find_input(&unreached), None);
+    assert_eq!(find_input(&[]), None);
+}
+
+#[test]
+fn the_capture_counts_what_came_in_and_drops_the_oldest() {
+    let mut capture = Capture::new(1000);
+    capture.advance(400);
+    assert_eq!((capture.available(), capture.read_offset()), (400, 0));
+    capture.taken += 300;
+    assert_eq!((capture.available(), capture.read_offset()), (100, 300));
+    // Wrapped: 400 -> 900 -> 200 is 800 more, 900 held: still fits.
+    capture.advance(900);
+    capture.advance(200);
+    assert_eq!(
+        (capture.captured, capture.available(), capture.lost),
+        (1200, 900, 0)
+    );
+    // 500 more: 1400 held in a 1000-byte buffer; the oldest 400 are lost.
+    capture.advance(700);
+    assert_eq!((capture.available(), capture.lost), (1000, 400));
+    assert_eq!(capture.read_offset(), 700);
 }
 
 #[test]

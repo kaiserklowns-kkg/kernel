@@ -1,14 +1,16 @@
-//! `play`: sound through the audio service (ADR-0079).
+//! `play`: sound through the audio service (ADR-0079, ADR-0087).
 //!
 //! ```text
-//! play info                   the sound device and its output
+//! play info                   the sound device, its output and its input
 //! play tone [HZ] [SECONDS]    a sine tone (440 Hz, 1 s)
 //! play wav PATH               a WAV file: 16-bit PCM, mono or stereo, any
 //!                             rate (converted to 48 kHz stereo)
+//! play record PATH [SECONDS]  record from the input (5 s) into a WAV file,
+//!                             48 kHz 16-bit stereo
 //! ```
 //!
-//! Needs `use:audio` (`run play out use:audio -- tone 440 2`); `wav` also
-//! needs `use:fs`.
+//! Needs `use:audio` (`run play out use:audio -- tone 440 2`); `wav` and
+//! `record` also need `use:fs`.
 
 #![no_std]
 #![no_main]
@@ -18,15 +20,15 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use oceans_audio_proto::{FRAME, Output, SAMPLE_RATE};
-use oceans_fs_proto::{Kind, Node};
+use oceans_audio_proto::{CHANNELS, FRAME, Input, Output, SAMPLE_RATE};
+use oceans_fs_proto::{Kind, Node, flags};
 use oceans_rt::{Directory, Out, Start};
 use utils::{EXIT_FAILED, EXIT_USAGE, console, require};
 
 oceans_rt::manifest!(b"grant out\n");
 oceans_rt::entry!(main);
 
-const USAGE: &str = "usage: play info | tone [HZ] [SECONDS] | wav PATH";
+const USAGE: &str = "usage: play info | tone [HZ] [SECONDS] | wav PATH | record PATH [SECONDS]";
 /// The session buffer: a sixth of a second at a time.
 const CHUNK: usize = 32 * 1024;
 /// The largest WAV file read.
@@ -52,6 +54,15 @@ fn main(start: Start) -> i64 {
                     "play: {}",
                     core::str::from_utf8(&text[..len]).unwrap_or("?")
                 );
+                match oceans_audio_proto::input_info(audio, &mut text) {
+                    Ok(len) => {
+                        let input = core::str::from_utf8(&text[..len]).unwrap_or("?");
+                        let _ = writeln!(out, "play: input: {input}");
+                    }
+                    Err(_) => {
+                        let _ = writeln!(out, "play: no input");
+                    }
+                }
             })
         }
         ["tone", rest @ ..] if rest.len() <= 2 => {
@@ -70,6 +81,17 @@ fn main(start: Start) -> i64 {
             }
         }
         ["wav", path] => return wav(&mut out, &directory, audio, path),
+        ["record", path, rest @ ..] if rest.len() <= 1 => {
+            match rest.first().map_or(Some(5), |w| w.parse().ok()) {
+                Some(seconds @ 1..=60) => {
+                    return record(&mut out, &directory, audio, path, seconds);
+                }
+                _ => {
+                    let _ = writeln!(out, "play: 1 to 60 s");
+                    return EXIT_USAGE;
+                }
+            }
+        }
         _ => {
             let _ = writeln!(out, "{USAGE}");
             return EXIT_USAGE;
@@ -239,6 +261,100 @@ fn play_wav(
         done += count;
     }
     output.drain()
+}
+
+/// `record`: what comes in for `seconds`, into a new WAV file at `path`.
+fn record(
+    out: &mut Out,
+    directory: &Directory,
+    audio: oceans_rt::Handle,
+    path: &str,
+    seconds: u32,
+) -> i64 {
+    let fs = match require(out, directory, "play", "use", "fs", "use:fs") {
+        Ok(fs) => Node(fs),
+        Err(code) => return code,
+    };
+    let mut text = [0u8; 160];
+    let input = match oceans_audio_proto::input_info(audio, &mut text) {
+        Ok(len) => core::str::from_utf8(&text[..len]).unwrap_or("?"),
+        Err(_) => {
+            let _ = writeln!(out, "play: this machine has no sound input");
+            return EXIT_FAILED;
+        }
+    };
+    let file = match fs.walk(path, flags::CREATE_FILE | flags::WRITE) {
+        Ok((file, Kind::File)) => file,
+        Ok((other, _)) => {
+            other.close();
+            let _ = writeln!(out, "play: {path}: a directory");
+            return EXIT_FAILED;
+        }
+        Err(error) => {
+            let _ = writeln!(out, "play: {path}: {}", error.message());
+            return EXIT_FAILED;
+        }
+    };
+    let _ = writeln!(out, "play: recording {seconds} s from {input}");
+    let _ = out.flush();
+    let bytes = u64::from(SAMPLE_RATE) * FRAME as u64 * u64::from(seconds);
+    let result = (|| -> Result<u16, &'static str> {
+        file.truncate(0).map_err(|e| e.message())?;
+        file.write_all(0, &wav_header(bytes as u32))
+            .map_err(|e| e.message())?;
+        let input = Input::open(audio, CHUNK).map_err(|e| e.message())?;
+        let (mut done, mut peak) = (0u64, 0u16);
+        while done < bytes {
+            let len = (bytes - done).min(CHUNK as u64) as usize;
+            input.record(0, len as u32).map_err(|e| e.message())?;
+            let samples = &input.buffer()[..len];
+            for &sample in samples.as_chunks::<2>().0 {
+                peak = peak.max(i16::from_le_bytes(sample).unsigned_abs());
+            }
+            file.write_all(WAV_HEADER as u64 + done, samples)
+                .map_err(|e| e.message())?;
+            done += len as u64;
+        }
+        let _ = input.stop();
+        Ok(peak)
+    })();
+    // Closing commits the file (ADR-0022).
+    file.close();
+    match result {
+        Ok(peak) => {
+            let _ = writeln!(
+                out,
+                "play: recorded {bytes} bytes ({seconds} s) into {path}, peak {}%",
+                u32::from(peak) * 100 / 32_768
+            );
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(out, "play: {path}: {why}");
+            EXIT_FAILED
+        }
+    }
+}
+
+const WAV_HEADER: usize = 44;
+
+/// The header of a 48 kHz 16-bit stereo PCM WAV file of `data` bytes.
+fn wav_header(data: u32) -> [u8; WAV_HEADER] {
+    let mut header = [0u8; WAV_HEADER];
+    let mut put = |at: usize, bytes: &[u8]| header[at..at + bytes.len()].copy_from_slice(bytes);
+    put(0, b"RIFF");
+    put(4, &(36 + data).to_le_bytes());
+    put(8, b"WAVEfmt ");
+    put(16, &16u32.to_le_bytes());
+    put(20, &1u16.to_le_bytes());
+    put(22, &(CHANNELS as u16).to_le_bytes());
+    put(24, &SAMPLE_RATE.to_le_bytes());
+    put(28, &(SAMPLE_RATE * FRAME as u32).to_le_bytes());
+    put(32, &(FRAME as u16).to_le_bytes());
+    put(34, &16u16.to_le_bytes());
+    put(36, b"data");
+    put(40, &data.to_le_bytes());
+    header
 }
 
 fn read_file(fs: &Node, path: &str) -> Result<Vec<u8>, &'static str> {

@@ -80,7 +80,8 @@ The same session pattern as disks (ADR-0021).
   - the shell plays a 440 Hz tone;
   - the host finds a tone of about 440 Hz in the file.
 - **Limits:**
-  - **Output only:** no microphone (input streams) yet.
+  - **Output only:** no microphone (input streams) yet (since ADR-0087:
+    input too).
   - **One client at a time:** sessions share one stream, with no mixing.
   - **No volume control or jack detection:** the output is at 0 dB, and a
     plugged-in headphone does not move the sound.

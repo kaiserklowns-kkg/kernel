@@ -409,6 +409,8 @@ const HW_SCRIPT: &[&[u8]] = &[
 ];
 const HW_EXPECT: &[Expect] = &[
     Expect::Contains("ACPI: switching off through PM1 control at io 0x604"),
+    // The microphone codec's input (ADR-0087).
+    Expect::Contains("hda: input: microphone (pin 0x"),
     Expect::Line("Stopping the system, then restarting..."),
     Expect::Contains("init: asked to restart: stopping the system"),
     Expect::Contains("init: disks synced"),
@@ -438,7 +440,9 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("NVMe SSD (any vendor): driver nvme (ADR-0040), attached"),
     Expect::Contains("SATA AHCI controller (any vendor): driver ahci (ADR-0069), attached"),
     Expect::Contains("USB 3 xHCI controller (any vendor): driver xhci (ADR-0032)"),
-    Expect::Contains("Intel High Definition Audio controller (any vendor): driver hda (ADR-0079)"),
+    Expect::Contains(
+        "Intel High Definition Audio controller (any vendor): driver hda (ADR-0079, ADR-0087): output and input",
+    ),
     Expect::Contains("Intel 82574L Ethernet: driver e1000e (ADR-0041), attached"),
     Expect::Contains("Display controller: UEFI GOP framebuffer"),
     Expect::Contains("QEMU USB Keyboard"),
@@ -557,6 +561,10 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
             "-device",
             "hda-output,audiodev=snd0",
         ])
+        // And a microphone, as on most PCs (ADR-0087).
+        .arg("-audiodev")
+        .arg(input_audiodev(true))
+        .args(["-device", "hda-micro,audiodev=snd1,cad=1"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

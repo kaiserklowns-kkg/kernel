@@ -94,5 +94,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0084](0084-text-editor.md) | Text Editor, and the keys that move | Accepted |
 | [0085](0085-switching-off-and-restarting.md) | Switching off and restarting (ABI 16) | Accepted |
 | [0086](0086-stopping-services-gracefully.md) | Stopping services gracefully | Accepted |
+| [0087](0087-audio-input.md) | Sound input: recording from HD Audio | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

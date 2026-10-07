@@ -67,7 +67,7 @@ fn devices_get_the_most_specific_row() {
     for (vendor, device) in [(0x8086, 0x2668), (0x8086, 0xa348)] {
         assert_eq!(
             support(vendor, device, 0x04, 0x03, 0x00),
-            Support::Driver("hda (ADR-0079): output, 48 kHz stereo")
+            Support::Driver("hda (ADR-0079, ADR-0087): output and input, 48 kHz stereo")
         );
     }
     // A SATA controller in RAID mode (class 01.04): not driven.

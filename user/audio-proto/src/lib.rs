@@ -1,5 +1,5 @@
-//! The Oceans audio protocol (ADR-0079), shared by the sound driver
-//! (`hda`) and its clients.
+//! The Oceans audio protocol (ADR-0079, ADR-0087), shared by the sound
+//! driver (`hda`) and its clients.
 //!
 //! As for disks (ADR-0021), samples move through shared memory: a client
 //! opens a **session** by sending a memory object it has mapped and gets
@@ -7,6 +7,13 @@
 //! `PLAY` names bytes of that buffer; the driver copies them into its own
 //! DMA memory, waiting while its buffer is full, so a client that keeps
 //! playing is paced by the sound itself.
+//!
+//! **Recording** (ADR-0087) is the mirror image: a client opens a
+//! **capture session** (`OPEN` with [`open_flags::CAPTURE`], sending a
+//! buffer the driver may write) and `RECORD` fills bytes of it with what
+//! came in, waiting until there is enough. The input runs from the first
+//! `RECORD` until `STOP` or the session closes; one capture session at a
+//! time.
 //!
 //! One format: 48 kHz, 16-bit little-endian, two channels interleaved
 //! ([`FORMAT`]). Clients convert.
@@ -21,7 +28,9 @@ pub mod op {
     /// device and the output ("Intel HDA, codec 1af4:0022, line out").
     pub const INFO: u64 = 1;
     /// On the driver endpoint, carrying one memory object (`READ`, `MAP`,
-    /// `TRANSFER`): → a session handle.
+    /// `TRANSFER`): → a session handle. Data: nothing (playing), or one
+    /// byte of [`open_flags`](super::open_flags) (a capture session's
+    /// memory also needs `WRITE`).
     pub const OPEN: u64 = 2;
     /// On a session: data = `[offset u32][len u32]`, a whole number of
     /// frames (4 bytes). Answered once the bytes are queued.
@@ -29,11 +38,27 @@ pub mod op {
     /// On a session: answered once everything queued has been played; the
     /// output then rests.
     pub const DRAIN: u64 = 4;
-    /// On a session: what is queued is dropped, the output rests now.
+    /// On a session: what is queued is dropped, the output rests now. On
+    /// a capture session: the input stops.
     pub const STOP: u64 = 5;
+    /// On the driver endpoint or a session: → a line of text naming the
+    /// input ("line in (pin 0x5, converter 0x4)"), or `IoError` if there
+    /// is none (ADR-0087).
+    pub const INPUT_INFO: u64 = 6;
+    /// On a capture session: data = `[offset u32][len u32]` (as `PLAY`),
+    /// whole frames. Answered once those bytes of the buffer hold what
+    /// came in next; the input starts if it was not running. Sound that
+    /// came in and was not taken within a second or so is dropped.
+    pub const RECORD: u64 = 7;
 }
 
-/// What `PLAY` takes.
+/// `OPEN` flags.
+pub mod open_flags {
+    /// A capture session (ADR-0087).
+    pub const CAPTURE: u8 = 1;
+}
+
+/// What `PLAY` takes and `RECORD` gives.
 pub const FORMAT: &str = "48 kHz, 16-bit little-endian, stereo";
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u32 = 2;
@@ -55,6 +80,8 @@ pub enum Status {
     IoError = 4,
     /// No more sessions.
     NoSpace = 6,
+    /// Another session is recording.
+    Busy = 7,
 }
 
 impl Status {
@@ -64,6 +91,7 @@ impl Status {
             2 => Self::OutOfRange,
             4 => Self::IoError,
             6 => Self::NoSpace,
+            7 => Self::Busy,
             _ => Self::BadRequest,
         }
     }
@@ -75,11 +103,12 @@ impl Status {
             Self::OutOfRange => "out of range",
             Self::IoError => "no sound device, or it failed",
             Self::NoSpace => "too many sessions",
+            Self::Busy => "another program is recording",
         }
     }
 }
 
-/// A `PLAY` request.
+/// A `PLAY` or `RECORD` request: bytes of the session buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Play {
     pub offset: u32,
@@ -153,6 +182,84 @@ fn request(
 /// The device behind `handle` (driver endpoint or session), in words.
 pub fn info(handle: Handle, out: &mut [u8]) -> Result<usize, AudioError> {
     request(handle, op::INFO, &[], &[], out, &mut []).map(|(len, _)| len)
+}
+
+/// The input behind `handle` (driver endpoint or session), in words.
+pub fn input_info(handle: Handle, out: &mut [u8]) -> Result<usize, AudioError> {
+    request(handle, op::INPUT_INFO, &[], &[], out, &mut []).map(|(len, _)| len)
+}
+
+/// A capture session (ADR-0087): a buffer the driver writes what came in
+/// into.
+pub struct Input {
+    session: Handle,
+    buffer: *mut u8,
+    size: usize,
+}
+
+impl Input {
+    /// Opens a capture session with a `buffer_size`-byte buffer (at most
+    /// [`MAX_BUFFER`]). `Busy` if another session is recording.
+    pub fn open(driver: Handle, buffer_size: usize) -> Result<Self, AudioError> {
+        let ipc = AudioError::Ipc;
+        let memory = oceans_rt::memory_create(buffer_size as u64).map_err(ipc)?;
+        let mapped = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE);
+        let shared = oceans_rt::duplicate(
+            memory,
+            rights::READ | rights::WRITE | rights::MAP | rights::TRANSFER,
+        );
+        let _ = oceans_rt::close(memory);
+        let buffer = mapped.map_err(ipc)?;
+        let fail = |error| {
+            let _ = oceans_rt::memory_unmap(buffer);
+            error
+        };
+        let shared = shared.map_err(ipc).map_err(fail)?;
+        let mut session = [Handle(0); 1];
+        let (_, count) = request(
+            driver,
+            op::OPEN,
+            &[open_flags::CAPTURE],
+            &[shared],
+            &mut [],
+            &mut session,
+        )
+        .map_err(fail)?;
+        if count != 1 {
+            return Err(fail(AudioError::Status(Status::BadRequest)));
+        }
+        Ok(Self {
+            session: session[0],
+            buffer,
+            size: buffer_size,
+        })
+    }
+
+    /// Fills `len` bytes of the buffer from `offset` with what comes in
+    /// next: returns once they are there.
+    pub fn record(&self, offset: u32, len: u32) -> Result<(), AudioError> {
+        let data = Play { offset, len }.encode();
+        request(self.session, op::RECORD, &data, &[], &mut [], &mut []).map(drop)
+    }
+
+    /// The buffer, as the last `record` left it.
+    pub fn buffer(&self) -> &[u8] {
+        // SAFETY: `buffer` maps `size` bytes for as long as `self` lives;
+        // the driver only writes it during our calls.
+        unsafe { core::slice::from_raw_parts(self.buffer, self.size) }
+    }
+
+    /// Stops the input.
+    pub fn stop(&self) -> Result<(), AudioError> {
+        request(self.session, op::STOP, &[], &[], &mut [], &mut []).map(drop)
+    }
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        let _ = oceans_rt::close(self.session);
+        let _ = oceans_rt::memory_unmap(self.buffer);
+    }
 }
 
 /// A session: a buffer shared with the driver.

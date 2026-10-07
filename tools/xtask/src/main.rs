@@ -194,6 +194,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run play out -- tone\r\n",
     b"run play out use:audio -- info\r\n",
     b"run play out use:audio -- tone 440 2\r\n",
+    // Recording (ADR-0087): QEMU's microphone codec, silent in real time.
+    b"run play out use:audio -- record /docs/mic.wav 1\r\n",
+    b"run play out use:audio use:fs -- record /docs/mic.wav 2\r\n",
     // Programs come from /bin and get only the typed authority.
     b"run hello-client log use:echo\r\n",
     b"run /bin/crasher log\r\n",
@@ -700,6 +703,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("play: needs the audio capability"),
     Expect::Contains("play: Intel HD Audio 1.0, codec "),
     Expect::Line("play: a 440 Hz tone for 2 s"),
+    // Recording (ADR-0087).
+    Expect::Contains("hda: input: microphone (pin 0x"),
+    Expect::Contains("play: input: microphone (pin 0x"),
+    Expect::Contains("play: needs the fs capability"),
+    Expect::Contains("play: recording 2 s from microphone (pin 0x"),
+    Expect::Line("play: recorded 384000 bytes (2 s) into /docs/mic.wav, peak 0%"),
     Expect::Contains(" lines of trouble in the kept log:"),
     Expect::Contains("  [WARN ] process: process init/crasher killed: page fault"),
     Expect::Contains("diag: saved "),
@@ -1648,7 +1657,12 @@ fn qemu_command(
     // (DirectSound on Windows, nothing elsewhere; OCEANS_AUDIODEV chooses).
     .arg("-audiodev")
     .arg(audiodev(headless, SMOKE_AUDIO))
-    .args(["-device", "intel-hda", "-device", "hda-output,audiodev=snd0"]);
+    .args(["-device", "intel-hda", "-device", "hda-output,audiodev=snd0"])
+    // A second codec with a microphone (ADR-0087): QEMU's wav backend
+    // cannot record, so headless boots record silence, in real time.
+    .arg("-audiodev")
+    .arg(input_audiodev(headless))
+    .args(["-device", "hda-micro,audiodev=snd1,cad=1"]);
     if let Some(spare) = spare_stick {
         cmd.arg("-drive")
             .arg(format!("if=none,id=fatstick,format=raw,file={spare}"));
@@ -1681,6 +1695,17 @@ fn audiodev(headless: bool, wav: &str) -> String {
         "dsound,id=snd0".to_string()
     } else {
         "none,id=snd0".to_string()
+    }
+}
+
+/// QEMU's audio backend for the microphone codec, `snd1` (ADR-0087):
+/// silence headless (the `none` backend paces it in real time), else the
+/// host's microphone where QEMU can reach it.
+fn input_audiodev(headless: bool) -> String {
+    if !headless && cfg!(windows) {
+        "dsound,id=snd1".to_string()
+    } else {
+        "none,id=snd1".to_string()
     }
 }
 

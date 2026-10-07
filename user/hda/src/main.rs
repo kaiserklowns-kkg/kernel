@@ -1,5 +1,5 @@
 //! hda: the sound driver for Intel High Definition Audio controllers
-//! (ADR-0079).
+//! (ADR-0079, ADR-0087).
 //!
 //! An ordinary service. Its authority is what init grants in
 //! `services.conf`: the first HD Audio controller (`grant =
@@ -18,6 +18,12 @@
 //! - **One stream,** the first output stream, 48 kHz 16-bit stereo, from
 //!   a 64 KiB cyclic buffer (a third of a second). It runs while something
 //!   plays; what has not been written yet is silence.
+//! - **The input** (ADR-0087): of the first codec with one, the best pin
+//!   (a microphone, then line in) reached from an input converter
+//!   (`oceans_hda::find_input`), set up the same way; the first input
+//!   stream, in the same format, into a 256 KiB cyclic buffer (1.4 s). It
+//!   runs from a capture session's first `RECORD` until `STOP` or the
+//!   session closes; one capture session at a time.
 //! - **Polling:** the kernel delivers only MSI-X (ADR-0021) and HD Audio
 //!   controllers offer MSI or pin interrupts; the position register is read
 //!   while a client waits, sleeping between looks.
@@ -31,9 +37,9 @@
 use core::fmt::Write;
 use core::ptr;
 
-use oceans_audio_proto::{Play, Status, op};
+use oceans_audio_proto::{Play, Status, op, open_flags};
 use oceans_hda::{
-    Capabilities, FORMAT_48K_16_STEREO, Jack, Path, Ring, Widget, WidgetCaps, WidgetType,
+    Capabilities, Capture, FORMAT_48K_16_STEREO, Jack, Path, Ring, Widget, WidgetCaps, WidgetType,
     long_verb, param, reg, sd, v, verb,
 };
 use oceans_rt::{Buffer, Directory, Handle, Start, prot};
@@ -50,10 +56,18 @@ const RING_SIZE: usize = 64 * 1024;
 const PAGE: usize = 4096;
 const CORB: usize = 0;
 const BDL: usize = 1024;
+/// The input stream's buffer descriptor list (128-byte aligned).
+const INPUT_BDL: usize = 1152;
 const RIRB: usize = 2048;
+/// The input's cyclic buffer: 1.4 s at 48 kHz stereo, so a client taking
+/// it in pieces has time between them (ADR-0087).
+const CAPTURE_SIZE: usize = 256 * 1024;
 const RING_ENTRIES: u16 = 256;
-/// The stream's number on the link (a tag, 1..=15).
+/// The streams' numbers on the link (tags, 1..=15).
 const STREAM_TAG: u8 = 1;
+const INPUT_TAG: u8 = 2;
+/// An input whose position does not move for this long is stuck.
+const STALL_MS: u64 = 1000;
 const RESET_TIMEOUT_MS: u64 = 100;
 const COMMAND_TIMEOUT_MS: u64 = 50;
 /// Between looks at the position while a client waits.
@@ -283,8 +297,10 @@ impl Link {
     }
 }
 
-/// The sound output: the controller, the chosen path, the running stream.
+/// The sound output (and input): the controller, the chosen paths, the
+/// streams.
 struct Sound {
+    log: Handle,
     regs: Registers,
     /// The output stream descriptor's registers.
     stream: usize,
@@ -292,6 +308,19 @@ struct Sound {
     page: Dma,
     ring: Ring,
     running: bool,
+    description: Buffer<120>,
+    input: Option<Input>,
+}
+
+/// The input stream (ADR-0087).
+struct Input {
+    /// Its stream descriptor's registers.
+    stream: usize,
+    memory: Dma,
+    capture: Capture,
+    running: bool,
+    /// The capture session's badge.
+    owner: Option<u64>,
     description: Buffer<120>,
 }
 
@@ -340,18 +369,28 @@ impl Sound {
         }
         let mut link = Link::start(regs, page)?;
 
-        // The first codec with an audio function and an output path.
+        // The first codec with an audio function and an output path, and
+        // the first with an input path (often the same).
         let mut chosen = None;
+        let mut input_path = None;
         for codec in (0..15u8).filter(|c| codecs & (1 << c) != 0) {
-            if let Some(found) = configure(&mut link, codec) {
-                chosen = Some(found);
-                break;
+            let Some(found) = read_codec(&mut link, codec) else {
+                continue;
+            };
+            if chosen.is_none()
+                && let Some(path) = configure_output(&mut link, &found)
+            {
+                chosen = Some((codec, path, found.vendor));
+            }
+            if input_path.is_none()
+                && let Some(path) = configure_input(&mut link, &found)
+            {
+                input_path = Some((codec, path, found.vendor));
             }
         }
         let Some((codec, path, vendor)) = chosen else {
             return Err("no codec with an output (speaker, line out, headphones)");
         };
-        let _ = log;
 
         // The converter takes the stream.
         let converter = path.converter();
@@ -370,7 +409,38 @@ impl Sound {
             path.pin(),
             converter
         );
+        let input = match (caps.first_input(), input_path) {
+            (Some(at), Some((codec, path, vendor))) if at + reg::SD_STRIDE <= regs.size => {
+                let converter = path.nodes()[0];
+                link.set_long(codec, converter, v::SET_FORMAT, FORMAT_48K_16_STEREO);
+                link.set(codec, converter, v::SET_STREAM_CHANNEL, INPUT_TAG << 4);
+                let memory = Dma::new(device, CAPTURE_SIZE)?;
+                if !reachable(&memory) {
+                    return Err("DMA memory lies beyond the controller's 32-bit addresses");
+                }
+                let mut description = Buffer::<120>::new();
+                let _ = write!(
+                    description,
+                    "{} (pin {:#x}, converter {:#x}), codec {:04x}:{:04x}, 48 kHz stereo",
+                    path.jack.name(),
+                    path.nodes()[usize::from(path.len) - 1],
+                    converter,
+                    vendor >> 16,
+                    vendor & 0xffff
+                );
+                Some(Input {
+                    stream: at,
+                    memory,
+                    capture: Capture::new(CAPTURE_SIZE as u32),
+                    running: false,
+                    owner: None,
+                    description,
+                })
+            }
+            _ => None,
+        };
         let mut sound = Self {
+            log,
             regs,
             stream,
             ring_memory,
@@ -378,8 +448,16 @@ impl Sound {
             ring: Ring::new(RING_SIZE as u32),
             running: false,
             description,
+            input,
         };
         sound.program_stream()?;
+        match &sound.input {
+            Some(input) => say(
+                log,
+                format_args!("hda: input: {}", input.description.as_str()),
+            ),
+            None => say(log, format_args!("hda: no input (microphone, line in)")),
+        }
         Ok(sound)
     }
 
@@ -394,32 +472,14 @@ impl Sound {
     /// Resets the stream and sets it up: the buffer descriptor list (two
     /// halves of the cyclic buffer), the format, the tag. Not running.
     fn program_stream(&mut self) -> Result<(), &'static str> {
-        let control = self.stream + sd::CTL;
-        self.regs.write32(control, sd::CTL_RESET);
-        if !wait_for(RESET_TIMEOUT_MS, || {
-            self.regs.read32(control) & sd::CTL_RESET != 0
-        }) {
-            return Err("the output stream does not reset");
-        }
-        self.regs.write32(control, 0);
-        if !wait_for(RESET_TIMEOUT_MS, || {
-            self.regs.read32(control) & sd::CTL_RESET == 0
-        }) {
-            return Err("the output stream does not leave reset");
-        }
-        let half = (RING_SIZE / 2) as u32;
-        for (i, offset) in [0u64, u64::from(half)].into_iter().enumerate() {
-            let entry = oceans_hda::bdl_entry(self.ring_memory.device + offset, half, false);
-            self.page.copy_in(BDL + i * 16, &entry);
-        }
-        let bdl = self.page.device + BDL as u64;
-        self.sd_write32(sd::BDPL, bdl as u32);
-        self.sd_write32(sd::BDPU, (bdl >> 32) as u32);
-        self.sd_write32(sd::CBL, RING_SIZE as u32);
-        self.regs.write16(self.stream + sd::LVI, 1);
-        self.regs
-            .write16(self.stream + sd::FMT, FORMAT_48K_16_STEREO);
-        self.sd_write32(sd::CTL, oceans_hda::stream_control(STREAM_TAG));
+        program_descriptor(
+            self.regs,
+            &self.page,
+            self.stream,
+            BDL,
+            &self.ring_memory,
+            STREAM_TAG,
+        )?;
         self.ring = Ring::new(RING_SIZE as u32);
         self.silence();
         self.running = false;
@@ -509,11 +569,154 @@ impl Sound {
         }
         self.rest()
     }
+
+    /// `RECORD`: fills `out` with what comes in next, starting the input
+    /// if it is not running (ADR-0087).
+    fn record(&mut self, out: &mut [u8]) -> Status {
+        let regs = self.regs;
+        let Some(input) = self.input.as_mut() else {
+            return Status::IoError;
+        };
+        if !input.running {
+            if input.program(regs, &self.page).is_err() {
+                return Status::IoError;
+            }
+            let control = regs.read32(input.stream + sd::CTL);
+            regs.write32(input.stream + sd::CTL, control | sd::CTL_RUN);
+            input.running = true;
+        }
+        let mut done = 0;
+        let mut progress = oceans_rt::clock_ms();
+        while done < out.len() {
+            input.capture.advance(regs.read32(input.stream + sd::LPIB));
+            let available = input.capture.available() as usize;
+            if available == 0 {
+                if oceans_rt::clock_ms() - progress > STALL_MS {
+                    // The position stopped moving: the device is stuck.
+                    say(self.log, format_args!("hda: the input stopped moving"));
+                    input.stop(regs, &self.page);
+                    return Status::IoError;
+                }
+                oceans_rt::sleep_ms(POLL_MS);
+                continue;
+            }
+            progress = oceans_rt::clock_ms();
+            let at = input.capture.read_offset();
+            let take = available.min(out.len() - done).min(CAPTURE_SIZE - at);
+            input.memory.copy_out(at, &mut out[done..done + take]);
+            input.capture.taken += take as u64;
+            done += take;
+        }
+        Status::Ok
+    }
+
+    /// The capture session `badge` stopped or went away: the input stops.
+    fn stop_input(&mut self, badge: u64) -> Status {
+        let (regs, log) = (self.regs, self.log);
+        match self.input.as_mut() {
+            Some(input) if input.owner == Some(badge) => {
+                if input.capture.lost > 0 {
+                    say(
+                        log,
+                        format_args!(
+                            "hda: {} bytes of input were not taken in time and dropped",
+                            input.capture.lost
+                        ),
+                    );
+                }
+                input.owner = None;
+                input.stop(regs, &self.page)
+            }
+            _ => Status::BadRequest,
+        }
+    }
 }
 
-/// Finds codec `codec`'s audio function and its best output path, and sets
-/// the path up. Returns the codec, the path and its vendor/device id.
-fn configure(link: &mut Link, codec: u8) -> Option<(u8, Path, u32)> {
+impl Input {
+    /// Resets the input stream and sets it up, not running; the count
+    /// starts again.
+    fn program(&mut self, regs: Registers, page: &Dma) -> Result<(), &'static str> {
+        program_descriptor(regs, page, self.stream, INPUT_BDL, &self.memory, INPUT_TAG)?;
+        self.capture = Capture::new(CAPTURE_SIZE as u32);
+        self.running = false;
+        Ok(())
+    }
+
+    fn stop(&mut self, regs: Registers, page: &Dma) -> Status {
+        if self.running {
+            let control = regs.read32(self.stream + sd::CTL);
+            regs.write32(self.stream + sd::CTL, control & !sd::CTL_RUN);
+            wait_for(RESET_TIMEOUT_MS, || {
+                regs.read32(self.stream + sd::CTL) & sd::CTL_RUN == 0
+            });
+        }
+        match self.program(regs, page) {
+            Ok(()) => Status::Ok,
+            Err(_) => Status::IoError,
+        }
+    }
+}
+
+/// Resets the stream descriptor at `at` and sets it up, not running: a
+/// buffer descriptor list (at `bdl` in the command page) of two halves of
+/// `memory`, the format, the tag.
+fn program_descriptor(
+    regs: Registers,
+    page: &Dma,
+    at: usize,
+    bdl: usize,
+    memory: &Dma,
+    tag: u8,
+) -> Result<(), &'static str> {
+    let control = at + sd::CTL;
+    regs.write32(control, sd::CTL_RESET);
+    if !wait_for(RESET_TIMEOUT_MS, || {
+        regs.read32(control) & sd::CTL_RESET != 0
+    }) {
+        return Err("a stream does not reset");
+    }
+    regs.write32(control, 0);
+    if !wait_for(RESET_TIMEOUT_MS, || {
+        regs.read32(control) & sd::CTL_RESET == 0
+    }) {
+        return Err("a stream does not leave reset");
+    }
+    let half = (memory.len / 2) as u32;
+    for (i, offset) in [0u64, u64::from(half)].into_iter().enumerate() {
+        let entry = oceans_hda::bdl_entry(memory.device + offset, half, false);
+        page.copy_in(bdl + i * 16, &entry);
+    }
+    let list = page.device + bdl as u64;
+    regs.write32(at + sd::BDPL, list as u32);
+    regs.write32(at + sd::BDPU, (list >> 32) as u32);
+    regs.write32(at + sd::CBL, 2 * half);
+    regs.write16(at + sd::LVI, 1);
+    regs.write16(at + sd::FMT, FORMAT_48K_16_STEREO);
+    regs.write32(at + sd::CTL, oceans_hda::stream_control(tag));
+    Ok(())
+}
+
+/// A codec's audio function and its widgets.
+struct Codec {
+    codec: u8,
+    function: u8,
+    vendor: u32,
+    widgets: [Widget; MAX_WIDGETS],
+    count: usize,
+}
+
+impl Codec {
+    fn widgets(&self) -> &[Widget] {
+        &self.widgets[..self.count]
+    }
+
+    fn widget(&self, node: u8) -> Option<&Widget> {
+        self.widgets().iter().find(|w| w.node == node)
+    }
+}
+
+/// Finds codec `codec`'s audio function (powered on) and reads its widgets.
+fn read_codec(link: &mut Link, codec: u8) -> Option<Codec> {
     let vendor = link.get(codec, 0, param::VENDOR);
     let groups = oceans_hda::node_range(link.get(codec, 0, param::NODE_COUNT));
     let function = groups
@@ -525,6 +728,7 @@ fn configure(link: &mut Link, codec: u8) -> Option<(u8, Path, u32)> {
         caps: WidgetCaps::decode(0),
         jack: Jack::None,
         can_output: false,
+        can_input: false,
         inputs: [0; 8],
         input_count: 0,
     }; MAX_WIDGETS];
@@ -539,6 +743,7 @@ fn configure(link: &mut Link, codec: u8) -> Option<(u8, Path, u32)> {
             caps,
             jack: Jack::None,
             can_output: false,
+            can_input: false,
             inputs: [0; 8],
             input_count: 0,
         };
@@ -547,7 +752,9 @@ fn configure(link: &mut Link, codec: u8) -> Option<(u8, Path, u32)> {
                 link.command(verb(codec, node, v::GET_CONFIG_DEFAULT, 0))
                     .unwrap_or(0),
             );
-            widget.can_output = oceans_hda::pin_can_output(link.get(codec, node, param::PIN_CAPS));
+            let pin_caps = link.get(codec, node, param::PIN_CAPS);
+            widget.can_output = oceans_hda::pin_can_output(pin_caps);
+            widget.can_input = oceans_hda::pin_can_input(pin_caps);
         }
         if caps.connections {
             let (length, long) =
@@ -573,7 +780,28 @@ fn configure(link: &mut Link, codec: u8) -> Option<(u8, Path, u32)> {
         widgets[count] = widget;
         count += 1;
     }
-    let widgets = &widgets[..count];
+    Some(Codec {
+        codec,
+        function,
+        vendor,
+        widgets,
+        count,
+    })
+}
+
+/// The 0 dB gain step of `node`'s amp (`caps`: which amp's parameter),
+/// or the function group's when the node has none of its own.
+fn zero_db(link: &mut Link, codec: &Codec, node: u8, caps: u8) -> u8 {
+    match oceans_hda::amp_zero_db(link.get(codec.codec, node, caps)) {
+        0 => oceans_hda::amp_zero_db(link.get(codec.codec, codec.function, caps)),
+        gain => gain,
+    }
+}
+
+/// The codec's best output path, set up: every widget powered, routed and
+/// unmuted at 0 dB, the pin driving its jack.
+fn configure_output(link: &mut Link, found: &Codec) -> Option<Path> {
+    let (codec, widgets) = (found.codec, found.widgets());
     let path = oceans_hda::find_output(widgets)?;
 
     // Power, route and unmute every widget on the path.
@@ -582,10 +810,7 @@ fn configure(link: &mut Link, codec: u8) -> Option<(u8, Path, u32)> {
         let Some(widget) = widgets.iter().find(|w| w.node == node) else {
             continue;
         };
-        let gain = match oceans_hda::amp_zero_db(link.get(codec, node, param::OUTPUT_AMP_CAPS)) {
-            0 => oceans_hda::amp_zero_db(link.get(codec, function, param::OUTPUT_AMP_CAPS)),
-            gain => gain,
-        };
+        let gain = zero_db(link, found, node, param::OUTPUT_AMP_CAPS);
         if widget.caps.output_amp {
             link.set_long(
                 codec,
@@ -623,7 +848,69 @@ fn configure(link: &mut Link, codec: u8) -> Option<(u8, Path, u32)> {
     );
     // An external amplifier, where the pin controls one.
     link.set(codec, pin, v::SET_EAPD, 0x02);
-    Some((codec, path, vendor))
+    Some(path)
+}
+
+/// The codec's best input path (ADR-0087), set up: every widget powered,
+/// routed, its input amps unmuted at 0 dB, the pin taking its input (a
+/// microphone with its bias voltage).
+fn configure_input(link: &mut Link, found: &Codec) -> Option<Path> {
+    let codec = found.codec;
+    let path = oceans_hda::find_input(found.widgets())?;
+    let nodes = path.nodes();
+    for (i, &node) in nodes.iter().enumerate() {
+        link.set(codec, node, v::SET_POWER_STATE, 0);
+        let Some(widget) = found.widget(node) else {
+            continue;
+        };
+        let gain = zero_db(link, found, node, param::INPUT_AMP_CAPS);
+        if i + 1 < nodes.len() {
+            // Where the sound comes from: the next node, input `select`.
+            let select = path.selects[i];
+            if widget.caps.input_amp {
+                let index = if widget.caps.kind == WidgetType::Mixer {
+                    select
+                } else {
+                    0
+                };
+                link.set_long(
+                    codec,
+                    node,
+                    v::SET_AMP,
+                    oceans_hda::amp_payload(false, index, gain),
+                );
+            }
+            if widget.caps.kind != WidgetType::Mixer && widget.input_count > 1 {
+                link.set(codec, node, v::SET_CONNECTION_SELECT, select);
+            }
+        } else if widget.caps.input_amp {
+            // The pin's own amp (a microphone boost): 0 dB.
+            link.set_long(
+                codec,
+                node,
+                v::SET_AMP,
+                oceans_hda::amp_payload(false, 0, gain),
+            );
+        }
+        if widget.caps.output_amp && i > 0 {
+            let gain = zero_db(link, found, node, param::OUTPUT_AMP_CAPS);
+            link.set_long(
+                codec,
+                node,
+                v::SET_AMP,
+                oceans_hda::amp_payload(true, 0, gain),
+            );
+        }
+    }
+    let pin = nodes[nodes.len() - 1];
+    let pin_caps = link.get(codec, pin, param::PIN_CAPS);
+    link.set(
+        codec,
+        pin,
+        v::SET_PIN_CONTROL,
+        oceans_hda::pin_input_control(path.jack, pin_caps),
+    );
+    Some(path)
 }
 
 /// Serves the audio protocol until the endpoint fails; without a sound
@@ -650,7 +937,12 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
             if let Some(index) = find(got.badge)
                 && let Some(session) = sessions[index].take()
             {
-                let _ = oceans_rt::memory_unmap(session.buffer.cast_mut());
+                if session.capture
+                    && let Some(sound) = sound.as_mut()
+                {
+                    sound.stop_input(session.badge);
+                }
+                let _ = oceans_rt::memory_unmap(session.buffer);
             }
             continue;
         }
@@ -664,17 +956,62 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
                 let _ = text.write_str(sound.description.as_str());
                 Status::Ok
             }
-            (Some(_), op::OPEN, None) if got.badge == 0 && received.len() == 1 => {
-                match open_session(server, received[0], next_badge, &mut sessions) {
-                    Ok(handle) => {
-                        next_badge += 1;
-                        reply_handle = Some(handle);
-                        Status::Ok
+            (Some(sound), op::INPUT_INFO, _) => match &sound.input {
+                Some(input) => {
+                    let _ = text.write_str(input.description.as_str());
+                    Status::Ok
+                }
+                None => Status::IoError,
+            },
+            (Some(sound), op::OPEN, None) if got.badge == 0 && received.len() == 1 => {
+                let capture = match &data[..got.data_len] {
+                    [] => Some(false),
+                    [open_flags::CAPTURE] => Some(true),
+                    _ => None,
+                };
+                let input = sound.input.as_mut();
+                match (capture, input) {
+                    (None, _) => Status::BadRequest,
+                    (Some(true), None) => Status::IoError,
+                    (Some(true), Some(input)) if input.owner.is_some() => Status::Busy,
+                    (Some(capture), input) => {
+                        match open_session(server, received[0], next_badge, capture, &mut sessions)
+                        {
+                            Ok(handle) => {
+                                if capture && let Some(input) = input {
+                                    input.owner = Some(next_badge);
+                                }
+                                next_badge += 1;
+                                reply_handle = Some(handle);
+                                Status::Ok
+                            }
+                            Err(status) => status,
+                        }
                     }
-                    Err(status) => status,
                 }
             }
-            (Some(sound), op::PLAY, Some(session)) => {
+            (Some(sound), op::RECORD, Some(session)) if session.capture => {
+                match Play::decode(&data[..got.data_len]).and_then(|p| p.checked(session.size)) {
+                    Some(range) => {
+                        // SAFETY: `range` lies inside the session's buffer,
+                        // mapped writable for as long as the session is
+                        // open; the client does not touch it during the
+                        // call.
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts_mut(
+                                session.buffer.add(range.start),
+                                range.len(),
+                            )
+                        };
+                        sound.record(bytes)
+                    }
+                    None => Status::OutOfRange,
+                }
+            }
+            (Some(sound), op::STOP, Some(session)) if session.capture => {
+                sound.stop_input(session.badge)
+            }
+            (Some(sound), op::PLAY, Some(session)) if !session.capture => {
                 match Play::decode(&data[..got.data_len]).and_then(|p| p.checked(session.size)) {
                     Some(range) => {
                         // SAFETY: `range` lies inside the session's buffer,
@@ -691,7 +1028,7 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
                     None => Status::OutOfRange,
                 }
             }
-            (Some(sound), op::DRAIN, Some(_)) => sound.drain(),
+            (Some(sound), op::DRAIN, Some(session)) if !session.capture => sound.drain(),
             (Some(sound), op::STOP, Some(_)) => sound.rest(),
             _ => Status::BadRequest,
         };
@@ -716,15 +1053,19 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
 #[derive(Clone, Copy)]
 struct Session {
     badge: u64,
-    buffer: *const u8,
+    buffer: *mut u8,
     size: usize,
+    /// A capture session (ADR-0087): its buffer is mapped writable.
+    capture: bool,
 }
 
-/// Maps a client's buffer and mints its session handle.
+/// Maps a client's buffer (writable for a capture session) and mints its
+/// session handle.
 fn open_session(
     server: Handle,
     memory: Handle,
     badge: u64,
+    capture: bool,
     sessions: &mut [Option<Session>; MAX_SESSIONS],
 ) -> Result<Handle, Status> {
     let slot = sessions
@@ -735,15 +1076,21 @@ fn open_session(
     if size == 0 || size > oceans_audio_proto::MAX_BUFFER {
         return Err(Status::BadRequest);
     }
-    let buffer = oceans_rt::memory_map(memory, 0, prot::READ).map_err(|_| Status::BadRequest)?;
+    let access = if capture {
+        prot::READ | prot::WRITE
+    } else {
+        prot::READ
+    };
+    let buffer = oceans_rt::memory_map(memory, 0, access).map_err(|_| Status::BadRequest)?;
     // The mapping keeps the memory; the handle is not needed.
     let _ = oceans_rt::close(memory);
     match oceans_rt::endpoint_mint(server, badge) {
         Ok(handle) => {
             sessions[slot] = Some(Session {
                 badge,
-                buffer: buffer.cast_const(),
+                buffer,
                 size,
+                capture,
             });
             Ok(handle)
         }
