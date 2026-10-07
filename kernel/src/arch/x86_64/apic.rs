@@ -1,8 +1,10 @@
-//! Local APIC: interrupt acknowledgement and the per-CPU timer.
+//! Local APIC: interrupt acknowledgement, the per-CPU timer and
+//! inter-processor interrupts (ADR-0088).
 //!
-//! xAPIC (MMIO) mode, which every Tier 1 CPU supports; x2APIC comes with
-//! SMP. The timer is calibrated once against the PIT, which is present on
-//! all PC-compatible platforms (and only used for this one measurement).
+//! xAPIC (MMIO) mode, which every Tier 1 CPU supports. Every CPU sees its
+//! own local APIC at the same physical address, so one mapping serves all.
+//! The timer is calibrated once against the PIT, which is present on all
+//! PC-compatible platforms (and only used for this one measurement).
 
 use ::x86_64::instructions::port::Port;
 use ::x86_64::registers::model_specific::Msr;
@@ -17,8 +19,11 @@ const APIC_BASE_ENABLE: u64 = 1 << 11;
 const APIC_BASE_ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
 // Register offsets.
+const ID: usize = 0x020;
 const TASK_PRIORITY: usize = 0x080;
 const EOI: usize = 0x0b0;
+const ICR_LOW: usize = 0x300;
+const ICR_HIGH: usize = 0x310;
 const SPURIOUS: usize = 0x0f0;
 const LVT_TIMER: usize = 0x320;
 const TIMER_INITIAL: usize = 0x380;
@@ -29,6 +34,8 @@ const SPURIOUS_ENABLE: u32 = 1 << 8;
 const LVT_MASKED: u32 = 1 << 16;
 const LVT_PERIODIC: u32 = 1 << 17;
 const DIVIDE_BY_16: u32 = 0b0011;
+/// Interrupt command: a fixed interrupt, still being delivered.
+const ICR_DELIVERY_PENDING: u32 = 1 << 12;
 
 const PIT_FREQUENCY: u32 = 1_193_182;
 const CALIBRATION_MS: u32 = 10;
@@ -49,8 +56,9 @@ fn read(offset: usize) -> u32 {
     unsafe { ((base + offset) as *const u32).read_volatile() }
 }
 
-/// Enables the local APIC with all LVT sources masked except as configured
-/// later.
+/// Enables this CPU's local APIC (mapping the registers the first time),
+/// with all LVT sources masked except as configured later. Every CPU runs
+/// it once.
 pub fn init() {
     let mut msr = Msr::new(IA32_APIC_BASE);
     // SAFETY: IA32_APIC_BASE exists on every x86_64 CPU; setting the enable
@@ -59,9 +67,11 @@ pub fn init() {
     unsafe { msr.write(value | APIC_BASE_ENABLE) };
     let phys = value & APIC_BASE_ADDRESS_MASK;
 
-    let virt = paging::map_mmio(phys, 4096)
-        .unwrap_or_else(|err| panic!("cannot map the local APIC at {phys:#x}: {err:?}"));
-    BASE.call_once(|| virt as usize);
+    BASE.call_once(|| {
+        paging::map_mmio(phys, 4096)
+            .unwrap_or_else(|err| panic!("cannot map the local APIC at {phys:#x}: {err:?}"))
+            as usize
+    });
 
     write(TASK_PRIORITY, 0);
     write(SPURIOUS, SPURIOUS_ENABLE | u32::from(VECTOR_SPURIOUS));
@@ -69,9 +79,28 @@ pub fn init() {
     klog::debug!("local APIC at {phys:#x} enabled");
 }
 
+/// Whether [`init`] has run on some CPU (the registers are mapped).
+pub fn ready() -> bool {
+    BASE.get().is_some()
+}
+
 /// This CPU's local APIC ID (I/O APIC routing destination).
 pub fn id() -> u8 {
-    (read(0x020) >> 24) as u8
+    (read(ID) >> 24) as u8
+}
+
+/// Sends `vector` to the CPU whose local APIC ID is `destination`, and
+/// waits until the local APIC has taken it (not until it is handled).
+pub fn send_ipi(destination: u8, vector: u8) {
+    for _ in 0..1_000_000 {
+        if read(ICR_LOW) & ICR_DELIVERY_PENDING == 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    // Writing the low half sends it: the destination goes first.
+    write(ICR_HIGH, u32::from(destination) << 24);
+    write(ICR_LOW, u32::from(vector));
 }
 
 /// Signals the end of the current interrupt to the local APIC.

@@ -49,9 +49,22 @@ pub fn features() -> Features {
     }
 }
 
-/// Turns on every memory protection the CPU supports. Must run before any
-/// page table with NX bits is activated.
+/// Turns on every memory protection the CPU supports, and says which. Must
+/// run before any page table with NX bits is activated.
 pub fn enable_protections(features: &Features) {
+    set_protections(features);
+    klog::info!(
+        "protections: NX WP{}{}{}{}",
+        if features.global_pages { " PGE" } else { "" },
+        if features.smep { " SMEP" } else { "" },
+        if features.smap { " SMAP" } else { "" },
+        if features.umip { " UMIP" } else { "" },
+    );
+}
+
+/// [`enable_protections`] on another CPU (ADR-0088), silently: the boot
+/// CPU said which.
+pub fn set_protections(features: &Features) {
     if !features.no_execute {
         panic!("CPU lacks the NX bit, required by Oceans (ADR-0005)");
     }
@@ -77,11 +90,4 @@ pub fn enable_protections(features: &Features) {
             }
         });
     }
-    klog::info!(
-        "protections: NX WP{}{}{}{}",
-        if features.global_pages { " PGE" } else { "" },
-        if features.smep { " SMEP" } else { "" },
-        if features.smap { " SMAP" } else { "" },
-        if features.umip { " UMIP" } else { "" },
-    );
 }

@@ -27,6 +27,8 @@ pub const VECTOR_TIMER: u8 = 48;
 pub const VECTOR_SERIAL: u8 = 49;
 /// PS/2 keyboard (ISA IRQ 1), routed by the I/O APIC (ADR-0029).
 pub const VECTOR_KEYBOARD: u8 = 50;
+/// Inter-processor interrupts (ADR-0088).
+pub const VECTOR_IPI: u8 = 51;
 /// Local APIC spurious interrupt; must not be acknowledged.
 pub const VECTOR_SPURIOUS: u8 = 255;
 /// Vectors for device interrupts (MSI-X), allocated to drivers (ADR-0021).
@@ -64,6 +66,14 @@ pub fn set_after_device_interrupt(hook: fn()) {
 }
 
 /// Called on every timer interrupt, after EOI, with interrupts disabled.
+static IPI_HANDLER: Once<fn()> = Once::new();
+
+/// Runs on the receiving CPU for every inter-processor interrupt, after it
+/// was acknowledged.
+pub fn set_ipi_handler(handler: fn()) {
+    IPI_HANDLER.call_once(|| handler);
+}
+
 static TIMER_HANDLER: Once<fn()> = Once::new();
 
 pub fn set_timer_handler(handler: fn()) {
@@ -168,6 +178,10 @@ global_asm!(
     "push 0",
     "push 50",
     "jmp {common}",
+    "oceans_irq_stub_ipi:",
+    "push 0",
+    "push 51",
+    "jmp {common}",
     ".popsection",
     ".pushsection .rodata.oceans_exceptions, \"a\", @progbits",
     ".balign 8",
@@ -178,6 +192,7 @@ global_asm!(
     ".quad oceans_irq_stub_spurious",
     ".quad oceans_irq_stub_serial",
     ".quad oceans_irq_stub_keyboard",
+    ".quad oceans_irq_stub_ipi",
     ".popsection",
     common = sym exception_common,
 );
@@ -222,7 +237,7 @@ unsafe extern "C" {
 
 unsafe extern "C" {
     #[link_name = "oceans_irq_stubs"]
-    static IRQ_STUBS: [u64; 4];
+    static IRQ_STUBS: [u64; 5];
 }
 
 /// Saves registers, calls the dispatcher with a pointer to the frame,
@@ -309,6 +324,12 @@ extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
             super::apic::end_of_interrupt();
             if let Some(hook) = AFTER_DEVICE_INTERRUPT.get() {
                 hook();
+            }
+        }
+        v if v == u64::from(VECTOR_IPI) => {
+            super::apic::end_of_interrupt();
+            if let Some(handler) = IPI_HANDLER.get() {
+                handler();
             }
         }
         v if v == u64::from(VECTOR_SPURIOUS) => {}
@@ -446,9 +467,17 @@ pub fn init() {
             let ist = (vector == VECTOR_DOUBLE_FAULT).then_some(DOUBLE_FAULT_IST_INDEX);
             *gate = Gate::interrupt(handler, selector, ist);
         }
-        // SAFETY: the IRQ stub table above has exactly four entries.
-        let (timer, spurious, serial, keyboard) =
-            unsafe { (IRQ_STUBS[0], IRQ_STUBS[1], IRQ_STUBS[2], IRQ_STUBS[3]) };
+        // SAFETY: the IRQ stub table above has exactly five entries.
+        let (timer, spurious, serial, keyboard, ipi) = unsafe {
+            (
+                IRQ_STUBS[0],
+                IRQ_STUBS[1],
+                IRQ_STUBS[2],
+                IRQ_STUBS[3],
+                IRQ_STUBS[4],
+            )
+        };
+        gates[usize::from(VECTOR_IPI)] = Gate::interrupt(ipi, selector, None);
         gates[usize::from(VECTOR_SERIAL)] = Gate::interrupt(serial, selector, None);
         gates[usize::from(VECTOR_KEYBOARD)] = Gate::interrupt(keyboard, selector, None);
         gates[usize::from(VECTOR_TIMER)] = Gate::interrupt(timer, selector, None);
@@ -466,7 +495,16 @@ pub fn init() {
         // and is reported as fatal.
         Idt(gates)
     });
+    load_table(idt);
+    klog::debug!("IDT loaded with {EXCEPTION_COUNT} exception handlers");
+}
 
+/// Loads the IDT [`init`] built on this CPU (another CPU, ADR-0088).
+pub fn load() {
+    load_table(IDT.get().expect("the boot CPU builds the IDT first"));
+}
+
+fn load_table(idt: &'static Idt) {
     let pointer = DescriptorTablePointer {
         limit: (size_of::<Idt>() - 1) as u16,
         base: VirtAddr::from_ptr(idt),
@@ -474,5 +512,4 @@ pub fn init() {
     // SAFETY: `idt` is 'static and immutable after initialisation, and every
     // present gate points at a stub that preserves state and returns via iretq.
     unsafe { lidt(&pointer) };
-    klog::debug!("IDT loaded with {EXCEPTION_COUNT} exception handlers");
 }

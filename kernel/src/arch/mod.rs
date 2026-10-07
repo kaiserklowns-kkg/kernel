@@ -6,14 +6,15 @@ mod x86_64;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::{
-    AddressSpace, DEVICE_VECTORS, EmulatorExit, NAME, RtcReading, SyscallFrame, TrapFrame,
-    activate_root, active_root, breakpoint, console_write, console_write_bytes, cpu_features,
-    cycles, disable_interrupts, early_init, enable_console_input, enable_interrupts,
-    enable_keyboard, enable_protections, enter_user, exception_name, exit_emulator, fault_address,
-    halt_forever, hardware_random, init, init_syscalls, msi_message, prepare_stack, rtc_now,
-    set_after_device_interrupt, set_device_handler, set_kernel_stack, set_user_fault_handler,
-    set_user_return_hook, start_timer, switch_context, switch_stack, wait_for_interrupt,
-    without_interrupts,
+    AddressSpace, DEVICE_VECTORS, EmulatorExit, MAX_CPUS, NAME, RtcReading, SyscallFrame,
+    TrapFrame, activate_root, active_root, breakpoint, console_write, console_write_bytes,
+    cpu_features, cpu_index, cycles, disable_interrupts, early_init, enable_console_input,
+    enable_interrupts, enable_keyboard, enable_protections, enter_user, exception_name,
+    exit_emulator, fault_address, halt_forever, hardware_random, init, init_secondary,
+    init_syscalls, msi_message, prepare_stack, register_cpu, rtc_now, send_ipi,
+    set_after_device_interrupt, set_cpu_protections, set_device_handler, set_ipi_handler,
+    set_kernel_stack, set_user_fault_handler, set_user_return_hook, start_timer, switch_context,
+    switch_stack, wait_for_interrupt, without_interrupts,
 };
 
 /// Switching off and restarting (ADR-0085).

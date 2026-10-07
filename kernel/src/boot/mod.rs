@@ -9,6 +9,8 @@
 
 mod limine;
 
+pub use limine::start_secondary;
+
 use oceans_memory_map::{MapError, Region, RegionKind};
 use spin::Once;
 
@@ -22,6 +24,8 @@ pub const MAX_CMDLINE_LEN: usize = 512;
 /// Boot modules kept. The system needs one, the boot archive (ADR-0025);
 /// a few more leave room for diagnostics.
 pub const MAX_MODULES: usize = 8;
+/// Secondary CPUs recorded at most (with the boot CPU, `arch::MAX_CPUS`).
+pub const MAX_SECONDARY_CPUS: usize = crate::arch::MAX_CPUS - 1;
 const MAX_MODULE_NAME: usize = 64;
 
 /// A file the bootloader loaded into memory for the kernel.
@@ -91,6 +95,12 @@ pub struct BootInfo {
     /// Physical address of the ACPI RSDP.
     rsdp: Option<u64>,
     framebuffer: Option<Framebuffer>,
+    /// The boot CPU's local APIC ID, when the bootloader started the others.
+    bsp_lapic_id: Option<u32>,
+    /// The other CPUs' local APIC IDs (ADR-0088).
+    secondary: [u32; MAX_SECONDARY_CPUS],
+    secondary_count: usize,
+    cpus_truncated: bool,
 }
 
 impl BootInfo {
@@ -112,6 +122,10 @@ impl BootInfo {
             module_count: 0,
             rsdp: None,
             framebuffer: None,
+            bsp_lapic_id: None,
+            secondary: [0; MAX_SECONDARY_CPUS],
+            secondary_count: 0,
+            cpus_truncated: false,
         }
     }
 
@@ -182,6 +196,22 @@ impl BootInfo {
     /// Physical address of the ACPI Root System Description Pointer.
     pub fn framebuffer(&self) -> Option<Framebuffer> {
         self.framebuffer
+    }
+
+    /// The boot CPU's local APIC ID, if the bootloader reported CPUs.
+    pub fn bsp_lapic_id(&self) -> Option<u32> {
+        self.bsp_lapic_id
+    }
+
+    /// The local APIC IDs of the other CPUs, parked until started with
+    /// [`start_secondary`].
+    pub fn secondary_cpus(&self) -> &[u32] {
+        &self.secondary[..self.secondary_count]
+    }
+
+    /// More CPUs than Oceans uses were found.
+    pub fn cpus_truncated(&self) -> bool {
+        self.cpus_truncated
     }
 
     pub fn rsdp(&self) -> Option<u64> {

@@ -680,6 +680,9 @@ const REBOOT_EXPECT: &[Expect] = &[
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
 const SHELL_EXPECT: &[Expect] = &[
+    // Every CPU up (ADR-0088).
+    Expect::Contains("smp: 4 CPUs online"),
+    Expect::Contains("smp: self-test passed: 3 CPUs answered an interrupt"),
     // Power (ADR-0085): what QEMU's firmware describes, and a restart
     // asked from the shell, the system stopped in order.
     Expect::Contains("ACPI: switching off through PM1 control at io 0x604 (SLP_TYP 0/0)"),
@@ -1578,6 +1581,9 @@ fn qemu_command(
         "q35",
         "-m",
         "256M",
+        // Four CPUs (ADR-0088).
+        "-smp",
+        "4",
         "-no-reboot",
         "-serial",
         "stdio",

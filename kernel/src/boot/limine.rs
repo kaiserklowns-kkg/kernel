@@ -1,15 +1,19 @@
 //! Limine boot protocol adapter (ADR-0003).
 
+use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::BaseRevision;
 use limine::framebuffer::MemoryModel;
 use limine::memory_map::EntryType;
+
+use limine::mp::Cpu;
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
-    MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
+    MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker, RequestsStartMarker,
+    RsdpRequest,
 };
 use oceans_memory_map::{Region, RegionKind};
 
-use super::{BOOT_INFO, BootInfo, Framebuffer, KernelImage};
+use super::{BOOT_INFO, BootInfo, Framebuffer, KernelImage, MAX_SECONDARY_CPUS};
 use crate::{arch, klog};
 
 // Limine scans the `.limine_requests` section of the kernel image and fills in
@@ -52,6 +56,12 @@ static RSDP: RsdpRequest = RsdpRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
+
+/// The other CPUs (ADR-0088): Limine starts them and parks each until it
+/// is given an address to jump to.
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static MP: MpRequest = MpRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
@@ -123,6 +133,24 @@ extern "C" fn kernel_entry() -> ! {
             });
         }
 
+        if let Some(mp) = MP.get_response() {
+            info.bsp_lapic_id = Some(mp.bsp_lapic_id());
+            for cpu in mp
+                .cpus()
+                .iter()
+                .filter(|cpu| cpu.lapic_id != mp.bsp_lapic_id())
+            {
+                let index = info.secondary_count;
+                if index == MAX_SECONDARY_CPUS {
+                    info.cpus_truncated = true;
+                    break;
+                }
+                info.secondary[index] = cpu.lapic_id;
+                SECONDARY[index].store(core::ptr::from_ref::<Cpu>(cpu) as usize, Ordering::Relaxed);
+                info.secondary_count += 1;
+            }
+        }
+
         if let (Some(modules), Some(offset)) = (MODULES.get_response(), info.direct_map_offset) {
             for module in modules.modules() {
                 let path = module.path().to_bytes();
@@ -139,6 +167,37 @@ extern "C" fn kernel_entry() -> ! {
     });
 
     crate::kernel_main(info)
+}
+
+/// Limine's record of each secondary CPU, in `BootInfo::secondary_cpus`
+/// order. They live in bootloader-reclaimable memory.
+static SECONDARY: [AtomicUsize; MAX_SECONDARY_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_SECONDARY_CPUS];
+/// What a started CPU calls, with its argument in its record's `extra`.
+static ENTRY: AtomicUsize = AtomicUsize::new(0);
+
+/// Starts secondary CPU `index`: it calls `entry(arg)` on Limine's stack
+/// and page tables. One at a time (the entry is shared); only before
+/// bootloader memory is reclaimed.
+pub fn start_secondary(index: usize, entry: extern "C" fn(u64) -> !, arg: u64) {
+    let cpu = SECONDARY[index].load(Ordering::Relaxed) as *const Cpu;
+    assert!(!cpu.is_null(), "no secondary CPU {index}");
+    // SAFETY: Limine's record of a CPU it parked, in bootloader memory that
+    // is still ours (the caller's contract).
+    let cpu = unsafe { &*cpu };
+    ENTRY.store(entry as usize, Ordering::Release);
+    cpu.extra.store(arg, Ordering::Release);
+    // Ordered after the stores above (sequentially consistent).
+    cpu.goto_address.write(secondary_trampoline);
+}
+
+/// Where Limine sends a started CPU.
+unsafe extern "C" fn secondary_trampoline(cpu: &Cpu) -> ! {
+    let arg = cpu.extra.load(Ordering::Acquire);
+    // SAFETY: `start_secondary` stored a valid `extern "C" fn(u64) -> !`.
+    let entry: extern "C" fn(u64) -> ! =
+        unsafe { core::mem::transmute(ENTRY.load(Ordering::Acquire)) };
+    entry(arg)
 }
 
 fn region_kind(entry_type: EntryType) -> RegionKind {

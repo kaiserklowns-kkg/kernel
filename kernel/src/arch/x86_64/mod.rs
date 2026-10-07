@@ -15,13 +15,14 @@ mod serial;
 mod syscall;
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use ::x86_64::instructions::{self as insn, port::Port};
 
 pub use context::{prepare_stack, switch_context};
 pub use cpu::{enable_protections, features as cpu_features};
 pub use interrupts::{
-    DEVICE_VECTORS, TrapFrame, set_after_device_interrupt, set_device_handler,
+    DEVICE_VECTORS, TrapFrame, set_after_device_interrupt, set_device_handler, set_ipi_handler,
     set_user_fault_handler, set_user_return_hook,
 };
 pub use paging::{AddressSpace, activate_root, active_root};
@@ -29,6 +30,52 @@ pub use rtc::{Reading as RtcReading, now as rtc_now};
 pub use syscall::{SyscallFrame, enter_user, init as init_syscalls, set_kernel_stack};
 
 pub const NAME: &str = "x86_64";
+
+/// The most CPUs Oceans uses (ADR-0088); more are left halted.
+pub const MAX_CPUS: usize = 64;
+
+/// Local APIC IDs by CPU index (`u32::MAX`: no such CPU). Index 0 is the
+/// boot CPU.
+static CPU_APIC_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(u32::MAX) }; MAX_CPUS];
+
+/// Records that CPU `index` has local APIC ID `apic_id`.
+pub fn register_cpu(index: usize, apic_id: u32) {
+    CPU_APIC_IDS[index].store(apic_id, Ordering::Release);
+}
+
+/// The calling CPU's index: 0 (the boot CPU) until local APICs are up and
+/// CPUs registered.
+pub fn cpu_index() -> usize {
+    if !apic::ready() {
+        return 0;
+    }
+    let id = u32::from(apic::id());
+    CPU_APIC_IDS
+        .iter()
+        .position(|slot| slot.load(Ordering::Acquire) == id)
+        .unwrap_or(0)
+}
+
+/// Brings this CPU (index `index`, not the boot CPU) to where the boot CPU
+/// is: its own GDT and TSS (double faults on the stack ending at
+/// `double_fault_top`), the shared IDT, its local APIC. Its protections
+/// ([`set_cpu_protections`]) must already be on.
+pub fn init_secondary(index: usize, double_fault_top: u64) {
+    gdt::init_cpu(index, double_fault_top);
+    interrupts::load();
+    apic::init();
+}
+
+/// [`enable_protections`] on another CPU, quietly.
+pub fn set_cpu_protections() {
+    cpu::set_protections(&cpu::features());
+}
+
+/// Interrupts the CPU with local APIC ID `apic_id` (the handler set with
+/// [`set_ipi_handler`] runs there).
+pub fn send_ipi(apic_id: u32) {
+    apic::send_ipi(apic_id as u8, interrupts::VECTOR_IPI);
+}
 
 /// Brings up what logging needs. Runs before anything else, so it must not
 /// log, allocate or fault.

@@ -31,6 +31,7 @@ mod power;
 mod process;
 mod random;
 mod sched;
+mod smp;
 mod syscall;
 mod time;
 
@@ -74,7 +75,13 @@ fn kernel_main(boot: &'static BootInfo) -> ! {
 /// Then the scheduler starts and this code continues as the boot thread.
 extern "C" fn kernel_main_on_kernel_stack() -> ! {
     let boot = boot::info();
-    memory::reclaim_bootloader_memory(boot);
+    // The other CPUs wait in bootloader memory: they leave it first
+    // (ADR-0088). One that may not have stays out, and so does that memory.
+    if smp::start(boot) {
+        memory::reclaim_bootloader_memory(boot);
+    } else {
+        klog::warn!("bootloader memory not reclaimed: a CPU may still be using it");
+    }
     sched::init();
     process::init();
     random::init();
@@ -112,6 +119,7 @@ fn self_test() {
     memory::self_test();
     object::self_test();
     sched::self_test();
+    smp::self_test();
     ipc::self_test();
     random::self_test();
     time::self_test();

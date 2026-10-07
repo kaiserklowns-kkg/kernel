@@ -408,6 +408,7 @@ const HW_SCRIPT: &[&[u8]] = &[
     b"reboot\r\n",
 ];
 const HW_EXPECT: &[Expect] = &[
+    Expect::Contains("smp: 4 CPUs online"),
     Expect::Contains("ACPI: switching off through PM1 control at io 0x604"),
     // The microphone codec's input (ADR-0087).
     Expect::Contains("hda: input: microphone (pin 0x"),
@@ -527,6 +528,8 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
         .current_dir(root())
         // A Tier 1 machine (ADR-0005): x86-64-v2 or newer.
         .args(["-machine", "q35", "-cpu", "max", "-m", "512M", "-no-reboot"])
+        // A four-core PC (ADR-0088).
+        .args(["-smp", "4"])
         .args(["-serial", "stdio", "-display", "none"])
         .arg("-drive")
         .arg(pflash)

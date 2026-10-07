@@ -81,7 +81,7 @@ pub fn init(handler: fn(&mut SyscallFrame)) {
 pub fn set_kernel_stack(top: u64) {
     // SAFETY: see `Scratch`.
     unsafe { KERNEL_RSP.0.get().write(top) };
-    super::gdt::set_kernel_stack(top);
+    super::gdt::set_kernel_stack(super::cpu_index(), top);
 }
 
 #[unsafe(naked)]
