@@ -74,10 +74,13 @@ pub enum Permission {
     /// Managing the installed apps and their permissions (ADR-0081): only
     /// the system's own apps (Settings) may ask for it.
     ManageApps,
+    /// Playing sound (ADR-0094): a player end of the audio service, which
+    /// opens playing sessions and never the input.
+    Sound,
 }
 
 impl Permission {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Console,
         Self::Storage,
         Self::SystemInfo,
@@ -87,6 +90,7 @@ impl Permission {
         Self::Window,
         Self::Notifications,
         Self::ManageApps,
+        Self::Sound,
     ];
 
     pub fn name(self) -> &'static str {
@@ -100,6 +104,7 @@ impl Permission {
             Self::Window => "window",
             Self::Notifications => "notifications",
             Self::ManageApps => "manage-apps",
+            Self::Sound => "sound",
         }
     }
 
@@ -119,6 +124,7 @@ impl Permission {
             Self::Window => "show windows, and get what you type into them",
             Self::Notifications => "show you notifications on the desktop",
             Self::ManageApps => "manage your apps and their permissions",
+            Self::Sound => "play sound",
         }
     }
 
@@ -126,10 +132,12 @@ impl Permission {
     /// and read-only information (ADR-0020's low-risk grants). A window
     /// gets keys and clicks only while the user gives it the focus, and
     /// the frame the system draws around it names the app (ADR-0059).
+    /// Sound goes out and nothing comes in: a player cannot record
+    /// (ADR-0094), and the user hears what plays.
     pub fn automatic(self) -> bool {
         matches!(
             self,
-            Self::Console | Self::Storage | Self::SystemInfo | Self::Window
+            Self::Console | Self::Storage | Self::SystemInfo | Self::Window | Self::Sound
         )
     }
 

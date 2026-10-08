@@ -1,0 +1,9 @@
+[package]
+name = "oceans-wav"
+description = "WAV files for Oceans' sound: the header, and samples converted to 48 kHz stereo, a piece at a time (ADR-0094)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -23,6 +23,7 @@ use core::fmt::Write;
 use oceans_audio_proto::{CHANNELS, FRAME, Input, Output, SAMPLE_RATE};
 use oceans_fs_proto::{Kind, Node, flags};
 use oceans_rt::{Directory, Out, Start};
+use oceans_wav::Wav;
 use utils::{EXIT_FAILED, EXIT_USAGE, console, require};
 
 oceans_rt::manifest!(b"grant out\n");
@@ -142,53 +143,6 @@ fn tone(
     output.drain()
 }
 
-/// The format and samples of a WAV file.
-struct Wav<'a> {
-    channels: u16,
-    rate: u32,
-    /// 16-bit little-endian samples, interleaved.
-    data: &'a [u8],
-}
-
-fn parse_wav(bytes: &[u8]) -> Result<Wav<'_>, &'static str> {
-    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("not a WAV file");
-    }
-    let mut at = 12;
-    let mut format = None;
-    while at + 8 <= bytes.len() {
-        let id = &bytes[at..at + 4];
-        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
-        let body = &bytes[at + 8..(at + 8).saturating_add(size).min(bytes.len())];
-        match id {
-            b"fmt " if body.len() >= 16 => {
-                let word = |i: usize| u16::from_le_bytes([body[i], body[i + 1]]);
-                let (kind, channels, bits) = (word(0), word(2), word(14));
-                let rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
-                if kind != 1 || bits != 16 {
-                    return Err("only 16-bit PCM WAV files are played");
-                }
-                if !(1..=2).contains(&channels) || !(8_000..=192_000).contains(&rate) {
-                    return Err("only mono or stereo, 8 to 192 kHz");
-                }
-                format = Some((channels, rate));
-            }
-            b"data" => {
-                let (channels, rate) = format.ok_or("the data comes before the format")?;
-                return Ok(Wav {
-                    channels,
-                    rate,
-                    data: body,
-                });
-            }
-            _ => {}
-        }
-        // Chunks are padded to an even size.
-        at = at + 8 + size + (size & 1);
-    }
-    Err("no sound data in the file")
-}
-
 fn wav(out: &mut Out, directory: &Directory, audio: oceans_rt::Handle, path: &str) -> i64 {
     let fs = match require(out, directory, "play", "use", "fs", "use:fs") {
         Ok(fs) => Node(fs),
@@ -201,24 +155,26 @@ fn wav(out: &mut Out, directory: &Directory, audio: oceans_rt::Handle, path: &st
             return EXIT_FAILED;
         }
     };
-    let wav = match parse_wav(&bytes) {
+    let wav = match Wav::parse(&bytes, bytes.len() as u64) {
         Ok(wav) => wav,
         Err(why) => {
             let _ = writeln!(out, "play: {path}: {why}");
             return EXIT_FAILED;
         }
     };
-    let frames = wav.data.len() / (2 * usize::from(wav.channels));
+    let tenths = wav.duration_ms() / 100;
     let _ = writeln!(
         out,
         "play: {path}: {} Hz, {}, {}.{} s",
         wav.rate,
         if wav.channels == 1 { "mono" } else { "stereo" },
-        frames as u32 / wav.rate,
-        frames as u32 % wav.rate * 10 / wav.rate
+        tenths / 10,
+        tenths % 10
     );
     let _ = out.flush();
-    match play_wav(audio, &wav, frames) {
+    let start = wav.data_offset as usize;
+    let data = &bytes[start..start + wav.data_len as usize];
+    match play_wav(audio, &wav, data) {
         Ok(()) => 0,
         Err(error) => {
             let _ = writeln!(out, "play: {}", error.message());
@@ -227,38 +183,21 @@ fn wav(out: &mut Out, directory: &Directory, audio: oceans_rt::Handle, path: &st
     }
 }
 
-/// The file's frames, converted to 48 kHz stereo (linear interpolation).
+/// The file's frames, converted to 48 kHz stereo (`oceans-wav`).
 fn play_wav(
     audio: oceans_rt::Handle,
-    wav: &Wav<'_>,
-    frames: usize,
+    wav: &Wav,
+    data: &[u8],
 ) -> Result<(), oceans_audio_proto::AudioError> {
-    let channels = usize::from(wav.channels);
-    let sample = |frame: usize, channel: usize| -> i32 {
-        let frame = frame.min(frames.saturating_sub(1));
-        let at = (frame * channels + channel.min(channels - 1)) * 2;
-        i32::from(i16::from_le_bytes([wav.data[at], wav.data[at + 1]]))
-    };
-    let out_frames = (frames as u64 * u64::from(SAMPLE_RATE) / u64::from(wav.rate)) as usize;
     let mut output = Output::open(audio, CHUNK)?;
     let mut done = 0;
-    while done < out_frames {
-        let count = (out_frames - done).min(CHUNK / FRAME);
-        let buffer = output.buffer();
-        for i in 0..count {
-            // Where this output frame falls in the file, in 1/65536ths.
-            let position =
-                (((done + i) as u64 * u64::from(wav.rate)) << 16) / u64::from(SAMPLE_RATE);
-            let (index, fraction) = ((position >> 16) as usize, (position & 0xffff) as i32);
-            for channel in 0..2 {
-                let (a, b) = (sample(index, channel), sample(index + 1, channel));
-                let value = (a + (((b - a) * fraction) >> 16)) as i16;
-                let at = i * FRAME + channel * 2;
-                buffer[at..at + 2].copy_from_slice(&value.to_le_bytes());
-            }
+    while done < wav.output_frames() {
+        let written = wav.render(data, 0, done, output.buffer());
+        if written == 0 {
+            break;
         }
-        output.play(0, (count * FRAME) as u32)?;
-        done += count;
+        output.play(0, (written * FRAME) as u32)?;
+        done += written as u64;
     }
     output.drain()
 }

@@ -15,6 +15,11 @@
 //! `RECORD` until `STOP` or the session closes; one capture session at a
 //! time.
 //!
+//! **Players** (ADR-0094): `PLAYER` on the driver endpoint gives a client
+//! end that can only open playing sessions, so whoever holds it (an app
+//! with the `sound` permission, by way of Core) plays sound but never
+//! records.
+//!
 //! One format: 48 kHz, 16-bit little-endian, two channels interleaved
 //! ([`FORMAT`]). Clients convert.
 
@@ -50,7 +55,20 @@ pub mod op {
     /// came in next; the input starts if it was not running. Sound that
     /// came in and was not taken within a second or so is dropped.
     pub const RECORD: u64 = 7;
+    /// On the driver endpoint: → a **player** end (ADR-0094), a client
+    /// end badged [`PLAYER_BADGE`](super::PLAYER_BADGE) on which `OPEN`
+    /// opens playing sessions only (and `INFO` answers): what an app with
+    /// the `sound` permission gets, never the input.
+    pub const PLAYER: u64 = 8;
+    /// On a playing session (ADR-0094): → `[bytes u32]`, what was queued
+    /// and has not been played yet. A player keeps its lead by this, not
+    /// by its own clock, which drifts from the sound device's.
+    pub const QUEUED: u64 = 9;
 }
+
+/// The badge of player ends (ADR-0094). Session badges count up from 1 and
+/// never reach it.
+pub const PLAYER_BADGE: u64 = 1 << 62;
 
 /// `OPEN` flags.
 pub mod open_flags {
@@ -189,6 +207,17 @@ pub fn input_info(handle: Handle, out: &mut [u8]) -> Result<usize, AudioError> {
     request(handle, op::INPUT_INFO, &[], &[], out, &mut []).map(|(len, _)| len)
 }
 
+/// A player end from the driver endpoint (ADR-0094): it opens playing
+/// sessions and nothing else.
+pub fn player(driver: Handle) -> Result<Handle, AudioError> {
+    let mut end = [Handle(0); 1];
+    let (_, count) = request(driver, op::PLAYER, &[], &[], &mut [], &mut end)?;
+    if count != 1 {
+        return Err(AudioError::Status(Status::BadRequest));
+    }
+    Ok(end[0])
+}
+
 /// A capture session (ADR-0087): a buffer the driver writes what came in
 /// into.
 pub struct Input {
@@ -310,6 +339,16 @@ impl Output {
     pub fn play(&self, offset: u32, len: u32) -> Result<(), AudioError> {
         let data = Play { offset, len }.encode();
         request(self.session, op::PLAY, &data, &[], &mut [], &mut []).map(drop)
+    }
+
+    /// Bytes queued and not played yet.
+    pub fn queued(&self) -> Result<u32, AudioError> {
+        let mut reply = [0u8; 4];
+        let (len, _) = request(self.session, op::QUEUED, &[], &[], &mut reply, &mut [])?;
+        if len != 4 {
+            return Err(AudioError::Status(Status::BadRequest));
+        }
+        Ok(u32::from_le_bytes(reply))
     }
 
     /// Waits until everything queued has been played.

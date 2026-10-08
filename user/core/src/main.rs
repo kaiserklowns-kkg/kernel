@@ -299,6 +299,8 @@ struct Core {
     net: Option<Handle>,
     input: Option<Handle>,
     sysinfo: Option<Handle>,
+    /// The audio service's endpoint, to ask for player ends (ADR-0094).
+    audio: Option<Handle>,
     /// The display service's window endpoint (`WINDOWS`, ADR-0059): a
     /// server end Core may only mint client ends of.
     windows: Option<Handle>,
@@ -395,6 +397,7 @@ impl Core {
             net: directory.find("use", "net"),
             input: directory.find("use", "input"),
             sysinfo: directory.find("sysinfo", "sysinfo"),
+            audio: directory.find("use", "audio"),
             windows: None,
             next_window_badge: 1,
             proposal: None,
@@ -1760,6 +1763,12 @@ impl Core {
                         })
                 }
                 Permission::ManageApps => None,
+                // A player end: playing sessions only, never the input
+                // (ADR-0094).
+                Permission::Sound => self
+                    .audio
+                    .and_then(|h| oceans_audio_proto::player(h).ok())
+                    .map(|h| (h, "use", "audio")),
             };
             match given {
                 Some((handle, kind, label)) => {

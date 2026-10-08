@@ -64,7 +64,7 @@ func TestParsesCoreReplies(t *testing.T) {
 	if !ok || p.Name != "console" || p.Decision != "automatic" {
 		t.Fatalf("%+v", p)
 	}
-	for _, bad := range [][]byte{nil, {0}, {9, 0}, {0, 4}} {
+	for _, bad := range [][]byte{nil, {0}, {10, 0}, {0, 4}} {
 		if _, ok := parsePermission(bad); ok {
 			t.Errorf("%v accepted", bad)
 		}

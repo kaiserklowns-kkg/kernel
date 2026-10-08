@@ -1,0 +1,16 @@
+# Music's package manifest (ADR-0080, ADR-0094), an app that comes with the
+# system: `cargo xtask` packages it with the `music-app` program as
+# `music`, signs it with the image's key and bundles it into the boot
+# image.
+id = app.oceans.music
+name = Music
+version = 1.0.0
+publisher = {{PUBLISHER}}
+description = Your music: the WAV files in Home, played
+architecture = x86_64
+api = 1
+entry = music
+permission = window
+permission = files: find and read your songs
+permission = sound: play your songs
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/music

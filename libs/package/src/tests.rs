@@ -208,7 +208,7 @@ fn signed_packages_open() {
     let opened = Package::open(&bytes, &keys).unwrap();
     assert_eq!(opened.manifest.id, "app.oceans.hello");
     assert_eq!(opened.entry(), b"\x7fELF program");
-    assert_eq!(std::format!("{}", public_key_hex(&SEED)), {
+    assert_eq!(public_key_hex(&SEED), {
         let mut hex = String::new();
         for b in opened.key {
             hex.push_str(&std::format!("{b:02x}"));

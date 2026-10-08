@@ -37,7 +37,7 @@
 use core::fmt::Write;
 use core::ptr;
 
-use oceans_audio_proto::{Play, Status, op, open_flags};
+use oceans_audio_proto::{PLAYER_BADGE, Play, Status, op, open_flags};
 use oceans_hda::{
     Capabilities, Capture, FORMAT_48K_16_STEREO, Jack, Path, Ring, Widget, WidgetCaps, WidgetType,
     long_verb, param, reg, sd, v, verb,
@@ -49,8 +49,10 @@ oceans_rt::entry!(main);
 
 const MAX_SESSIONS: usize = 8;
 const MAX_WIDGETS: usize = 64;
-/// The cyclic buffer: two halves, a third of a second at 48 kHz stereo.
-const RING_SIZE: usize = 64 * 1024;
+/// The cyclic buffer: two halves, 1.4 s at 48 kHz stereo (ADR-0094: a
+/// third of a second left a player too little room when its ticks came
+/// late; `STOP` drops what is queued, so the size adds no delay).
+const RING_SIZE: usize = 256 * 1024;
 /// The command page: the command ring (256 entries of 4 bytes), the
 /// buffer descriptor list, the response ring (256 entries of 8 bytes).
 const PAGE: usize = 4096;
@@ -72,6 +74,10 @@ const RESET_TIMEOUT_MS: u64 = 100;
 const COMMAND_TIMEOUT_MS: u64 = 50;
 /// Between looks at the position while a client waits.
 const POLL_MS: u64 = 2;
+/// The running output's tick (ADR-0094), well inside the cyclic buffer's
+/// third of a second; and its notification bit.
+const TICK_MS: u64 = 50;
+const TICK: u64 = 1;
 
 /// Exit codes.
 const EXIT_BAD_START: i64 = 2;
@@ -498,10 +504,39 @@ impl Sound {
         }
     }
 
+    /// Follows the controller's position, and makes what it has played
+    /// silence (ADR-0094): if nothing new comes, the cyclic buffer comes
+    /// round to silence, not to sound already heard.
     fn update(&mut self) {
         if self.running {
+            let before = self.ring.played;
             let position = self.sd_read32(sd::LPIB);
             self.ring.advance(position);
+            let len = (self.ring.played - before).min(RING_SIZE as u64) as usize;
+            let start = (before % RING_SIZE as u64) as usize;
+            let first = len.min(RING_SIZE - start);
+            // SAFETY: both pieces lie inside the cyclic buffer's mapping,
+            // behind the controller's position.
+            unsafe {
+                ptr::write_bytes(self.ring_memory.virt.add(start), 0, first);
+                ptr::write_bytes(self.ring_memory.virt, 0, len - first);
+            }
+        }
+    }
+
+    /// `QUEUED`: bytes written and not played yet.
+    fn queued(&mut self) -> u32 {
+        self.update();
+        (self.ring.written - self.ring.played) as u32
+    }
+
+    /// The output's tick while it runs (ADR-0094): what was played becomes
+    /// silence, and an output that has played all it was given rests, so
+    /// it never loops over the buffer.
+    fn tend(&mut self) {
+        self.update();
+        if self.running && self.ring.drained() {
+            self.rest();
         }
     }
 
@@ -920,7 +955,25 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
     let mut next_badge = 1;
     let mut data = [0u8; 64];
     let mut handles = [Handle(0); 4];
+    // The output's tick (ADR-0094), on a notification bound to the
+    // endpoint: while it runs, it is tended between requests too.
+    let tick = oceans_rt::notification_create()
+        .ok()
+        .filter(|&n| oceans_rt::endpoint_bind(server, n).is_ok());
+    if tick.is_none() {
+        say(
+            log,
+            format_args!("hda: no output tick: a starved output may repeat itself"),
+        );
+    }
+    let mut ticking = false;
     loop {
+        if let (Some(tick), Some(sound)) = (tick, sound.as_ref())
+            && sound.running
+            && !ticking
+        {
+            ticking = oceans_rt::timer_set(tick, TICK, TICK_MS).is_ok();
+        }
         let got = match oceans_rt::ipc_receive_msg(server, &mut data, &mut handles) {
             Ok(got) => got,
             Err(error) => {
@@ -928,6 +981,15 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
                 return EXIT_RECEIVE;
             }
         };
+        if got.signals != 0 {
+            ticking = false;
+            if got.signals & TICK != 0
+                && let Some(sound) = sound.as_mut()
+            {
+                sound.tend();
+            }
+            continue;
+        }
         let find = |badge| {
             sessions
                 .iter()
@@ -950,12 +1012,20 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
         let session = find(got.badge).and_then(|i| sessions[i]);
         let mut reply_handle = None;
         let mut text = Buffer::<120>::new();
+        // A reply that is a number rather than words (`QUEUED`).
+        let mut number: Option<[u8; 4]> = None;
         let status = match (sound.as_mut(), got.label, session) {
             (None, _, _) => Status::IoError,
+            (Some(sound), op::QUEUED, Some(session)) if !session.capture => {
+                number = Some(sound.queued().to_le_bytes());
+                Status::Ok
+            }
             (Some(sound), op::INFO, _) => {
                 let _ = text.write_str(sound.description.as_str());
                 Status::Ok
             }
+            // A player (ADR-0094) has nothing to do with the input.
+            (Some(_), op::INPUT_INFO, _) if got.badge == PLAYER_BADGE => Status::BadRequest,
             (Some(sound), op::INPUT_INFO, _) => match &sound.input {
                 Some(input) => {
                     let _ = text.write_str(input.description.as_str());
@@ -963,10 +1033,22 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
                 }
                 None => Status::IoError,
             },
-            (Some(sound), op::OPEN, None) if got.badge == 0 && received.len() == 1 => {
+            (Some(_), op::PLAYER, None) if got.badge == 0 => {
+                match oceans_rt::endpoint_mint(server, PLAYER_BADGE) {
+                    Ok(handle) => {
+                        reply_handle = Some(handle);
+                        Status::Ok
+                    }
+                    Err(_) => Status::NoSpace,
+                }
+            }
+            (Some(sound), op::OPEN, None)
+                if (got.badge == 0 || got.badge == PLAYER_BADGE) && received.len() == 1 =>
+            {
+                // A player end opens playing sessions only (ADR-0094).
                 let capture = match &data[..got.data_len] {
                     [] => Some(false),
-                    [open_flags::CAPTURE] => Some(true),
+                    [open_flags::CAPTURE] if got.badge == 0 => Some(true),
                     _ => None,
                 };
                 let input = sound.input.as_mut();
@@ -1042,7 +1124,11 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
             Some(handle) => core::slice::from_ref(handle),
             None => &[],
         };
-        if oceans_rt::ipc_reply_msg(status as u64, text.as_str().as_bytes(), reply).is_err()
+        let data = match &number {
+            Some(bytes) => &bytes[..],
+            None => text.as_str().as_bytes(),
+        };
+        if oceans_rt::ipc_reply_msg(status as u64, data, reply).is_err()
             && let Some(handle) = reply_handle
         {
             let _ = oceans_rt::close(handle);

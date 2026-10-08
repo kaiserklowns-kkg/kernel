@@ -65,28 +65,55 @@ fn size_text(size: u64) -> String {
     }
 }
 
-impl Files {
-    /// The folder shown, opened (writable when `write`).
-    fn folder(&self, write: bool) -> Option<Node> {
-        let home = self.home.as_ref()?;
-        let open = if write { flags::WRITE } else { 0 };
-        if self.path.is_empty() {
-            // `/home` itself: a new handle to it.
-            return home.walk(".", open).ok().map(|(node, _)| node);
+/// The folder shown: Home itself (the handle Core gave, writable), or a
+/// folder opened in it, closed after use. (`.` names nothing: Home is not
+/// reopened.)
+enum Folder<'a> {
+    Home(&'a Node),
+    Opened(Node),
+}
+
+impl core::ops::Deref for Folder<'_> {
+    type Target = Node;
+
+    fn deref(&self) -> &Node {
+        match self {
+            Self::Home(node) => node,
+            Self::Opened(node) => node,
         }
+    }
+}
+
+impl Folder<'_> {
+    fn close(self) {
+        if let Self::Opened(node) = self {
+            node.close();
+        }
+    }
+}
+
+impl Files {
+    /// The folder shown (opened writable when `write`).
+    fn folder(&self, write: bool) -> Option<Folder<'_>> {
+        let home = self.home.as_ref()?;
+        if self.path.is_empty() {
+            return Some(Folder::Home(home));
+        }
+        let open = if write { flags::WRITE } else { 0 };
         home.walk(&joined(&self.path), open)
             .ok()
             .filter(|(_, kind)| *kind == Kind::Directory)
-            .map(|(node, _)| node)
+            .map(|(node, _)| Folder::Opened(node))
     }
 
     fn refresh(&mut self) {
         self.stale = false;
-        self.entries.clear();
         self.selected = None;
         self.preview = None;
         self.confirm_delete = false;
+        let mut entries = Vec::new();
         let Some(folder) = self.folder(false) else {
+            self.entries.clear();
             self.message = String::from("This folder cannot be opened.");
             return;
         };
@@ -109,7 +136,7 @@ impl Files {
             } else {
                 0
             };
-            self.entries.push(Entry {
+            entries.push(Entry {
                 folder: kind == Kind::Directory,
                 name,
                 size,
@@ -117,8 +144,8 @@ impl Files {
         }
         folder.close();
         // Folders first, then by name.
-        self.entries
-            .sort_by(|a, b| b.folder.cmp(&a.folder).then_with(|| a.name.cmp(&b.name)));
+        entries.sort_by(|a, b| b.folder.cmp(&a.folder).then_with(|| a.name.cmp(&b.name)));
+        self.entries = entries;
     }
 
     /// Opens entry `index`: into a folder, or a file's preview.
@@ -173,17 +200,21 @@ impl Files {
             self.message = String::from("This folder cannot be changed.");
             return;
         };
-        self.message = match folder.open(&name, flags::CREATE_DIRECTORY | flags::WRITE) {
-            Ok((created, _)) => {
-                created.close();
+        let created = folder
+            .open(&name, flags::CREATE_DIRECTORY | flags::WRITE)
+            .map(|(node, _)| {
+                node.close();
                 let _ = folder.sync();
+            });
+        folder.close();
+        self.message = match created {
+            Ok(_) => {
                 self.new_folder.clear();
                 self.naming = false;
                 alloc::format!("Created {name}.")
             }
             Err(error) => alloc::format!("{name}: {}", error.message()),
         };
-        folder.close();
         self.stale = true;
     }
 

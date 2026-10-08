@@ -698,6 +698,10 @@ name = "oceans-volume"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-wav"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-window"
 version = "0.1.0"
 

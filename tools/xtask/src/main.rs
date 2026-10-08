@@ -352,8 +352,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // (user/display/src/desktop.rs): the apps button at 612,760 with no
     // windows open; tiles from 384,360, 102 by 100, the Terminal first,
     // then the apps by id, Activity Monitor, Calculator and Text Editor
-    // among them (ADR-0080): Hello is the ninth tile, Notes the tenth;
-    // Allow at 776,448.
+    // among them (ADR-0080): Hello is the ninth tile; Music comes next, so
+    // Notes is the eleventh, the first of the third row; Allow at 776,448.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
@@ -380,14 +380,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move -224 294",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move 231 -250",
+    b"@monitor mouse_move -177 -150",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-window.ppm",
     b"@keys note\r",
     b"@monitor sendkey ctrl-tab",
     b"@monitor screendump build/smoke-focus.ppm",
-    b"@monitor mouse_move -428 -257",
+    b"@monitor mouse_move -20 -357",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
@@ -433,10 +433,18 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app start app.oceans.settings\r\n",
     b"@screen 376 523 e9e9ee Settings' sidebar",
     b"app stop app.oceans.settings\r\n",
-    // Files (ADR-0082): the user's files; its window (the fifth opened)
-    // shows its toolbar.
+    // Files (ADR-0082): the user's files; its window (the fifth opened,
+    // its content from 388,219) shows its toolbar, and Home is listed
+    // (ADR-0094 fixed it): the first entry, clicked, is selected.
     b"app start app.oceans.files\r\n",
     b"@screen 788 224 e9e9ee Files' toolbar",
+    b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
+    b"@monitor mouse_move -3000 -3000",
+    b"@monitor mouse_move 688 299",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 720 310 d4e3fc Files' first entry in Home, selected",
+    b"@monitor device_del deskmouse",
     b"app stop app.oceans.files\r\n",
     // Activity Monitor (ADR-0083): its window (the sixth opened) shows the
     // memory card, white on the window's grey.
@@ -465,6 +473,16 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // there, 446,292 is a darker square.
     b"@screen 930 451 cccccc Image Viewer's checkerboard",
     b"app stop app.oceans.viewer\r\n",
+    // Music (ADR-0094): a WAV from the host (660 Hz, 44.1 kHz mono), played
+    // by the name it is started with, through the player end Core gave it,
+    // in the ninth window (back in the middle). Its time bar fills while it
+    // plays and empties at the end of its list; QEMU records the sound for
+    // the host to find after the 440 Hz tone.
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/tone.wav /home/tone.wav\r\n",
+    b"app start app.oceans.music tone.wav\r\n",
+    b"@screen 342 225 2f7cf6 Music playing",
+    b"@screen 342 225 d8d8de Music at the end of its list",
+    b"app stop app.oceans.music\r\n",
     // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
     // until the developer's key is trusted at the console; then the Rust
     // app and the Go app install and run.
@@ -652,7 +670,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // (ADR-0059), Tiles (ADR-0060) and the three third-party apps
     // (ADR-0062, ADR-0064), whose developer's key is still trusted
     // (ADR-0063).
-    Expect::Contains("core: ready, 15 apps installed, 2 trusted publisher keys"),
+    Expect::Contains("core: ready, 16 apps installed, 2 trusted publisher keys"),
     Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
@@ -838,7 +856,10 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed editor.opk from the system image"),
     Expect::Contains("core: installed viewer.opk from the system image"),
     Expect::Contains("app: started app.oceans.viewer"),
-    Expect::Contains("core: ready, 6 apps installed, 1 trusted publisher keys"),
+    Expect::Contains("core: installed music.opk from the system image"),
+    // Music (ADR-0094): `sound` is granted without asking, as a player end.
+    Expect::Contains("core: audit: started app.oceans.music 1.0.0 with window, files, sound"),
+    Expect::Contains("core: ready, 7 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
     Expect::Contains("gohello: goroutines computed 30"),
@@ -875,7 +896,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("Counter: run 2"),
     Expect::Contains("Counter: "),
     // Its name is Thai (ADR-0077): UTF-8 through the SDK, Core and the console.
-    Expect::Line("สวัสดี Go: hello from app.example.hello 0.1.0, built with the Oceans SDK"),
+    // Its start: a service's log line may land in the middle of it.
+    Expect::Contains("สวัสดี Go: hello from app.example.hello 0.1.0, built"),
     Expect::Line("สวัสดี Go: 2 arguments"),
     Expect::Line("app: installed app.example.notes 0.1.0"),
     Expect::Contains(
@@ -913,9 +935,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("ai: model: no model is configured (ai model URL MODEL)"),
     Expect::Contains("ai: using oceans-test at http://10.0.2.2:"),
     Expect::Contains("Oceans AI: Memory: "),
-    Expect::Contains(
-        "Oceans AI wants to: start the app Hello (app.oceans.hello) with the arguments \"wait\"",
-    ),
+    // Its start: a log line may land in the middle of it (the arguments
+    // are checked in the activity below).
+    Expect::Contains("Oceans AI wants to: start the app Hello (app.oceans.hello) with"),
     Expect::Contains("Oceans AI: Done: started Hello (app.oceans.hello)"),
     Expect::Line("  app.oceans.hello  1.0.0  Hello  (running)"),
     Expect::Contains("Oceans AI wants to: stop the app Hello (app.oceans.hello)"),
@@ -1044,14 +1066,15 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("usb-hid: port 6.1: tablet, "),
     Expect::Contains(", 0..32767 x 0..32767, pointer 1"),
     Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) tablet (pointer input)"),
-    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 4"),
+    // Pointer 5: the desktop's mice before it (Hello and Notes, the Store, Files) took 2 to 4.
+    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 5"),
     Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (pointer input)"),
     Expect::Contains("mouse: requests `use:input`"),
-    Expect::Contains("pointer 4: motion dx=10 dy=-5"),
-    Expect::Contains("pointer 4: button 1 (left) down"),
-    Expect::Contains("pointer 4: button 1 (left) up"),
-    Expect::Contains("pointer 4: wheel vertical=1 horizontal=0"),
-    Expect::Contains("usb-hid: port 6.2: pointer 4 removed"),
+    Expect::Contains("pointer 5: motion dx=10 dy=-5"),
+    Expect::Contains("pointer 5: button 1 (left) down"),
+    Expect::Contains("pointer 5: button 1 (left) up"),
+    Expect::Contains("pointer 5: wheel vertical=1 horizontal=0"),
+    Expect::Contains("usb-hid: port 6.2: pointer 5 removed"),
     Expect::Contains("pointer 1: absolute x=0 y=0 (of 32767 x 32767)"),
     Expect::Contains("pointer 1: button 2 (right) down"),
     Expect::Contains("pointer 1: button 2 (right) up"),
@@ -1634,6 +1657,8 @@ fn qemu_command(
 
 /// Where a headless boot records the sound it plays (ADR-0079).
 const SMOKE_AUDIO: &str = "build/smoke-audio.wav";
+/// The recording `check_smoke_audio` looked at, kept.
+const SMOKE_AUDIO_CHECKED: &str = "build/smoke-audio-checked.wav";
 
 /// QEMU's audio backend, `snd0`: recorded to `wav` headless, else heard.
 fn audiodev(headless: bool, wav: &str) -> String {
@@ -1660,11 +1685,20 @@ fn input_audiodev(headless: bool) -> String {
     }
 }
 
-/// The tone the smoke test plays (`play tone 440 2`), found in what QEMU
-/// recorded: enough loud samples, and about 880 zero crossings a second.
+/// The tone Music plays in the smoke test (ADR-0094), from `tone_wav`.
+const MUSIC_HZ: f64 = 660.0;
+
+/// The two tones the smoke test plays, found in what QEMU recorded: the
+/// shell's (`play tone 440 2`) and Music's (`MUSIC_HZ`, ADR-0094). The
+/// recording is cut into tenths of a second; a loud tenth is counted for
+/// the tone its zero crossings say (QEMU may record the two back to back,
+/// with no quiet between). Each needs a second.
 fn check_smoke_audio() -> Result {
     let path = root().join(SMOKE_AUDIO);
     let wav = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Kept: the boot after the reboot records over SMOKE_AUDIO.
+    let kept = root().join(SMOKE_AUDIO_CHECKED);
+    fs::write(&kept, &wav).map_err(|e| format!("{}: {e}", kept.display()))?;
     let channels = wav.get(22).copied().unwrap_or(2).max(1) as usize;
     let rate = wav
         .get(24..28)
@@ -1680,25 +1714,45 @@ fn check_smoke_audio() -> Result {
         .chunks_exact(2 * channels)
         .map(|frame| i32::from(i16::from_le_bytes([frame[0], frame[1]])))
         .collect();
-    // From the first loud sample to the last.
-    let first = samples.iter().position(|s| s.abs() > 2000);
-    let last = samples.iter().rposition(|s| s.abs() > 2000);
-    let loud = match (first, last) {
-        (Some(first), Some(last)) => &samples[first..=last],
-        _ => &[][..],
-    };
-    let crossings = loud
-        .windows(2)
-        .filter(|pair| (pair[0] < 0) != (pair[1] < 0))
-        .count();
-    let seconds = loud.len() as f64 / f64::from(rate);
-    let hz = crossings as f64 / seconds.max(0.001) / 2.0;
-    if seconds < 1.0 || !(400.0..480.0).contains(&hz) {
+    // Tenths of a second, loud (most samples above a quiet hiss) and at
+    // about one of the two pitches.
+    let tenth = (rate / 10).max(1) as usize;
+    let (mut shell_tone, mut music_tone, mut other) = (0, 0, 0);
+    for window in samples.chunks_exact(tenth) {
+        let loud = window.iter().filter(|s| s.abs() > 2000).count();
+        if loud * 2 < tenth {
+            continue;
+        }
+        let crossings = window
+            .windows(2)
+            .filter(|pair| (pair[0] < 0) != (pair[1] < 0))
+            .count();
+        let hz = crossings as f64 * 10.0 / 2.0;
+        if (400.0..480.0).contains(&hz) {
+            shell_tone += 1;
+        } else if ((MUSIC_HZ - 40.0)..(MUSIC_HZ + 40.0)).contains(&hz) {
+            music_tone += 1;
+        } else {
+            other += 1;
+        }
+    }
+    // Each tone is 2 s long: more means the output repeated itself (a
+    // starved cyclic buffer looping over what it had played, ADR-0094).
+    if !(10..=24).contains(&shell_tone) || !(10..=24).contains(&music_tone) {
         return Err(format!(
-            "the recording ({SMOKE_AUDIO}) has no 440 Hz tone: {seconds:.2} s of sound at about {hz:.0} Hz"
+            "the recording ({SMOKE_AUDIO}) lacks a tone or repeats one: {:.1} s at 440 Hz (the shell's), \
+             {:.1} s at {MUSIC_HZ:.0} Hz (Music's), {:.1} s of other sound; each should be 1 to 2.4 s",
+            f64::from(shell_tone) / 10.0,
+            f64::from(music_tone) / 10.0,
+            f64::from(other) / 10.0
         ));
     }
-    println!("sound: {seconds:.1} s of a {hz:.0} Hz tone in {SMOKE_AUDIO}");
+    println!(
+        "sound: {:.1} s of the 440 Hz tone, {:.1} s of Music's {MUSIC_HZ:.0} Hz and {:.1} s of other sound in {SMOKE_AUDIO_CHECKED}",
+        f64::from(shell_tone) / 10.0,
+        f64::from(music_tone) / 10.0,
+        f64::from(other) / 10.0
+    );
     Ok(())
 }
 
@@ -2219,6 +2273,11 @@ const BUNDLED_APPS: &[(&str, &str, &str)] = &[
         "viewer",
         "viewer-app",
         include_str!("../../../user/apps/viewer/manifest"),
+    ),
+    (
+        "music",
+        "music-app",
+        include_str!("../../../user/apps/music/manifest"),
     ),
 ];
 
@@ -3361,6 +3420,34 @@ fn json_string_after(text: &str, marker: &str) -> Option<String> {
 }
 
 /// The body of `/big`: 1 MiB in a pattern that catches reordering.
+/// What Music plays in the smoke test (ADR-0094): 2 s of a 660 Hz sine,
+/// 44.1 kHz mono 16-bit, so the guest converts both the rate and the
+/// channels.
+fn tone_wav() -> Vec<u8> {
+    const RATE: u32 = 44_100;
+    let samples: Vec<u8> = (0..RATE * 2)
+        .flat_map(|i| {
+            let phase = f64::from(i) * MUSIC_HZ * std::f64::consts::TAU / f64::from(RATE);
+            ((phase.sin() * 12_000.0) as i16).to_le_bytes()
+        })
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    wav
+}
+
 /// The picture Image Viewer shows in the smoke test (ADR-0090): 200 x 120
 /// RGBA, the left half orange (#e8613c), the right half transparent. A
 /// PNG of stored DEFLATE blocks, with its CRCs and Adler-32.
@@ -3755,6 +3842,7 @@ fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nchunked \r\nF\r\ntransfer works\n\r\n0\r\n\r\n".to_vec(),
         "/big" => fixed("200 OK", &big_body()),
         "/picture.png" => fixed("200 OK", &picture_png()),
+        "/tone.wav" => fixed("200 OK", &tone_wav()),
         "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
         "/models-ca.pem" => fixed("200 OK", MODELS_CA),
         "/v1/chat/completions" => {

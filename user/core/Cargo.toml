@@ -14,6 +14,7 @@ bench = false
 [dependencies]
 oceans-rt = { workspace = true, features = ["alloc"] }
 oceans-fs-proto.workspace = true
+oceans-audio-proto.workspace = true
 oceans-core-proto.workspace = true
 oceans-package.workspace = true
 # The packages the system image brings (ADR-0080).
