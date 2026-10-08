@@ -32,7 +32,7 @@ use oceans_net::{
 use oceans_net_proto::netdev::{self, BUFFER_SIZE, RX_AREA, TX_AREA};
 use oceans_net_proto::{
     Address6, MAX_DATA, MAX_DATA6, MAX_STREAM, MAX_STREAM_BUFFER, MIN_STREAM_BUFFER, NetInfo,
-    NetInfo6, Status, TRUNCATED, address_state, op, state,
+    NetInfo6, READER_BADGE, Status, TRUNCATED, address_state, op, state,
 };
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 
@@ -538,6 +538,14 @@ impl Net {
                 let len = info.encode(&mut encoded);
                 reply[..len].copy_from_slice(&encoded[..len]);
                 Ok(len)
+            }
+            // A reader end (ADR-0096): its badge is no socket's, so only
+            // `INFO` and `INFO6` answer on it.
+            (op::READER, 0) => {
+                let end = oceans_rt::endpoint_mint(self.server, READER_BADGE)
+                    .map_err(|_| Status::NoBuffers)?;
+                *reply_handle = Some(end);
+                Ok(0)
             }
             (op::TCP_CONNECT6, 0) => {
                 if self.device.is_none() {

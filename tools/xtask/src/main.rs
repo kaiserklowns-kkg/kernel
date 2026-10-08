@@ -427,20 +427,28 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 594 301 ffffff Calculator's display",
     b"app stop app.oceans.calculator\r\n",
     // Settings (ADR-0081): the system's own app gets `manage-apps` without
-    // asking; its window (the fourth opened, at the bottom of the area)
-    // shows its sidebar.
+    // asking; its window (the fourth opened, at the bottom of the area,
+    // its content from 356,199) shows its sidebar. Network, clicked
+    // (ADR-0096), shows the stack's configuration through a reader end:
+    // four rows (status, address, router, DNS server), the fourth's line
+    // at 386 from the content's left.
     b"app info app.oceans.settings\r\n",
     b"app start app.oceans.settings\r\n",
     b"@screen 376 523 e9e9ee Settings' sidebar",
+    b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
+    b"@monitor mouse_move -3000 -3000",
+    b"@monitor mouse_move 446 260",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 756 385 d8d8de Settings' Network: four rows",
     b"app stop app.oceans.settings\r\n",
     // Files (ADR-0082): the user's files; its window (the fifth opened,
     // its content from 388,219) shows its toolbar, and Home is listed
     // (ADR-0094 fixed it): the first entry, clicked, is selected.
     b"app start app.oceans.files\r\n",
     b"@screen 788 224 e9e9ee Files' toolbar",
-    b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
-    b"@monitor mouse_move -3000 -3000",
-    b"@monitor mouse_move 688 299",
+    // The mouse Settings used, from 446,260.
+    b"@monitor mouse_move 242 39",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@screen 720 310 d4e3fc Files' first entry in Home, selected",
@@ -747,6 +755,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("apps stopped; the system is stopping"),
     Expect::Contains("init: core stopped"),
     Expect::Contains("init: logkeep stopped"),
+    // The sound, asked rather than killed (ADR-0096): its DMA halted.
+    Expect::Contains("hda: stopping"),
+    Expect::Contains("init: audio stopped"),
     Expect::Contains("nvme: the controller is shut down"),
     Expect::Contains("init: nvme stopped"),
     Expect::Contains("init: all service expectations met"),
@@ -862,6 +873,10 @@ const SHELL_EXPECT: &[Expect] = &[
     // The apps the system brings (ADR-0080), installed on a fresh disk.
     Expect::Contains("core: installed calculator.opk from the system image"),
     Expect::Contains("core: installed settings.opk from the system image"),
+    // `system-settings` (ADR-0096), with the system's own rights, unasked.
+    Expect::Contains(
+        "core: audit: started app.oceans.settings 1.1.0 with window, system-info, manage-apps, system-settings",
+    ),
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),
     Expect::Contains("text edited in oceans"),
@@ -869,7 +884,9 @@ const SHELL_EXPECT: &[Expect] = &[
     // then into the Terminal, where the shell echoes the line.
     Expect::Contains("display: clipboard: 16 bytes copied from Text Editor"),
     Expect::Contains("display: clipboard: pasted into Text Editor"),
-    Expect::Line("edited in oceans"),
+    // The file's second line, the paste: the page ends without a newline,
+    // so the shell's prompt follows it on the same line.
+    Expect::Contains("edited in oceansoceans> "),
     Expect::Contains("display: clipboard: pasted into the Terminal"),
     Expect::Line("pasted edited in oceans"),
     Expect::Contains("core: installed editor.opk from the system image"),
@@ -1085,7 +1102,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("usb-hid: port 6.1: tablet, "),
     Expect::Contains(", 0..32767 x 0..32767, pointer 1"),
     Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) tablet (pointer input)"),
-    // Pointer 5: the desktop's mice before it (Hello and Notes, the Store, Files) took 2 to 4.
+    // Pointer 5: the desktop's mice before it (Hello and Notes, the Store, Settings and Files) took 2 to 4.
     Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 5"),
     Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (pointer input)"),
     Expect::Contains("mouse: requests `use:input`"),

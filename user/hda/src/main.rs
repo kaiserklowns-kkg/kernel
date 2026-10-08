@@ -37,7 +37,7 @@
 use core::fmt::Write;
 use core::ptr;
 
-use oceans_audio_proto::{PLAYER_BADGE, Play, Status, op, open_flags};
+use oceans_audio_proto::{PLAYER_BADGE, Play, READER_BADGE, Status, op, open_flags};
 use oceans_hda::{
     Capabilities, Capture, FORMAT_48K_16_STEREO, Jack, Path, Ring, Widget, WidgetCaps, WidgetType,
     long_verb, param, reg, sd, v, verb,
@@ -115,12 +115,14 @@ fn main(start: Start) -> i64 {
     else {
         return EXIT_BAD_START;
     };
+    // `grant = stop` (ADR-0086): asked before the system stops.
+    let stop = directory.find("stop", "stop");
     let Some(device) = directory.find_kind("device") else {
         say(
             log,
             format_args!("hda: no HD Audio controller; requests fail with an I/O error"),
         );
-        return serve(log, server, &mut None);
+        return serve(log, server, &mut None, stop);
     };
     let mut output = match Sound::start(log, device) {
         Ok(sound) => {
@@ -137,7 +139,7 @@ fn main(start: Start) -> i64 {
             None
         }
     };
-    serve(log, server, &mut output)
+    serve(log, server, &mut output, stop)
 }
 
 fn say(log: Handle, args: core::fmt::Arguments<'_>) {
@@ -646,6 +648,19 @@ impl Sound {
     }
 
     /// The capture session `badge` stopped or went away: the input stops.
+    /// Both streams stopped (the system is stopping): no DMA left running.
+    fn quiet(&mut self) {
+        if self.running {
+            self.rest();
+        }
+        let (regs, page) = (self.regs, &self.page);
+        if let Some(input) = self.input.as_mut()
+            && input.owner.take().is_some()
+        {
+            input.stop(regs, page);
+        }
+    }
+
     fn stop_input(&mut self, badge: u64) -> Status {
         let (regs, log) = (self.regs, self.log);
         match self.input.as_mut() {
@@ -950,15 +965,17 @@ fn configure_input(link: &mut Link, found: &Codec) -> Option<Path> {
 
 /// Serves the audio protocol until the endpoint fails; without a sound
 /// output, every request is answered with `IoError`.
-fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
+fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>, stop: Option<Handle>) -> i64 {
     let mut sessions: [Option<Session>; MAX_SESSIONS] = [None; MAX_SESSIONS];
     let mut next_badge = 1;
     let mut data = [0u8; 64];
     let mut handles = [Handle(0); 4];
     // The output's tick (ADR-0094), on a notification bound to the
-    // endpoint: while it runs, it is tended between requests too.
-    let tick = oceans_rt::notification_create()
-        .ok()
+    // endpoint: while it runs, it is tended between requests too. It is
+    // init's `stop` notification when there is one (ADR-0086), which also
+    // brings `STOP`.
+    let tick = stop
+        .or_else(|| oceans_rt::notification_create().ok())
         .filter(|&n| oceans_rt::endpoint_bind(server, n).is_ok());
     if tick.is_none() {
         say(
@@ -981,6 +998,16 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
                 return EXIT_RECEIVE;
             }
         };
+        if got.signals & oceans_rt::STOP != 0 {
+            // Asked to stop (ADR-0086, ADR-0094): the streams' DMA is
+            // halted before the process goes, not left running into
+            // memory that is about to be freed.
+            if let Some(sound) = sound.as_mut() {
+                sound.quiet();
+            }
+            say(log, format_args!("hda: stopping"));
+            return 0;
+        }
         if got.signals != 0 {
             ticking = false;
             if got.signals & TICK != 0
@@ -1033,8 +1060,13 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>) -> i64 {
                 }
                 None => Status::IoError,
             },
-            (Some(_), op::PLAYER, None) if got.badge == 0 => {
-                match oceans_rt::endpoint_mint(server, PLAYER_BADGE) {
+            (Some(_), op::PLAYER | op::READER, None) if got.badge == 0 => {
+                let badge = if got.label == op::PLAYER {
+                    PLAYER_BADGE
+                } else {
+                    READER_BADGE
+                };
+                match oceans_rt::endpoint_mint(server, badge) {
                     Ok(handle) => {
                         reply_handle = Some(handle);
                         Status::Ok

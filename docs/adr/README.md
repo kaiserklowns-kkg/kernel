@@ -103,5 +103,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0093](0093-serial-input-without-loss.md) | Serial input without loss: flow-controlled test consoles, a lower FIFO trigger, overruns reported | Accepted |
 | [0094](0094-music-and-sound-for-apps.md) | Music, and sound for apps: a player end that plays and cannot record | Accepted |
 | [0095](0095-clipboard.md) | The clipboard: copied while focused, pasted only where the user pastes | Accepted |
+| [0096](0096-settings-network-and-sound.md) | Settings: the network and the sound, through reader ends | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

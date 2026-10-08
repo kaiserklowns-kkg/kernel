@@ -64,7 +64,16 @@ pub mod op {
     /// and has not been played yet. A player keeps its lead by this, not
     /// by its own clock, which drifts from the sound device's.
     pub const QUEUED: u64 = 9;
+    /// On the driver endpoint: → a **reader** end (ADR-0096), badged
+    /// [`READER_BADGE`](super::READER_BADGE), on which only `INFO` and
+    /// `INPUT_INFO` answer: what the system's settings show, without
+    /// playing or recording.
+    pub const READER: u64 = 10;
 }
+
+/// The badge of reader ends (ADR-0096); like [`PLAYER_BADGE`], beyond any
+/// session's.
+pub const READER_BADGE: u64 = 1 << 61;
 
 /// The badge of player ends (ADR-0094). Session badges count up from 1 and
 /// never reach it.
@@ -212,6 +221,17 @@ pub fn input_info(handle: Handle, out: &mut [u8]) -> Result<usize, AudioError> {
 pub fn player(driver: Handle) -> Result<Handle, AudioError> {
     let mut end = [Handle(0); 1];
     let (_, count) = request(driver, op::PLAYER, &[], &[], &mut [], &mut end)?;
+    if count != 1 {
+        return Err(AudioError::Status(Status::BadRequest));
+    }
+    Ok(end[0])
+}
+
+/// A reader end from the driver endpoint (ADR-0096): it names the output
+/// and the input, and opens nothing.
+pub fn reader(driver: Handle) -> Result<Handle, AudioError> {
+    let mut end = [Handle(0); 1];
+    let (_, count) = request(driver, op::READER, &[], &[], &mut [], &mut end)?;
     if count != 1 {
         return Err(AudioError::Status(Status::BadRequest));
     }

@@ -2,13 +2,17 @@
 //! (ADR-0080, ADR-0081), built on the app toolkit.
 //!
 //! - **General:** the release, memory, uptime, the date and time.
+//! - **Network:** the addresses, the router, the DNS server, the hardware
+//!   address (ADR-0096).
+//! - **Sound:** the output and the input (ADR-0096).
 //! - **Apps:** the installed apps; for the one chosen, what it is, each
 //!   permission and its decision (allow, deny, ask again), and removing
 //!   it. Decisions are made through Core and audited as made in Settings.
 //!
 //! Its rights: `system-info`, and `manage-apps` (ADR-0081): a Core end
 //! that may query, decide, manage and audit, given only to the system's
-//! own apps.
+//! own apps; and `system-settings` (ADR-0096): reader ends of the network
+//! and of the sound, which show their configuration and open nothing.
 
 #![no_std]
 #![no_main]
@@ -21,6 +25,7 @@ use core::fmt::Write;
 
 use oceans_abi::sysinfo::{self, KernelInfo, MemoryInfo};
 use oceans_core_proto::{Core, Decision, decision, field, op, parts, source};
+use oceans_net_proto::{Colons, Dotted};
 use oceans_package::Permission;
 use oceans_rt::{Directory, Handle, Start};
 use oceans_ui::{Rect, Style, Ui, colour};
@@ -29,7 +34,7 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 520;
-const SECTIONS: [&str; 2] = ["General", "Apps"];
+const SECTIONS: [&str; 4] = ["General", "Network", "Sound", "Apps"];
 
 struct App {
     id: String,
@@ -48,6 +53,9 @@ struct Detail {
 struct Settings {
     core: Option<Core>,
     sysinfo: Option<Handle>,
+    /// Reader ends (`system-settings`, ADR-0096).
+    net: Option<Handle>,
+    audio: Option<Handle>,
     section: usize,
     apps: Vec<App>,
     chosen: Option<usize>,
@@ -219,6 +227,99 @@ fn general(ui: &mut Ui<'_, '_>, settings: &Settings) {
     ui.row("Date and time", &line);
 }
 
+/// The network's configuration (ADR-0096), through a reader end of the
+/// stack: it shows, and opens nothing.
+fn network(ui: &mut Ui<'_, '_>, settings: &Settings) {
+    ui.heading("Network");
+    ui.space(6);
+    let Some(net) = settings.net else {
+        ui.muted("The network's settings are not available to Settings.");
+        return;
+    };
+    let info = match oceans_net_proto::info(net) {
+        Ok(info) => info,
+        Err(error) => {
+            ui.muted(error.message());
+            return;
+        }
+    };
+    let mut line = String::new();
+    if info.configured {
+        ui.row("Status", "connected");
+        let _ = write!(line, "{}/{}", Dotted(info.address), info.prefix);
+        ui.row("IPv4 address", &line);
+        line.clear();
+        if info.gateway != [0; 4] {
+            let _ = write!(line, "{}", Dotted(info.gateway));
+            ui.row("Router", &line);
+            line.clear();
+        }
+        if info.dns != [0; 4] {
+            let _ = write!(line, "{}", Dotted(info.dns));
+            ui.row("DNS server", &line);
+            line.clear();
+        }
+    } else {
+        ui.row("Status", "no address yet (asking DHCP)");
+    }
+    // A stack without IPv6 does not know the request.
+    if let Ok(info6) = oceans_net_proto::info6(net)
+        && info6.enabled
+    {
+        for address in info6.addresses() {
+            let _ = write!(line, "{}/{}", Colons(address.address), address.prefix);
+            let name = if address.link_local {
+                "IPv6 (link-local)"
+            } else {
+                "IPv6 address"
+            };
+            ui.row(name, &line);
+            line.clear();
+        }
+        if let Some(router) = info6.router {
+            let _ = write!(line, "{}", Colons(router));
+            ui.row("IPv6 router", &line);
+            line.clear();
+        }
+    }
+    let [a, b, c, d, e, f] = info.mac;
+    let _ = write!(line, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}");
+    ui.row("Hardware address", &line);
+}
+
+/// The sound's output and input (ADR-0096), through a reader end of the
+/// audio service: it names them, and plays and records nothing.
+fn sound(ui: &mut Ui<'_, '_>, settings: &Settings) {
+    ui.heading("Sound");
+    ui.space(6);
+    let Some(audio) = settings.audio else {
+        ui.muted("The sound's settings are not available to Settings.");
+        return;
+    };
+    let mut text = [0u8; 160];
+    for (name, read) in [
+        (
+            "Output",
+            oceans_audio_proto::info as fn(Handle, &mut [u8]) -> _,
+        ),
+        ("Input", oceans_audio_proto::input_info),
+    ] {
+        let value = match read(audio, &mut text) {
+            Ok(len) => core::str::from_utf8(&text[..len]).unwrap_or("?"),
+            Err(_) => "none",
+        };
+        // "Intel HDA, codec …, line out (…), 48 kHz stereo": the device,
+        // then what it is, one row each.
+        let mut parts = value.splitn(2, ", ");
+        ui.row(name, parts.next().unwrap_or(value));
+        if let Some(rest) = parts.next() {
+            ui.muted(rest);
+        }
+    }
+    ui.space(6);
+    ui.muted("Sound plays at 48 kHz, 16-bit stereo; apps that may play it are in Apps.");
+}
+
 fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     ui.heading("Apps");
     if settings.core.is_none() {
@@ -337,6 +438,8 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     }
     match settings.section {
         0 => general(ui, settings),
+        1 => network(ui, settings),
+        2 => sound(ui, settings),
         _ => apps(ui, settings),
     }
 }
@@ -348,6 +451,8 @@ fn main(start: Start) -> i64 {
     let mut settings = Settings {
         core: directory.find("use", "core").map(Core),
         sysinfo: directory.find("sysinfo", "sysinfo"),
+        net: directory.find("use", "net-info"),
+        audio: directory.find("use", "audio-info"),
         section: 0,
         apps: Vec::new(),
         chosen: None,

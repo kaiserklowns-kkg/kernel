@@ -191,6 +191,7 @@ dependencies = [
  "oceans-audio-proto",
  "oceans-core-proto",
  "oceans-fs-proto",
+ "oceans-net-proto",
  "oceans-package",
  "oceans-rt",
 ]
@@ -1176,7 +1177,9 @@ name = "settings-app"
 version = "0.1.0"
 dependencies = [
  "oceans-abi",
+ "oceans-audio-proto",
  "oceans-core-proto",
+ "oceans-net-proto",
  "oceans-package",
  "oceans-rt",
  "oceans-ui",

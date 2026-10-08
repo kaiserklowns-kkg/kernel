@@ -1718,6 +1718,34 @@ impl Core {
             handles.push(module);
         }
         for &permission in granted {
+            // What the system's settings show (ADR-0096): reader ends of
+            // the network and of the sound, for the system's own apps only.
+            if permission == Permission::SystemSettings {
+                if !self.system_app(id) {
+                    continue;
+                }
+                let net = self
+                    .net
+                    .and_then(|h| oceans_net_proto::reader(h).ok())
+                    .map(|h| (h, "net-info"));
+                let audio = self
+                    .audio
+                    .and_then(|h| oceans_audio_proto::reader(h).ok())
+                    .map(|h| (h, "audio-info"));
+                for (given, what) in [(net, "the network"), (audio, "the sound")] {
+                    match given {
+                        Some((handle, label)) => {
+                            let _ = writeln!(directory, "{} use {label}", handles.len());
+                            handles.push(handle);
+                        }
+                        None => say(
+                            self.log,
+                            format_args!("core: {id}: system-settings: {what} unavailable"),
+                        ),
+                    }
+                }
+                continue;
+            }
             let given = match permission {
                 Permission::Console => out.take().map(|out| (out, "console", "out")),
                 Permission::Storage => self
@@ -1769,6 +1797,8 @@ impl Core {
                     .audio
                     .and_then(|h| oceans_audio_proto::player(h).ok())
                     .map(|h| (h, "use", "audio")),
+                // Given above, as two ends.
+                Permission::SystemSettings => continue,
             };
             match given {
                 Some((handle, kind, label)) => {

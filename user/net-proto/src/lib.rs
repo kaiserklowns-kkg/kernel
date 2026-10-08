@@ -227,6 +227,26 @@ pub mod op {
     /// On the stack's endpoint: → the IPv6 configuration, see
     /// [`NetInfo6`](super::NetInfo6).
     pub const INFO6: u64 = 19;
+    /// On the stack's endpoint (unbadged): → a **reader** end (ADR-0096),
+    /// badged [`READER_BADGE`](super::READER_BADGE). `INFO` and `INFO6`
+    /// answer on it; nothing opens a socket on it: what the system's
+    /// settings show, without the network itself.
+    pub const READER: u64 = 20;
+}
+
+/// The badge of reader ends (ADR-0096). Socket badges count up from 1 and
+/// never reach it.
+pub const READER_BADGE: u64 = 1 << 62;
+
+/// A reader end from the stack's endpoint (ADR-0096): it reads the
+/// configuration and opens nothing.
+pub fn reader(net: Handle) -> Result<Handle, NetError> {
+    let mut end = [Handle(0); 1];
+    let (_, count) = request(net, op::READER, &[], &[], &mut [], &mut end)?;
+    if count != 1 {
+        return Err(NetError::Status(Status::BadRequest));
+    }
+    Ok(end[0])
 }
 
 /// Shared buffer `TcpStream` attaches to each connection (ADR-0030).

@@ -77,10 +77,14 @@ pub enum Permission {
     /// Playing sound (ADR-0094): a player end of the audio service, which
     /// opens playing sessions and never the input.
     Sound,
+    /// What the system's settings show (ADR-0096): the network's and the
+    /// sound's configuration, read only. Only the system's own apps
+    /// (Settings) may ask for it.
+    SystemSettings,
 }
 
 impl Permission {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Console,
         Self::Storage,
         Self::SystemInfo,
@@ -91,6 +95,7 @@ impl Permission {
         Self::Notifications,
         Self::ManageApps,
         Self::Sound,
+        Self::SystemSettings,
     ];
 
     pub fn name(self) -> &'static str {
@@ -105,6 +110,7 @@ impl Permission {
             Self::Notifications => "notifications",
             Self::ManageApps => "manage-apps",
             Self::Sound => "sound",
+            Self::SystemSettings => "system-settings",
         }
     }
 
@@ -125,6 +131,7 @@ impl Permission {
             Self::Notifications => "show you notifications on the desktop",
             Self::ManageApps => "manage your apps and their permissions",
             Self::Sound => "play sound",
+            Self::SystemSettings => "see the network's and the sound's settings",
         }
     }
 
@@ -144,7 +151,7 @@ impl Permission {
     /// Only the system's own apps (signed by a key of the image's trust
     /// list) may ask for it (ADR-0081).
     pub fn system_only(self) -> bool {
-        matches!(self, Self::ManageApps)
+        matches!(self, Self::ManageApps | Self::SystemSettings)
     }
 }
 
