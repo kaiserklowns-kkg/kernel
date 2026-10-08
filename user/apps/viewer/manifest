@@ -4,7 +4,7 @@
 # image.
 id = app.oceans.viewer
 name = Image Viewer
-version = 1.0.0
+version = 1.0.1
 publisher = {{PUBLISHER}}
 description = PNG and BMP pictures: look at them, one after another
 architecture = x86_64

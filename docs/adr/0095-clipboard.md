@@ -90,6 +90,9 @@ Linux and Windows):
   draws the selection, says how many characters are selected, and copies,
   cuts and pastes.
 - **Go apps:** a `Paste` event kind, `window.Copy` and `window.TakePaste`.
+- **Versions:** Text Editor and Image Viewer (which has a text field)
+  become 1.0.1, so that a disk with the 1.0.0 apps installs the new ones
+  from the image (only a newer version replaces an installed app).
 
 ## Consequences
 
