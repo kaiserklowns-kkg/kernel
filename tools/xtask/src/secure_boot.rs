@@ -263,7 +263,8 @@ fn secure_machine(
     vars: &Path,
     boot: Boot<'_>,
     nvme: Option<&str>,
-) -> Command {
+) -> Result<(Command, u16)> {
+    let serial_port = super::free_tcp_port()?;
     let mut cmd = Command::new(qemu);
     cmd.current_dir(root())
         .args([
@@ -287,7 +288,8 @@ fn secure_machine(
             "if=pflash,format=raw,unit=1,file={}",
             vars.display()
         ))
-        .args(["-no-reboot", "-serial", "stdio", "-display", "none"])
+        .args(["-no-reboot", "-display", "none"])
+        .args(super::serial_args(Some(serial_port)))
         .args([
             "-device",
             "qemu-xhci,id=usb",
@@ -313,10 +315,10 @@ fn secure_machine(
             .arg(format!("if=none,id=nvme0,format=raw,file={nvme}"))
             .args(["-device", "nvme,serial=oceans-sb,drive=nvme0"]);
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
         .stderr(Stdio::null());
-    cmd
+    Ok((cmd, serial_port))
 }
 
 /// Runs `machine` until a line contains `until`; then, for each step,
@@ -324,16 +326,19 @@ fn secure_machine(
 /// an answer does not come within `timeout` of the start, or the machine
 /// exits. Returns whether every wait was met, and the output.
 fn watch(
-    mut machine: Command,
+    machine: Result<(Command, u16)>,
     until: &str,
     steps: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<(bool, String)> {
+    let (mut machine, serial_port) = machine?;
     let mut child: Child = machine
         .spawn()
         .map_err(|e| format!("failed to start QEMU: {e}"))?;
-    let mut input = child.stdin.take().expect("stdin is piped");
-    let stdout = child.stdout.take().expect("stdout is piped");
+    let stdout = super::connect_serial(&mut child, serial_port)?;
+    let mut input = stdout
+        .try_clone()
+        .map_err(|e| format!("the serial line: {e}"))?;
     let (lines_tx, lines) = mpsc::channel::<String>();
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);

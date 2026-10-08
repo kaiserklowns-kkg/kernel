@@ -252,10 +252,21 @@ pub fn read(out: &mut [u8]) -> usize {
                         input.head = (input.head + 1) % CAPACITY;
                         input.len -= 1;
                     }
-                    if input.dropped > 0 {
-                        let dropped = core::mem::take(&mut input.dropped);
-                        drop(input);
+                    let dropped = core::mem::take(&mut input.dropped);
+                    drop(input);
+                    if dropped > 0 {
                         klog::warn!("console input overflow: {dropped} bytes dropped");
+                    }
+                    // The UART's FIFO filled before its interrupt was
+                    // served: bytes were lost on the line (ADR-0093). Said
+                    // here, in the reader's context: never log from an
+                    // interrupt.
+                    let overruns = arch::serial_overruns();
+                    if overruns > 0 {
+                        klog::warn!(
+                            "console input: the serial line overran {overruns} time(s); \
+                             typed input was lost"
+                        );
                     }
                     return count;
                 }

@@ -1520,6 +1520,7 @@ fn qemu_command(
     forward: Option<(u16, u16)>,
     bridge: Option<(u16, u16)>,
     monitor: Option<u16>,
+    serial: Option<u16>,
 ) -> Result<Command> {
     let Images {
         disk,
@@ -1543,9 +1544,8 @@ fn qemu_command(
         "-smp",
         "4",
         "-no-reboot",
-        "-serial",
-        "stdio",
     ])
+    .args(serial_args(serial))
     .arg("-drive")
     .arg(pflash)
     // The packed ESP (`pack_esp`). Relative path: QEMU's option parser
@@ -1787,7 +1787,51 @@ fn run(profile: Profile) -> Result {
         None,
         Some((bridge, apps)),
         None,
+        // Interactive: the serial line is this terminal.
+        None,
     )?)
+}
+
+/// QEMU's serial line: this process's stdio (`None`, for a person at the
+/// terminal), or a TCP port that tests connect to with [`connect_serial`].
+///
+/// Tests use TCP because QEMU reads a socket only when the UART can take a
+/// byte, so typed input waits until the guest drains the FIFO. QEMU's
+/// Windows stdio instead drops every byte that arrives while the FIFO is
+/// at its trigger level: a serial interrupt served late then lost
+/// keystrokes, and a lost Enter left a test waiting for a prompt forever.
+fn serial_args(serial: Option<u16>) -> [String; 2] {
+    let backend = match serial {
+        Some(port) => format!("tcp:127.0.0.1:{port},server=on,wait=on"),
+        None => "stdio".to_string(),
+    };
+    ["-serial".to_string(), backend]
+}
+
+/// Connects to the serial line of `child`, started with [`serial_args`]
+/// and a port: QEMU waits for this connection before it starts the
+/// machine.
+fn connect_serial(child: &mut std::process::Child, port: u16) -> Result<TcpStream> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => {
+                let _ = stream.set_nodelay(true);
+                return Ok(stream);
+            }
+            Err(error) => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(format!(
+                        "QEMU exited ({status}) before its serial line opened"
+                    ));
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!("cannot reach QEMU's serial line: {error}"));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// The FAT stick: the fixture, expanded (`OCSPARSE`: size, then runs of
@@ -2684,6 +2728,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             .into_bytes()
     };
     let monitor_port = free_tcp_port()?;
+    let serial_port = free_tcp_port()?;
     let bridge_port = free_tcp_port()?;
     let apps_port = free_tcp_port()?;
     // The pairing code `ui pair` printed (ADR-0058), for `@bridge`.
@@ -2700,14 +2745,16 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
         Some((udp_forward, tcp_forward)),
         Some((bridge_port, apps_port)),
         Some(monitor_port),
+        Some(serial_port),
     )?
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
     .spawn()
     .map_err(|e| format!("failed to start QEMU: {e}"))?;
-    let mut serial_input = child.stdin.take().expect("stdin is piped");
-
-    let stdout = child.stdout.take().expect("stdout is piped");
+    let stdout = connect_serial(&mut child, serial_port)?;
+    let mut serial_input = stdout
+        .try_clone()
+        .map_err(|e| format!("the serial line: {e}"))?;
     let (events_tx, events_rx) = mpsc::channel();
     // Used (and dropped) once typing may start, so the channel still
     // closes when QEMU exits.

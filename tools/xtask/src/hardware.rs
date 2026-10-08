@@ -423,13 +423,16 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     let firmware = find_firmware(&qemu)?;
     let mut pflash = std::ffi::OsString::from("if=pflash,format=raw,readonly=on,file=");
     pflash.push(&firmware);
+    let monitor_port = free_tcp_port()?;
+    let serial_port = free_tcp_port()?;
     let mut child = Command::new(&qemu)
         .current_dir(root())
         // A Tier 1 machine (ADR-0005): x86-64-v2 or newer.
         .args(["-machine", "q35", "-cpu", "max", "-m", "512M", "-no-reboot"])
         // A four-core PC (ADR-0088).
         .args(["-smp", "4"])
-        .args(["-serial", "stdio", "-display", "none"])
+        .args(serial_args(Some(serial_port)))
+        .args(["-display", "none"])
         .arg("-drive")
         .arg(pflash)
         // No virtio anywhere: what a PC has.
@@ -442,6 +445,9 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
         .arg(format!("if=none,id=sata0,format=raw,file={HW_SATA_IMAGE}"))
         .args(["-device", "ide-hd,drive=sata0,bus=ide.0,serial=oceans-sata"])
         .args(["-netdev", "user,id=net0", "-device", "e1000e,netdev=net0"])
+        // The monitor: where each CPU is, if the boot hangs.
+        .arg("-monitor")
+        .arg(format!("tcp:127.0.0.1:{monitor_port},server=on,wait=off"))
         .args([
             "-device",
             "qemu-xhci,id=usb",
@@ -467,12 +473,14 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
         .arg("-audiodev")
         .arg(input_audiodev(true))
         .args(["-device", "hda-micro,audiodev=snd1,cad=1"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
         .spawn()
         .map_err(|e| format!("failed to start QEMU: {e}"))?;
-    let mut input = child.stdin.take().expect("stdin is piped");
-    let stdout = child.stdout.take().expect("stdout is piped");
+    let stdout = connect_serial(&mut child, serial_port)?;
+    let mut input = stdout
+        .try_clone()
+        .map_err(|e| format!("the serial line: {e}"))?;
     let (lines_tx, lines) = mpsc::channel::<std::result::Result<String, ()>>();
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -561,6 +569,7 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                 {
                     println!("  | {line}");
                 }
+                report_cpus(monitor_port);
                 break Err(format!(
                     "hardware smoke boot timed out after {}s",
                     HW_TIMEOUT.as_secs()

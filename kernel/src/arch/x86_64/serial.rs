@@ -13,6 +13,8 @@ const MODEM_CONTROL: u16 = 4;
 const LINE_STATUS: u16 = 5;
 
 const LINE_STATUS_DATA_READY: u8 = 1 << 0;
+/// A byte arrived with the FIFO full: input was lost.
+const LINE_STATUS_OVERRUN: u8 = 1 << 1;
 const LINE_STATUS_THR_EMPTY: u8 = 1 << 5;
 const IER_RECEIVED_DATA: u8 = 1 << 0;
 const MCR_DTR_RTS: u8 = 0x03;
@@ -54,7 +56,11 @@ pub fn init() {
     outb(DATA, 0x01); // divisor 1 → 115200 baud
     outb(INTERRUPT_ENABLE, 0x00);
     outb(LINE_CONTROL, 0x03); // 8 data bits, no parity, 1 stop bit
-    outb(FIFO_CONTROL, 0xc7); // enable + clear FIFOs, 14-byte threshold
+    // Enable and clear the FIFOs; interrupt at 8 bytes (ADR-0093): 8 bytes
+    // of the 16 are left for the interrupt's latency, about 0.7 ms at
+    // 115200 baud (at 14, two bytes: 0.17 ms). Fewer bytes waiting also
+    // raise an interrupt, after four characters' time.
+    outb(FIFO_CONTROL, 0x87);
     outb(MODEM_CONTROL, MCR_DTR_RTS);
 }
 
@@ -89,14 +95,23 @@ pub fn enable_receive_interrupt() {
     outb(INTERRUPT_ENABLE, IER_RECEIVED_DATA);
 }
 
-/// Passes every received byte to `sink` (from the interrupt handler).
-pub fn drain_input(mut sink: impl FnMut(u8)) {
+/// Passes every received byte to `sink` (from the interrupt handler);
+/// returns whether the UART reported an overrun (input lost before the
+/// kernel could read it).
+pub fn drain_input(mut sink: impl FnMut(u8)) -> bool {
+    let mut overrun = false;
     for _ in 0..DRAIN_LIMIT {
         let status = inb(LINE_STATUS);
         // 0xff: no UART present (floating bus).
-        if status == 0xff || status & LINE_STATUS_DATA_READY == 0 {
-            return;
+        if status == 0xff {
+            return false;
+        }
+        // Reading the status clears the overrun flag.
+        overrun |= status & LINE_STATUS_OVERRUN != 0;
+        if status & LINE_STATUS_DATA_READY == 0 {
+            break;
         }
         sink(inb(DATA));
     }
+    overrun
 }

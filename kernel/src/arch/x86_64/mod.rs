@@ -291,10 +291,22 @@ static CONSOLE_SINK: spin::Once<fn(u8)> = spin::Once::new();
 /// The I/O APIC used for device interrupts, kept for future routes.
 static IO_APIC: spin::Once<spin::Mutex<ioapic::IoApic>> = spin::Once::new();
 
+/// Serial interrupts that found the UART overrun since last asked
+/// ([`serial_overruns`]).
+static SERIAL_OVERRUNS: AtomicU32 = AtomicU32::new(0);
+
 fn on_serial_interrupt() {
-    if let Some(sink) = CONSOLE_SINK.get() {
-        serial::drain_input(sink);
+    if let Some(sink) = CONSOLE_SINK.get()
+        && serial::drain_input(sink)
+    {
+        SERIAL_OVERRUNS.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// How many times the serial line lost input (its FIFO overran) since the
+/// last call, and resets the count (ADR-0093).
+pub fn serial_overruns() -> u32 {
+    SERIAL_OVERRUNS.swap(0, Ordering::Relaxed)
 }
 
 fn on_keyboard_interrupt() {

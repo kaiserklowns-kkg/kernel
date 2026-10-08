@@ -100,5 +100,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0090](0090-image-viewer.md) | Image Viewer | Accepted |
 | [0091](0091-secure-boot.md) | Secure Boot | Accepted |
 | [0092](0092-secure-boot-updates.md) | Updates under Secure Boot: a slot per partition, switched in the partition table | Accepted |
+| [0093](0093-serial-input-without-loss.md) | Serial input without loss: flow-controlled test consoles, a lower FIFO trigger, overruns reported | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.
