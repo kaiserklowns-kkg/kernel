@@ -631,3 +631,62 @@ fn large_reads_go_out_in_runs() {
         assert!(reads < 40, "{name}: {reads} read requests");
     }
 }
+
+// ---- Making volumes (ADR-0092) ----------------------------------------------
+
+#[test]
+fn formats_fat32_that_we_and_the_reference_tools_accept() {
+    let mut disk = Overlay::new(vec![0u8; 40 << 20]);
+    format(&mut disk, "oceans-a", 0x1234_5678).unwrap();
+    let mut fat = Fat::open(disk).unwrap();
+    assert_eq!(fat.kind(), FatType::Fat32);
+    assert_eq!(fat.label(), "OCEANS-A");
+    let report = fat.check().unwrap();
+    assert_eq!((report.files, report.lost, report.orphans), (0, 0, 0));
+    let recovery = fat.enable_writes().unwrap();
+    assert!(!recovery.unclean, "a new volume is clean");
+    let dir = fat.create(ROOT, "EFI", true).unwrap();
+    let file = fat.create(dir, "limine.conf", false).unwrap();
+    let text = b"timeout: 0\n".repeat(200);
+    fat.write_file(file, 0, &text).unwrap();
+    fat.sync().unwrap();
+    let bytes = fat.disk().bytes();
+    reference_tools_accept("format", 0, &bytes, &[("EFI/limine.conf", text.clone())]);
+
+    let mut fat = Fat::open(Overlay::new(bytes)).unwrap();
+    let dir = fat.lookup(ROOT, "EFI").unwrap();
+    let file = fat.lookup(dir, "limine.conf").unwrap();
+    let mut back = vec![0u8; text.len()];
+    assert_eq!(fat.read_file(file, 0, &mut back).unwrap(), text.len());
+    assert_eq!(back, text);
+}
+
+#[test]
+fn refuses_volumes_fat32_cannot_hold() {
+    let mut disk = Overlay::new(vec![0u8; 16 << 20]);
+    assert_eq!(format(&mut disk, "small", 1), Err(Error::NoSpace));
+}
+
+#[test]
+fn a_window_is_one_partition_of_a_disk() {
+    let mut disk = Overlay::new(vec![0u8; 80 << 20]);
+    {
+        let mut window = Window::new(&mut disk, 1 << 20, 36 << 20).unwrap();
+        format(&mut window, "first", 1).unwrap();
+    }
+    {
+        let mut window = Window::new(&mut disk, 40 << 20, 36 << 20).unwrap();
+        format(&mut window, "second", 2).unwrap();
+    }
+    let first = Fat::open(Window::new(&mut disk, 1 << 20, 36 << 20).unwrap()).unwrap();
+    assert_eq!(first.label(), "FIRST");
+    let mut second = Fat::open(Window::new(&mut disk, 40 << 20, 36 << 20).unwrap()).unwrap();
+    assert_eq!(second.label(), "SECOND");
+    second.enable_writes().unwrap();
+    assert!(second.disk().size() == 36 << 20);
+    // Reads and writes outside the window fail.
+    let mut window = Window::new(&mut disk, 40 << 20, 1 << 20).unwrap();
+    assert_eq!(window.read_at(1 << 20, &mut [0u8; 512]), Err(IoError));
+    assert!(Window::new(&mut disk, 79 << 20, 2 << 20).is_none());
+    assert!(Window::new(&mut disk, 100, 512).is_none());
+}

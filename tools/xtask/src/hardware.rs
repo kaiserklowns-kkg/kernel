@@ -62,101 +62,6 @@ fn remove_service(text: &str, name: &str) -> Result<String> {
     Ok(format!("{}{}", &text[..start], &text[end..]))
 }
 
-/// CRC-32 (IEEE 802.3, reflected), as GPT uses.
-pub fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
-
-const SECTOR: usize = 512;
-/// Where the partition starts (1 MiB, aligned).
-const FIRST_LBA: u64 = 2048;
-/// The EFI system partition type, in GPT's mixed-endian byte order.
-const ESP_TYPE: [u8; 16] = [
-    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
-];
-
-/// A GPT disk of `sectors` sectors with one EFI system partition from
-/// [`FIRST_LBA`] for `esp_sectors`: protective MBR, primary and backup
-/// headers and entry arrays. `seed` makes the GUIDs (stable per build).
-pub fn gpt_disk(sectors: u64, esp_sectors: u64, seed: &[u8]) -> Vec<u8> {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(seed);
-    let mut disk_guid = [0u8; 16];
-    disk_guid.copy_from_slice(&digest[..16]);
-    let mut part_guid = [0u8; 16];
-    part_guid.copy_from_slice(&digest[16..32]);
-    // Random-variant GUIDs (version 4, RFC 4122 variant).
-    for guid in [&mut disk_guid, &mut part_guid] {
-        guid[7] = (guid[7] & 0x0f) | 0x40;
-        guid[8] = (guid[8] & 0x3f) | 0x80;
-    }
-
-    let mut disk = vec![0u8; sectors as usize * SECTOR];
-    // The protective MBR: one partition of type 0xEE over the disk.
-    let mbr = &mut disk[..SECTOR];
-    mbr[446 + 1..446 + 4].copy_from_slice(&[0x00, 0x02, 0x00]);
-    mbr[446 + 4] = 0xee;
-    mbr[446 + 5..446 + 8].copy_from_slice(&[0xff, 0xff, 0xff]);
-    mbr[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
-    let covered = u32::try_from(sectors - 1).unwrap_or(u32::MAX);
-    mbr[446 + 12..446 + 16].copy_from_slice(&covered.to_le_bytes());
-    mbr[510] = 0x55;
-    mbr[511] = 0xaa;
-
-    // The entry array: 128 entries of 128 bytes, the first the ESP.
-    let mut entries = vec![0u8; 128 * 128];
-    entries[..16].copy_from_slice(&ESP_TYPE);
-    entries[16..32].copy_from_slice(&part_guid);
-    entries[32..40].copy_from_slice(&FIRST_LBA.to_le_bytes());
-    entries[40..48].copy_from_slice(&(FIRST_LBA + esp_sectors - 1).to_le_bytes());
-    for (i, unit) in "EFI system partition".encode_utf16().enumerate() {
-        entries[56 + 2 * i..58 + 2 * i].copy_from_slice(&unit.to_le_bytes());
-    }
-    let entries_crc = crc32(&entries);
-    let entry_sectors = (entries.len() / SECTOR) as u64;
-
-    let header = |current: u64, backup: u64, entries_lba: u64| {
-        let mut h = [0u8; SECTOR];
-        h[..8].copy_from_slice(b"EFI PART");
-        h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
-        h[12..16].copy_from_slice(&92u32.to_le_bytes());
-        h[24..32].copy_from_slice(&current.to_le_bytes());
-        h[32..40].copy_from_slice(&backup.to_le_bytes());
-        h[40..48].copy_from_slice(&(2 + entry_sectors).to_le_bytes());
-        h[48..56].copy_from_slice(&(sectors - 2 - entry_sectors).to_le_bytes());
-        h[56..72].copy_from_slice(&disk_guid);
-        h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
-        h[80..84].copy_from_slice(&128u32.to_le_bytes());
-        h[84..88].copy_from_slice(&128u32.to_le_bytes());
-        h[88..92].copy_from_slice(&entries_crc.to_le_bytes());
-        let crc = crc32(&h[..92]);
-        h[16..20].copy_from_slice(&crc.to_le_bytes());
-        h
-    };
-    let last = sectors - 1;
-    let backup_entries = last - entry_sectors;
-    let put = |disk: &mut Vec<u8>, lba: u64, bytes: &[u8]| {
-        let at = lba as usize * SECTOR;
-        disk[at..at + bytes.len()].copy_from_slice(bytes);
-    };
-    put(&mut disk, 1, &header(1, last, 2));
-    put(&mut disk, 2, &entries);
-    put(&mut disk, backup_entries, &entries);
-    put(&mut disk, last, &header(last, 1, backup_entries));
-    disk
-}
-
 /// `cargo xtask usb`: the image to write to a USB stick for a real machine
 /// (the hardware profile).
 pub fn usb(profile: Profile) -> Result {
@@ -188,8 +93,7 @@ pub fn usb_secure_boot(profile: Profile) -> Result {
         &release::ImageKeys::development()?,
     )?;
     let key = crate::secure_boot::development_key()?;
-    crate::secure_boot::secure_esp(&esp, &key)?;
-    write_usb_image(&esp)?;
+    crate::secure_boot::write_secure_usb_image(&esp, &key)?;
     println!(
         "{USB_IMAGE} is signed for Secure Boot with the development Secure Boot key: enrol \
          tools/keys/oceans-dev-secure-boot.cer (on the stick, {}) in the firmware's db to boot \
@@ -199,53 +103,30 @@ pub fn usb_secure_boot(profile: Profile) -> Result {
     Ok(())
 }
 
-/// Packs `esp` into [`USB_IMAGE`]: GPT, then FAT32 in the partition (with
-/// mkfs.fat and mtools, as `pack_esp`).
+/// Packs `esp` into [`USB_IMAGE`]: GPT, one EFI system partition with
+/// FAT32 holding its files (made here, ADR-0092).
 pub fn write_usb_image(esp: &Path) -> Result {
-    let used: u64 = walk_size(esp)?;
+    let used = disk_image::tree_size(esp)?;
     // Room for the second slot and an update file beside it (ADR-0071).
     let esp_mib = (used / (1 << 20) * 3 + 48).max(64);
-    let esp_sectors = esp_mib * 2048;
-    let sectors = FIRST_LBA + esp_sectors + 2048;
     let kernel = fs::read(esp.join("boot").join("a").join(KERNEL_PACKAGE)).unwrap_or_default();
-    let image = root().join(USB_IMAGE);
-    fs::write(&image, gpt_disk(sectors, esp_sectors, &kernel))
-        .map_err(|e| format!("cannot write {}: {e}", image.display()))?;
-    let at = format!("{}@@1M", host_path_for_tool(&image));
-    let mkfs = fat_tool("usr/sbin/mkfs.fat")
-        .args(["-F", "32", "-n", "OCEANS", "--offset", "2048"])
-        .arg(host_path_for_tool(&image))
-        .arg((esp_sectors / 2).to_string())
-        .output()
-        .map_err(|e| {
-            format!("cannot run mkfs.fat (dosfstools; or set OCEANS_FAT_TOOLS_WSL): {e}")
-        })?;
-    if !mkfs.status.success() {
-        return Err(format!(
-            "mkfs.fat failed: {}",
-            String::from_utf8_lossy(&mkfs.stderr)
-        ));
+    let mut sources = vec![esp.join("EFI"), esp.join("boot"), esp.join("limine.conf")];
+    // A Secure Boot image's certificate, at the root (ADR-0091).
+    let certificate = esp.join(crate::secure_boot::CERTIFICATE_FILE);
+    if certificate.is_file() {
+        sources.push(certificate);
     }
-    let copied = fat_tool("usr/bin/mcopy")
-        .args(["-s", "-i", &at])
-        .arg(host_path_for_tool(&esp.join("EFI")))
-        .arg(host_path_for_tool(&esp.join("boot")))
-        .arg(host_path_for_tool(&esp.join("limine.conf")))
-        .args(
-            // A Secure Boot image's certificate, at the root (ADR-0091).
-            Some(esp.join(crate::secure_boot::CERTIFICATE_FILE))
-                .filter(|p| p.is_file())
-                .map(|p| host_path_for_tool(&p)),
-        )
-        .arg("::/")
-        .output()
-        .map_err(|e| format!("cannot run mcopy (mtools): {e}"))?;
-    if !copied.status.success() {
-        return Err(format!(
-            "mcopy failed: {}",
-            String::from_utf8_lossy(&copied.stderr)
-        ));
-    }
+    disk_image::gpt_image(
+        &root().join(USB_IMAGE),
+        &[disk_image::Volume {
+            kind: oceans_gpt::EFI_SYSTEM,
+            name: "EFI system partition",
+            label: "OCEANS",
+            mib: esp_mib,
+            sources,
+        }],
+        &kernel,
+    )?;
     println!(
         "{USB_IMAGE}: GPT, an EFI system partition of {esp_mib} MiB ({} MiB of files)",
         used >> 20
@@ -301,6 +182,7 @@ pub fn system_package(
     version: &str,
     key: &oceans_dev::DeveloperKey,
     description: &str,
+    secure_boot: Option<&oceans_dev::secure_boot::SecureBootKey>,
 ) -> Result<Vec<u8>> {
     let slot = esp.join("boot").join("a");
     let kernel = fs::read(slot.join(KERNEL_PACKAGE)).map_err(|e| format!("kernel: {e}"))?;
@@ -327,11 +209,26 @@ pub fn system_package(
          api = 1\nchannel = {RELEASE_CHANNEL}\nentry = {KERNEL_PACKAGE}\n",
         key.publisher
     );
-    let files: [(&str, &[u8]); 3] = [
+    // For systems that boot with Secure Boot (ADR-0092): the slot's signed
+    // Limine and its configuration, naming this kernel and boot archive.
+    let boot_files = match secure_boot {
+        Some(sb_key) => Some(crate::secure_boot::slot_boot_files(
+            release.trim(),
+            &kernel,
+            &new_initrd,
+            sb_key,
+        )?),
+        None => None,
+    };
+    let mut files: Vec<(&str, &[u8])> = vec![
         ("manifest", manifest.as_bytes()),
         (KERNEL_PACKAGE, &kernel),
         ("initrd", &new_initrd),
     ];
+    if let Some((efi, config)) = &boot_files {
+        files.push((crate::secure_boot::UPDATE_EFI, efi));
+        files.push((crate::secure_boot::UPDATE_CONFIG, config.as_bytes()));
+    }
     oceans_package::build(&files, &key.seed).map_err(|e| format!("cannot sign the update: {e:?}"))
 }
 
@@ -349,6 +246,7 @@ fn smoke_updates(esp: &Path) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         "0.1.1",
         &release::test_release_key(),
         "A system update (the hardware smoke test's)",
+        None,
     )?;
     let manifest = format!(
         "id = system.oceans\nname = Oceans\nversion = 0.1.1\npublisher = {DEV_PUBLISHER}\n\
@@ -381,38 +279,11 @@ fn smoke_updates(esp: &Path) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
 
 /// Copies `files` (name, bytes) to the root of [`USB_IMAGE`]'s partition.
 fn copy_to_usb(files: &[(&str, &[u8])]) -> Result {
-    let at = format!("{}@@1M", host_path_for_tool(&root().join(USB_IMAGE)));
+    let mut fat = disk_image::open_partition(&root().join(USB_IMAGE), 1)?;
     for (name, bytes) in files {
-        let path = root().join("build").join(name);
-        fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        let copied = fat_tool("usr/bin/mcopy")
-            .args(["-i", &at])
-            .arg(host_path_for_tool(&path))
-            .arg(format!("::/{name}"))
-            .output()
-            .map_err(|e| format!("cannot run mcopy (mtools): {e}"))?;
-        if !copied.status.success() {
-            return Err(format!(
-                "mcopy failed: {}",
-                String::from_utf8_lossy(&copied.stderr)
-            ));
-        }
+        disk_image::put_file(&mut fat, oceans_fat::ROOT, name, bytes)?;
     }
-    Ok(())
-}
-
-fn walk_size(dir: &Path) -> Result<u64> {
-    let mut total = 0;
-    for entry in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        total += if path.is_dir() {
-            walk_size(&path)?
-        } else {
-            entry.metadata().map_err(|e| e.to_string())?.len()
-        };
-    }
-    Ok(total)
+    fat.sync().map_err(|e| format!("{USB_IMAGE}: {e:?}"))
 }
 
 /// The hardware smoke test's first boot: a blank NVMe SSD becomes the root.
@@ -681,6 +552,15 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
             },
             Err(mpsc::RecvTimeoutError::Timeout) if done_at.is_some() => break Ok(()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // What every thread waits on (the kernel's diagnostic key,
+                // Ctrl+\), for a hang to be found afterwards.
+                let _ = input.write_all(&[0x1c]).and_then(|()| input.flush());
+                let until = Instant::now() + Duration::from_secs(3);
+                while let Ok(Ok(line)) =
+                    lines.recv_timeout(until.saturating_duration_since(Instant::now()))
+                {
+                    println!("  | {line}");
+                }
                 break Err(format!(
                     "hardware smoke boot timed out after {}s",
                     HW_TIMEOUT.as_secs()
@@ -723,53 +603,6 @@ mod tests {
         assert!(first < second);
         assert!(conf.contains("timeout: 3\n"));
         assert!(conf.contains("module_path: boot():/boot/b/initrd\n"));
-    }
-
-    #[test]
-    fn crc32_is_ieee() {
-        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
-        assert_eq!(crc32(b""), 0);
-    }
-
-    #[test]
-    fn gpt_disks_carry_one_esp_and_check() {
-        let sectors = 2048 + 4096 + 2048;
-        let disk = gpt_disk(sectors, 4096, b"seed");
-        assert_eq!(&disk[510..512], &[0x55, 0xaa]);
-        assert_eq!(disk[446 + 4], 0xee);
-        let header = &disk[SECTOR..2 * SECTOR];
-        assert_eq!(&header[..8], b"EFI PART");
-        let mut zeroed = header[..92].to_vec();
-        zeroed[16..20].fill(0);
-        assert_eq!(
-            crc32(&zeroed),
-            u32::from_le_bytes(header[16..20].try_into().unwrap())
-        );
-        let entries = &disk[2 * SECTOR..2 * SECTOR + 128 * 128];
-        assert_eq!(
-            crc32(entries),
-            u32::from_le_bytes(header[88..92].try_into().unwrap())
-        );
-        assert_eq!(&entries[..16], &ESP_TYPE);
-        assert_eq!(
-            u64::from_le_bytes(entries[32..40].try_into().unwrap()),
-            2048
-        );
-        assert_eq!(
-            u64::from_le_bytes(entries[40..48].try_into().unwrap()),
-            2048 + 4095
-        );
-        // The backup header, at the last sector, points back.
-        let last = (sectors - 1) as usize * SECTOR;
-        let backup = &disk[last..last + SECTOR];
-        assert_eq!(&backup[..8], b"EFI PART");
-        assert_eq!(
-            u64::from_le_bytes(backup[24..32].try_into().unwrap()),
-            sectors - 1
-        );
-        assert_eq!(u64::from_le_bytes(backup[32..40].try_into().unwrap()), 1);
-        // The same seed, the same disk.
-        assert_eq!(gpt_disk(sectors, 4096, b"seed"), disk);
     }
 
     #[test]

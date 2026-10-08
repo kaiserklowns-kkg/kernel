@@ -235,7 +235,15 @@ pub fn release() -> Result {
         None => None,
     };
     hardware::write_usb_image(&esp)?;
-    let update = hardware::system_package(&esp, RELEASE_VERSION, &key, "Oceans")?;
+    // One update for every system: with a Secure Boot key it also carries
+    // the slot's signed Limine (ADR-0092).
+    let update = hardware::system_package(
+        &esp,
+        RELEASE_VERSION,
+        &key,
+        "Oceans",
+        secure_boot_key.as_ref(),
+    )?;
 
     let dir = root().join(RELEASE_DIR);
     if dir.exists() {
@@ -259,11 +267,10 @@ pub fn release() -> Result {
             .into_bytes(),
         ),
     ];
-    // The same release, signed for Secure Boot: its configuration and
-    // Limine change, the update package (made above) does not.
+    // The same release, signed for Secure Boot: a selector and one slot
+    // (ADR-0092).
     if let Some(secure_boot_key) = &secure_boot_key {
-        crate::secure_boot::secure_esp(&esp, secure_boot_key)?;
-        hardware::write_usb_image(&esp)?;
+        crate::secure_boot::write_secure_usb_image(&esp, secure_boot_key)?;
         let signed = fs::read(root().join(hardware::USB_IMAGE)).map_err(|e| e.to_string())?;
         files.push((format!("{stem}-secure-boot-usb.img"), signed));
         files.push((

@@ -24,6 +24,7 @@
 extern crate alloc;
 
 mod check;
+mod format;
 mod names;
 mod write;
 
@@ -37,6 +38,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 pub use check::Report;
+pub use format::{Window, format};
 pub use write::Recovery;
 
 /// A failed disk access.
@@ -62,6 +64,24 @@ pub trait Disk {
         false
     }
     fn size(&self) -> u64;
+}
+
+impl<D: Disk + ?Sized> Disk for &mut D {
+    fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), IoError> {
+        (**self).read_at(offset, out)
+    }
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), IoError> {
+        (**self).write_at(offset, data)
+    }
+    fn flush(&mut self) -> Result<(), IoError> {
+        (**self).flush()
+    }
+    fn writable(&self) -> bool {
+        (**self).writable()
+    }
+    fn size(&self) -> u64 {
+        (**self).size()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -411,9 +431,8 @@ impl<D: Disk> Fat<D> {
         &self.disk
     }
 
-    /// The disk, for tests that crash it.
-    #[cfg(test)]
-    fn into_disk(self) -> D {
+    /// The disk back, the volume closed (call [`Fat::sync`] first).
+    pub fn into_disk(self) -> D {
         self.disk
     }
 

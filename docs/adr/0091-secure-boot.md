@@ -5,7 +5,8 @@
 - Depends on: ADR-0003 (Limine), ADR-0068 (the USB image), ADR-0071
   (system updates), ADR-0072 and ADR-0075 (release keys)
 - Part of Phase 10 (Alpha: security). Updates on a Secure Boot image
-  follow in ADR-0092.
+  follow in ADR-0092, which also changes the image's layout: a selector
+  and a partition per slot.
 
 ## Context
 

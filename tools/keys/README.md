@@ -35,10 +35,6 @@ In PowerShell:
 $env:OCEANS_RELEASE_KEY = "$HOME\keys\oceans-release.key"; cargo xtask release
 ```
 
-On Windows without `mkfs.fat` and `mtools` on the PATH, also set
-`OCEANS_FAT_TOOLS_WSL` to the WSL folder that holds them (`usr/sbin/mkfs.fat`,
-`usr/bin/mcopy`).
-
 It refuses the key if the file is inside the repository, if it is this
 development key, if it is not the key published in `oceans-release.pub`,
 or if the working tree has changes. Losing the release key ends updates
@@ -64,7 +60,8 @@ cargo run -p oceans-dev -- secure-boot-key "Oceans" --out ~/keys/oceans-secure-b
 ```
 
 `cargo xtask release` then also builds the image signed for Secure Boot
-when `OCEANS_SECURE_BOOT_KEY` names the key file. It refuses a key inside
+when `OCEANS_SECURE_BOOT_KEY` names the key file, and puts the slot's
+signed Limine in the update package (ADR-0092). It refuses a key inside
 the repository, the development key, or a key whose certificate is not
 `oceans-secure-boot.cer`.
 

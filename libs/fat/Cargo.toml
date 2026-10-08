@@ -1,6 +1,6 @@
 [package]
 name = "oceans-fat"
-description = "Read-only FAT12/16/32 with long file names, behind MBR, GPT or no partition table (ADR-0036)"
+description = "FAT12/16/32 with long file names, behind MBR, GPT or no partition table: reading (ADR-0036), crash-safe writing (ADR-0037), making FAT32 volumes (ADR-0092)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -42,6 +42,7 @@ oceans-e1000e = { path = "../libs/e1000e" }
 oceans-elf = { path = "../libs/elf" }
 oceans-volume = { path = "../libs/volume" }
 oceans-fat = { path = "../libs/fat" }
+oceans-gpt = { path = "../libs/gpt" }
 oceans-window = { path = "../libs/window" }
 oceans-hardware = { path = "../libs/hardware" }
 oceans-display-proto = { path = "display-proto" }

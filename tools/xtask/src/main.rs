@@ -14,6 +14,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod disk_image;
 mod hardware;
 mod release;
 mod secure_boot;
@@ -1435,100 +1436,16 @@ fn build_image_for(
 /// The ESP as a FAT image QEMU boots from (`build/esp.img`).
 const ESP_IMAGE: &str = "build/esp.img";
 
-/// Packs `esp` into [`ESP_IMAGE`] with mkfs.fat and mtools when they can be
-/// found (on the PATH, or in WSL below `OCEANS_FAT_TOOLS_WSL`). Without
-/// them, QEMU serves the directory itself (vvfat), which older QEMU (8.2,
-/// as on CI) can misread once the guest has written to it.
+/// Packs `esp` into [`ESP_IMAGE`]: one FAT32 volume, no partition table
+/// (made here, ADR-0092).
 fn pack_esp(esp: &Path) -> Result {
-    let image = root().join(ESP_IMAGE);
-    if image.exists() {
-        fs::remove_file(&image).map_err(|e| format!("cannot remove {}: {e}", image.display()))?;
-    }
-    let mut used = 0u64;
-    let mut stack = vec![esp.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let meta = entry.metadata().map_err(|e| e.to_string())?;
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else {
-                used += meta.len();
-            }
-        }
-    }
+    let used = disk_image::tree_size(esp)?;
     // Room for the firmware's variables and growth; FAT32 at 64 MiB or more.
-    let kib = (used / 1024 * 5 / 4 + 8 * 1024).max(64 * 1024);
-    let mkfs = fat_tool("usr/sbin/mkfs.fat")
-        .args(["-C", "-F", "32", "-n", "OCEANS-ESP"])
-        .arg(host_path_for_tool(&image))
-        .arg(kib.to_string())
-        .output();
-    match mkfs {
-        Ok(output) if output.status.success() => {}
-        // Not installed: fall back to vvfat.
-        Ok(output) if output.status.code() == Some(127) => return Ok(()),
-        Err(_) => return Ok(()),
-        Ok(output) => {
-            return Err(format!(
-                "mkfs.fat failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-    }
-    let output = fat_tool("usr/bin/mcopy")
-        .args(["-s", "-i"])
-        .arg(host_path_for_tool(&image))
-        .arg(host_path_for_tool(&esp.join("EFI")))
-        .arg(host_path_for_tool(&esp.join("boot")))
-        .arg("::/")
-        .output()
-        .map_err(|e| format!("cannot run mcopy: {e}"))?;
-    if !output.status.success() {
-        let _ = fs::remove_file(&image);
-        return Err(format!(
-            "mcopy failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    println!("ESP packed into {ESP_IMAGE} ({} MiB)", kib / 1024);
+    let mib = (used / (1 << 20) * 5 / 4 + 8).max(64);
+    let disk = disk_image::FileDisk::create(&root().join(ESP_IMAGE), mib << 20)?;
+    disk_image::fat_volume(disk, "OCEANS-ESP", &[&esp.join("EFI"), &esp.join("boot")])?;
+    println!("ESP packed into {ESP_IMAGE} ({mib} MiB)");
     Ok(())
-}
-
-/// A FAT tool (`relative` below the tools root, as in Debian's packages):
-/// in WSL below `OCEANS_FAT_TOOLS_WSL` if set, else from the PATH.
-fn fat_tool(relative: &str) -> Command {
-    let name = relative.rsplit('/').next().unwrap_or(relative);
-    match env::var("OCEANS_FAT_TOOLS_WSL") {
-        Ok(tools) => {
-            let mut cmd = Command::new("wsl");
-            cmd.args([
-                "-e",
-                "env",
-                "MTOOLS_SKIP_CHECK=1",
-                &format!("{tools}/{relative}"),
-            ]);
-            cmd
-        }
-        Err(_) => {
-            let mut cmd = Command::new(name);
-            cmd.env("MTOOLS_SKIP_CHECK", "1");
-            cmd
-        }
-    }
-}
-
-/// `path` as the FAT tools see it: a WSL path when they run in WSL.
-fn host_path_for_tool(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    if env::var_os("OCEANS_FAT_TOOLS_WSL").is_none() {
-        return text;
-    }
-    let text = text.strip_prefix("//?/").unwrap_or(&text).to_string();
-    match text.split_once(":/") {
-        Some((drive, rest)) => format!("/mnt/{}/{rest}", drive.to_ascii_lowercase()),
-        None => text,
-    }
 }
 
 fn copy(from: &Path, to: &Path) -> Result {
@@ -1631,22 +1548,9 @@ fn qemu_command(
     ])
     .arg("-drive")
     .arg(pflash)
-    // Relative path: QEMU's option parser would split an absolute
-    // Windows path at the drive-letter colon. `rw:` because QEMU refuses a
-    // read-only vvfat node on a writable IDE disk (and refuses `snapshot`
-    // with `rw`). vvfat writes guest changes back to this directory: the
-    // firmware stores its variables there (NvVars), and the write-back has
-    // rewritten the boot loader itself, so callers rebuild the image before
-    // every boot. A packed image (`pack_esp`) replaces it when the FAT
-    // tools are there.
-    .args([
-        "-drive",
-        if root().join(ESP_IMAGE).is_file() {
-            "format=raw,file=build/esp.img"
-        } else {
-            "format=raw,file=fat:rw:build/esp"
-        },
-    ])
+    // The packed ESP (`pack_esp`). Relative path: QEMU's option parser
+    // would split an absolute Windows path at the drive-letter colon.
+    .args(["-drive", "format=raw,file=build/esp.img"])
     // A modern-only virtio disk (PCI ID 1af4:1042), driven by the
     // userspace virtio-blk service.
     .arg("-drive")
@@ -3445,7 +3349,7 @@ fn picture_png() -> Vec<u8> {
         typed.extend_from_slice(body);
         let mut out = (body.len() as u32).to_be_bytes().to_vec();
         out.extend_from_slice(&typed);
-        out.extend_from_slice(&hardware::crc32(&typed).to_be_bytes());
+        out.extend_from_slice(&oceans_gpt::crc32(&typed).to_be_bytes());
         out
     };
     let mut header = width.to_be_bytes().to_vec();

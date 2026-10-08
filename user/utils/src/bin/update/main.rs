@@ -19,19 +19,20 @@
 //! the second is replaced first, then the first, so whatever moment power
 //! fails, one complete configuration is there.
 //!
-//! A boot partition signed for **Secure Boot** (ADR-0091, `/boot/secure-boot`)
-//! is not updated in place: its Limine checks the configuration against a
-//! hash enrolled at release, so a configuration written here would stop
-//! the machine from starting. Such a system is updated by writing the new
-//! release's Secure Boot image, until updates bring their own signed
-//! configuration (ADR-0092).
+//! A stick signed for **Secure Boot** (ADR-0091, `/boot/secure-boot`) keeps
+//! each slot on a partition of its own, with its own signed Limine, and
+//! switches them in the partition table (ADR-0092, `secure.rs`). The
+//! update must carry the slot's signed Limine and configuration.
 //!
-//! Needs `use:fs` (`run update out use:fs -- apply /usb/update.opk`).
+//! Needs `use:fs` (`run update out use:fs -- apply /usb/update.opk`); with
+//! Secure Boot also the stick itself, `use:usbdisk`.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
+
+mod secure;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -39,13 +40,14 @@ use core::fmt::Write;
 
 use oceans_fs_proto::{FsError, Kind, Node, Shared, flags};
 use oceans_package::{Package, TrustedKey, Version};
-use oceans_rt::{Out, Start};
+use oceans_rt::{Handle, Out, Start};
 use utils::{EXIT_FAILED, EXIT_USAGE, console, require};
 
 oceans_rt::manifest!(b"grant out\n");
 oceans_rt::entry!(main);
 
-const USAGE: &str = "usage: update status | apply PATH   (run update out use:fs -- ...)";
+const USAGE: &str =
+    "usage: update status | apply PATH   (run update out use:fs [use:usbdisk] -- ...)";
 /// The boot partition: the stick Oceans started from.
 const ESP: &str = "usb";
 const SYSTEM_ID: &str = "system.oceans";
@@ -65,11 +67,12 @@ fn main(start: Start) -> i64 {
         Ok(fs) => Node(fs),
         Err(code) => return code,
     };
+    let stick = directory.find("use", "usbdisk");
     let args = directory.args();
     let words: Vec<&str> = args.split_whitespace().collect();
     let result = match words.as_slice() {
-        ["status"] | [] => status(&mut out, &root),
-        ["apply", path] => apply(&mut out, &root, path),
+        ["status"] | [] => status(&mut out, &root, stick),
+        ["apply", path] => apply(&mut out, &root, stick, path),
         _ => {
             let _ = writeln!(out, "{USAGE}");
             return EXIT_USAGE;
@@ -213,8 +216,23 @@ fn running_slot(root: &Node, release: &str) -> Result<char, String> {
         .ok_or_else(|| alloc::format!("the running release ({release}) is in neither slot"))
 }
 
-fn status(out: &mut Out, root: &Node) -> Result<(), String> {
+/// On a Secure Boot stick: the stick itself, which `update` must be given.
+fn secure_stick(root: &Node, stick: Option<Handle>) -> Result<Option<Handle>, String> {
+    let Ok((marker, _)) = root.walk(SECURE_BOOT_MARKER, 0) else {
+        return Ok(None);
+    };
+    marker.close();
+    stick.map(Some).ok_or_else(|| {
+        "this system boots with Secure Boot: give update the stick too          (run update out use:fs use:usbdisk -- ...)"
+            .into()
+    })
+}
+
+fn status(out: &mut Out, root: &Node, stick: Option<Handle>) -> Result<(), String> {
     let (_, release) = running(root)?;
+    if let Some(stick) = secure_stick(root, stick)? {
+        return secure::status(out, stick, &release);
+    }
     let slot = running_slot(root, &release)?;
     let _ = writeln!(out, "update: running Oceans {release} (slot {slot})");
     let first = first_slot(root)?;
@@ -231,16 +249,8 @@ fn status(out: &mut Out, root: &Node) -> Result<(), String> {
     Ok(())
 }
 
-fn apply(out: &mut Out, root: &Node, path: &str) -> Result<(), String> {
-    if let Ok((marker, _)) = root.walk(SECURE_BOOT_MARKER, 0) {
-        marker.close();
-        return Err(
-            "this system boots with Secure Boot (ADR-0091): its boot configuration \
-                    is signed and cannot be changed here; write the new release's Secure Boot \
-                    image instead"
-                .into(),
-        );
-    }
+fn apply(out: &mut Out, root: &Node, stick: Option<Handle>, path: &str) -> Result<(), String> {
+    let secure = secure_stick(root, stick)?;
     let path = path.trim_start_matches('/');
     let bytes = read_file(root, path, MAX_UPDATE)?;
     let keys_text = image_text(root, "bin/update.keys")?;
@@ -269,10 +279,25 @@ fn apply(out: &mut Out, root: &Node, path: &str) -> Result<(), String> {
             manifest.version
         ));
     }
+    let release = alloc::format!("{} {}", manifest.version, manifest.channel);
+    if let Some(stick) = secure {
+        let _ = writeln!(
+            out,
+            "update: Oceans {release} from {}, verified",
+            manifest.publisher
+        );
+        let update = secure::Update {
+            release: &release,
+            kernel,
+            initrd,
+            efi: package.file(secure::UPDATE_EFI),
+            config: package.file(secure::UPDATE_CONFIG),
+        };
+        return secure::apply(out, stick, &previous, &update);
+    }
     // The running slot is never written.
     let slot = running_slot(root, &previous)?;
     let target = other(slot);
-    let release = alloc::format!("{} {}", manifest.version, manifest.channel);
     let _ = writeln!(
         out,
         "update: Oceans {release} from {}, verified; writing slot {target}",

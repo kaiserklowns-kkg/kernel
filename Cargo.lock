@@ -571,6 +571,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-gpt"
+version = "0.1.0"
+dependencies = [
+ "oceans-fat",
+]
+
+[[package]]
 name = "oceans-hardware"
 version = "0.1.0"
 
@@ -703,6 +710,7 @@ dependencies = [
  "oceans-dev",
  "oceans-dns",
  "oceans-fat",
+ "oceans-gpt",
  "oceans-image",
  "oceans-package",
  "oceans-random",

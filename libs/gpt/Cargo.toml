@@ -1,0 +1,10 @@
+[package]
+name = "oceans-gpt"
+description = "GPT partition tables: reading both copies, making one, and swapping two entries crash-safely (ADR-0092)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-fat.workspace = true

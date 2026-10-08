@@ -122,3 +122,7 @@ oceans-input.workspace = true
 oceans-input-proto.workspace = true
 oceans-core-proto.workspace = true
 oceans-hardware.workspace = true
+oceans-fat.workspace = true
+oceans-gpt.workspace = true
+# BLAKE2B: checking a Secure Boot update before it is written (ADR-0092).
+blake2 = { version = "0.10.6", default-features = false }
