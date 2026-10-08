@@ -5,8 +5,9 @@
 //! - [`Manager`]: the window manager's state, apart from drawing: where
 //!   windows are, which is on top, which has the keyboard focus (a window
 //!   or the Terminal), dragging by the title bar, the minimize and close
-//!   buttons (ADR-0076), and each app's queue of events. The display service draws what it
-//!   describes and moves bytes and pixels; the decisions are made here.
+//!   buttons (ADR-0076), each app's queue of events, and the clipboard
+//!   (ADR-0095): who may copy, who pasted. The display service draws what
+//!   it describes and moves bytes and pixels; the decisions are made here.
 //!
 //! Apps are untrusted: every request is bounded, and an app only ever
 //! reaches its own windows and events.
@@ -34,6 +35,8 @@ pub const BUTTON_STEP: i32 = 22;
 pub const MAX_WINDOWS: usize = 16;
 /// Events kept per app until it takes them; later ones are dropped.
 pub const MAX_QUEUED: usize = 64;
+/// The most one paste types into the Terminal (the shell's line is 200).
+pub const TERMINAL_PASTE_MAX: usize = 200;
 /// Offset between windows placed one after another.
 const CASCADE: i32 = 32;
 
@@ -137,8 +140,12 @@ pub enum KeyRoute {
     Terminal(u8),
     /// Queued for a window's app.
     Window(u64),
-    /// Taken by the manager (the "next window" key).
+    /// Taken by the manager (the "next window" key, or a paste with
+    /// nothing on the clipboard).
     Consumed,
+    /// Ctrl+Shift+V with the Terminal focused: the display types
+    /// [`Manager::terminal_paste`] into the console (ADR-0095).
+    TerminalPaste,
 }
 
 /// The window manager.
@@ -156,6 +163,14 @@ pub struct Manager {
     drag: Option<(u32, i32, i32)>,
     /// Content pixels allowed on all windows together.
     pixel_budget: usize,
+    /// The clipboard's text (ADR-0095): the system's copy, kept when the
+    /// app that copied it ends.
+    clipboard: Option<String>,
+    /// The app that may copy: the user gave its focused window a key or a
+    /// click since its last copy.
+    may_copy: Option<u64>,
+    /// The app the user pasted into, until it takes the text.
+    paste: Option<u64>,
 }
 
 impl Manager {
@@ -169,6 +184,9 @@ impl Manager {
             next_id: 1,
             drag: None,
             pixel_budget,
+            clipboard: None,
+            may_copy: None,
+            paste: None,
         }
     }
 
@@ -247,6 +265,7 @@ impl Manager {
             self.notify_focus(old, false);
         }
         self.focus = focus;
+        self.focus_moved();
         if let Focus::Window(new) = focus {
             self.notify_focus(new, true);
         }
@@ -311,6 +330,7 @@ impl Manager {
         }
         if self.focus == Focus::Window(frame.id) {
             self.focus = Focus::Terminal;
+            self.focus_moved();
             self.focus_below();
         }
     }
@@ -358,6 +378,12 @@ impl Manager {
             self.remove(index);
         }
         self.queues.remove(&owner);
+        if self.may_copy == Some(owner) {
+            self.may_copy = None;
+        }
+        if self.paste == Some(owner) {
+            self.paste = None;
+        }
         self.signals.remove(&owner);
         closed
     }
@@ -384,13 +410,32 @@ impl Manager {
             self.next_window();
             return KeyRoute::Consumed;
         }
+        let paste = byte == proto::CTRL_V || byte == proto::KEY_PASTE;
         match self.focus {
+            Focus::Terminal if byte == proto::KEY_PASTE => KeyRoute::TerminalPaste,
             Focus::Terminal => KeyRoute::Terminal(byte),
             Focus::Window(id) => {
                 let Some(index) = self.index(id) else {
                     return KeyRoute::Terminal(byte);
                 };
                 let owner = self.frames[index].owner;
+                if paste {
+                    // The app gets the text through `PASTE`, never the key.
+                    if self.clipboard.is_none() {
+                        return KeyRoute::Consumed;
+                    }
+                    self.paste = Some(owner);
+                    self.queue(
+                        owner,
+                        Event {
+                            window: id,
+                            kind: kind::PASTE,
+                            ..Event::default()
+                        },
+                    );
+                    return KeyRoute::Window(owner);
+                }
+                self.may_copy = Some(owner);
                 self.queue(
                     owner,
                     Event {
@@ -403,6 +448,69 @@ impl Manager {
                 KeyRoute::Window(owner)
             }
         }
+    }
+
+    /// The focus moved: what the user allowed the app that had it ends.
+    fn focus_moved(&mut self) {
+        self.may_copy = None;
+        self.paste = None;
+    }
+
+    /// The app whose window has the focus.
+    fn focused_owner(&self) -> Option<u64> {
+        match self.focus {
+            Focus::Window(id) => self.index(id).map(|i| self.frames[i].owner),
+            Focus::Terminal => None,
+        }
+    }
+
+    /// `COPY` from the app behind `owner` (ADR-0095): `text` goes on the
+    /// clipboard if its window has the focus and the user gave it a key or
+    /// a click since its last copy. Returns the bytes copied.
+    pub fn copy(&mut self, owner: u64, text: &[u8]) -> Result<usize, Status> {
+        let text = proto::clipboard_text(text).ok_or(Status::BadRequest)?;
+        if self.focused_owner() != Some(owner) || self.may_copy != Some(owner) {
+            return Err(Status::NotAllowed);
+        }
+        self.may_copy = None;
+        self.clipboard = Some(String::from(text));
+        Ok(text.len())
+    }
+
+    /// `PASTE` from the app behind `owner`: the clipboard's text, once
+    /// after each paste the user made into its focused window.
+    pub fn take_paste(&mut self, owner: u64) -> Result<&str, Status> {
+        if self.paste != Some(owner) || self.focused_owner() != Some(owner) {
+            return Err(Status::NotFound);
+        }
+        self.paste = None;
+        self.clipboard.as_deref().ok_or(Status::NotFound)
+    }
+
+    /// What Ctrl+Shift+V types into the Terminal: the clipboard's first
+    /// line, its control characters left out, at most
+    /// [`TERMINAL_PASTE_MAX`] bytes; and whether anything was left behind.
+    /// A line break would run a command the user has not read, so none is
+    /// typed.
+    pub fn terminal_paste(&self) -> Option<(String, bool)> {
+        let text = self.clipboard.as_deref()?;
+        let mut lines = text.lines();
+        let mut first = String::new();
+        let mut cut = false;
+        for c in lines.next()?.chars().filter(|c| !c.is_control()) {
+            if first.len() + c.len_utf8() > TERMINAL_PASTE_MAX {
+                cut = true;
+                break;
+            }
+            first.push(c);
+        }
+        let more = lines.any(|line| !line.trim().is_empty());
+        Some((first, cut || more))
+    }
+
+    /// Bytes on the clipboard.
+    pub fn clipboard_len(&self) -> usize {
+        self.clipboard.as_ref().map_or(0, String::len)
     }
 
     /// The focus goes round: the Terminal, then the windows in the order
@@ -496,6 +604,9 @@ impl Manager {
         } else if pressed && button == 1 && on_title {
             self.drag = Some((id, grab_x, grab_y));
         } else if content.contains(x, y) && self.focus == Focus::Window(id) {
+            if pressed {
+                self.may_copy = Some(owner);
+            }
             self.queue(
                 owner,
                 Event {

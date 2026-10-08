@@ -2,6 +2,7 @@ package window
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestWireFormatMatchesRust(t *testing.T) {
 }
 
 func TestUnknownEventsAreDropped(t *testing.T) {
-	for _, kind := range []byte{0, 6, 255} {
+	for _, kind := range []byte{0, 7, 255} {
 		b := append([]byte(nil), goldenEvent...)
 		b[4] = kind
 		if _, ok := DecodeEvent(b); ok {
@@ -53,6 +54,14 @@ func TestOpenBounds(t *testing.T) {
 	} {
 		if _, err := encodeOpen(c.bits, c.width, c.height, c.title); err != ErrBadSize {
 			t.Errorf("%+v: %v", c, err)
+		}
+	}
+}
+
+func TestCopyRefusesTextTheClipboardWouldNot(t *testing.T) {
+	for _, text := range []string{"", string([]byte{0xff}), strings.Repeat("a", MaxClipboard+1)} {
+		if err := Copy(0, text); err != ErrBadSize {
+			t.Errorf("Copy(%q...) = %v", text[:min(len(text), 8)], err)
 		}
 	}
 }

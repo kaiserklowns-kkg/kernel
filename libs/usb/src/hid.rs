@@ -3,8 +3,9 @@
 //! with Shift, Caps Lock and Ctrl, Enter as CR, Backspace as DEL; keys
 //! without an ASCII meaning are ignored, but for the arrows, Home, End,
 //! Delete and the page keys, which send `oceans_abi::display::KEY_*`
-//! (ADR-0084). Ctrl+Tab sends the desktop's "next window" byte
-//! (ADR-0059).
+//! (ADR-0084), with Shift as a byte of their own (ADR-0095). Ctrl+Tab
+//! sends the desktop's "next window" byte (ADR-0059); Ctrl+Shift+C, X and
+//! V (and the Copy, Cut and Paste keys) the clipboard's (ADR-0095).
 
 const LEFT_CTRL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
@@ -25,6 +26,14 @@ pub const NEXT_WINDOW: u8 = 0x1e;
 /// (ADR-0084), by usage: Home 0x4a, Page Up 0x4b, Delete 0x4c, End 0x4d,
 /// Page Down 0x4e, Right 0x4f, Left 0x50, Down 0x51, Up 0x52.
 const NAVIGATION: &[u8; 9] = &[0x84, 0x87, 0x86, 0x85, 0x88, 0x83, 0x82, 0x81, 0x80];
+const DELETE: u8 = 0x86;
+/// What Shift adds to a moving key: `display::KEY_SHIFTED` (ADR-0095).
+const SHIFTED_MOVE: u8 = 0x10;
+/// Ctrl+Shift+C, X, V and the Copy, Cut and Paste keys (usages 0x7c,
+/// 0x7b, 0x7d): `display::KEY_COPY`, `KEY_CUT`, `KEY_PASTE` (ADR-0095).
+const COPY: u8 = 0x89;
+const CUT: u8 = 0x8a;
+const PASTE: u8 = 0x8b;
 /// Keypad usages 0x54–0x63.
 const KEYPAD: &[u8; 0x10] = b"/*-+\r1234567890.";
 
@@ -82,12 +91,30 @@ impl Keyboard {
                     NORMAL[index]
                 }
             }
-            0x4a..=0x52 => return Some(NAVIGATION[usize::from(key - 0x4a)]),
+            0x4a..=0x52 => {
+                let byte = NAVIGATION[usize::from(key - 0x4a)];
+                return Some(if shift && byte != DELETE {
+                    byte | SHIFTED_MOVE
+                } else {
+                    byte
+                });
+            }
             0x54..=0x63 => KEYPAD[usize::from(key - 0x54)],
+            0x7b => return Some(CUT),
+            0x7c => return Some(COPY),
+            0x7d => return Some(PASTE),
             _ => 0,
         };
         if byte == 0 {
             return None;
+        }
+        if ctrl && shift {
+            match byte.to_ascii_lowercase() {
+                b'c' => return Some(COPY),
+                b'x' => return Some(CUT),
+                b'v' => return Some(PASTE),
+                _ => {}
+            }
         }
         if ctrl && byte.is_ascii_alphabetic() {
             return Some(byte.to_ascii_lowercase() & 0x1f);
@@ -200,7 +227,7 @@ mod tests {
                 keys(0, [0x52, 0, 0, 0, 0, 0]),
                 keys(0, [0x51, 0, 0, 0, 0, 0]),
                 keys(0, [0x50, 0, 0, 0, 0, 0]),
-                keys(LEFT_SHIFT, [0x4f, 0, 0, 0, 0, 0]),
+                keys(0, [0x4f, 0, 0, 0, 0, 0]),
                 keys(0, [0x4a, 0, 0, 0, 0, 0]),
                 keys(0, [0x4d, 0, 0, 0, 0, 0]),
                 keys(LEFT_CTRL, [0x4c, 0, 0, 0, 0, 0]),
@@ -212,6 +239,28 @@ mod tests {
         );
         // Up, Down, Left, Right, Home, End, Delete, Page Up, Page Down.
         assert_eq!(out, [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88]);
+    }
+
+    #[test]
+    fn shift_selects_and_ctrl_shift_copies_and_pastes() {
+        let mut keyboard = Keyboard::new();
+        let out = feed(
+            &mut keyboard,
+            &[
+                // Shift+End, Shift+Left, Shift+Delete (Delete).
+                keys(LEFT_SHIFT, [0x4d, 0, 0, 0, 0, 0]),
+                keys(RIGHT_SHIFT, [0x50, 0, 0, 0, 0, 0]),
+                keys(LEFT_SHIFT, [0x4c, 0, 0, 0, 0, 0]),
+                // Ctrl+Shift+C, X, V; Ctrl+V; the Paste key.
+                keys(LEFT_CTRL | LEFT_SHIFT, [0x06, 0, 0, 0, 0, 0]),
+                keys(LEFT_CTRL | LEFT_SHIFT, [0x1b, 0, 0, 0, 0, 0]),
+                keys(RIGHT_CTRL | RIGHT_SHIFT, [0x19, 0, 0, 0, 0, 0]),
+                keys(0, [0; 6]),
+                keys(LEFT_CTRL, [0x19, 0, 0, 0, 0, 0]),
+                keys(0, [0x7d, 0, 0, 0, 0, 0]),
+            ],
+        );
+        assert_eq!(out, [0x95, 0x92, 0x86, 0x89, 0x8a, 0x8b, 0x16, 0x8b]);
     }
 
     #[test]

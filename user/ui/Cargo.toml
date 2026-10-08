@@ -8,5 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-abi.workspace = true
 oceans-display-proto.workspace = true
 oceans-draw.workspace = true

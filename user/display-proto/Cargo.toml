@@ -7,5 +7,6 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+oceans-abi.workspace = true
 oceans-rt.workspace = true
 oceans-window.workspace = true

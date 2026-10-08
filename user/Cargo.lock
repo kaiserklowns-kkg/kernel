@@ -368,6 +368,7 @@ dependencies = [
 name = "editor-app"
 version = "0.1.0"
 dependencies = [
+ "oceans-abi",
  "oceans-edit",
  "oceans-fs-proto",
  "oceans-rt",
@@ -720,6 +721,7 @@ dependencies = [
 name = "oceans-display-proto"
 version = "0.1.0"
 dependencies = [
+ "oceans-abi",
  "oceans-rt",
  "oceans-window",
 ]
@@ -880,6 +882,7 @@ dependencies = [
 name = "oceans-ui"
 version = "0.1.0"
 dependencies = [
+ "oceans-abi",
  "oceans-display-proto",
  "oceans-draw",
  "oceans-rt",

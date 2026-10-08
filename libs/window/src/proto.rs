@@ -16,6 +16,12 @@
 //!   given at `OPEN`; `EVENTS` takes them.
 //! - **Ending:** `CLOSE` closes one window; the end being closed (the app
 //!   exiting) closes them all.
+//! - **The clipboard** (ADR-0095): the system keeps it, as text. An app
+//!   puts text there (`COPY`) only while its window has the focus, once
+//!   for each key or click the user gave it. It never reads the clipboard
+//!   when it likes: when the user pastes into its window (Ctrl+V, Ctrl+
+//!   Shift+V), a [`kind::PASTE`] event comes, and `PASTE` then hands over
+//!   the text, once.
 
 /// Operations (request labels).
 pub mod op {
@@ -34,6 +40,31 @@ pub mod op {
     /// name (ADR-0065). Needs `notifications`; one per
     /// [`super::NOTIFY_INTERVAL_MS`] per app (`TooMany` sooner).
     pub const NOTIFY: u64 = 5;
+    /// Puts text on the clipboard (ADR-0095): data = the text, or data =
+    /// `[length u32]` and handles = `[memory]` holding it (for text longer
+    /// than an inline message). 1 to [`super::MAX_CLIPBOARD`] bytes of
+    /// UTF-8. `NotAllowed` unless the caller's window has the focus and
+    /// the user gave it a key or click since its last copy.
+    pub const COPY: u64 = 6;
+    /// After a [`super::kind::PASTE`] event: → data = `[length u32]`,
+    /// handles = `[memory]` (readable) holding the text. `NotFound` when
+    /// no paste waits for the caller (each is taken once).
+    pub const PASTE: u64 = 7;
+}
+
+/// The most text the clipboard holds, in bytes.
+pub const MAX_CLIPBOARD: usize = 64 * 1024;
+
+/// Text acceptable on the clipboard: 1 to [`MAX_CLIPBOARD`] bytes of
+/// UTF-8 with no control characters but line breaks and tabs.
+pub fn clipboard_text(data: &[u8]) -> Option<&str> {
+    let text = core::str::from_utf8(data).ok()?;
+    let ok = !text.is_empty()
+        && text.len() <= MAX_CLIPBOARD
+        && !text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'));
+    ok.then_some(text)
 }
 
 /// Longest notification text, in bytes.
@@ -58,7 +89,9 @@ pub enum Status {
     Ok = 0,
     BadRequest = 1,
     /// Core does not know the caller as a running app with `window` (for
-    /// windows) or `notifications` (for notifications).
+    /// windows) or `notifications` (for notifications); or, for `COPY`, its
+    /// window has not the focus or the user gave it nothing since its last
+    /// copy.
     NotAllowed = 2,
     /// The app has [`MAX_WINDOWS_PER_APP`] windows, or the screen is full;
     /// or it notified less than [`NOTIFY_INTERVAL_MS`] ago.
@@ -95,6 +128,12 @@ pub const MAX_EVENTS: usize = 20;
 /// The byte keyboards send for Ctrl+Tab (`oceans_abi::display::
 /// KEY_NEXT_WINDOW`): the focus moves on, and no app sees it.
 pub const KEY_NEXT_WINDOW: u8 = 0x1e;
+/// The bytes that paste (`oceans_abi::display::CTRL_V`, `KEY_PASTE`,
+/// ADR-0095): in a window both do, and the app gets a [`kind::PASTE`]
+/// event instead of the key; in the Terminal only `KEY_PASTE` (Ctrl+Shift+
+/// V) does.
+pub const CTRL_V: u8 = 0x16;
+pub const KEY_PASTE: u8 = 0x8b;
 
 /// Event kinds.
 pub mod kind {
@@ -109,6 +148,8 @@ pub mod kind {
     pub const FOCUS: u8 = 4;
     /// The user clicked the close button: the app should close it.
     pub const CLOSE: u8 = 5;
+    /// The user pasted into the window (ADR-0095): `PASTE` takes the text.
+    pub const PASTE: u8 = 6;
 }
 
 /// Something that happened to a window.
@@ -150,7 +191,7 @@ impl Event {
             x: i16::from_le_bytes([bytes[8], bytes[9]]),
             y: i16::from_le_bytes([bytes[10], bytes[11]]),
         };
-        (kind::KEY..=kind::CLOSE)
+        (kind::KEY..=kind::PASTE)
             .contains(&event.kind)
             .then_some(event)
     }

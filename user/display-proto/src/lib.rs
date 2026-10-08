@@ -1,7 +1,7 @@
 //! The client side of the Oceans window protocol (ADR-0059): an app given
 //! `window` opens windows through its `use windows` end, draws into their
-//! shared pixels and takes their events. The wire format is
-//! [`oceans_window::proto`].
+//! shared pixels and takes their events, and copies to and pastes from the
+//! clipboard (ADR-0095). The wire format is [`oceans_window::proto`].
 
 #![no_std]
 
@@ -148,4 +148,70 @@ pub fn notify(windows: Handle, text: &str) -> Result<(), WindowError> {
         Status::Ok => Ok(()),
         status => Err(WindowError::Refused(status)),
     }
+}
+
+/// Puts `text` on the clipboard (ADR-0095). The display takes it only
+/// while this app's window has the focus and the user gave it a key or a
+/// click since its last copy (`Refused(NotAllowed)` otherwise): copy in
+/// answer to the user's Ctrl+C, never on your own.
+pub fn copy(windows: Handle, text: &str) -> Result<(), WindowError> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > proto::MAX_CLIPBOARD {
+        return Err(WindowError::Refused(Status::BadRequest));
+    }
+    let got = if bytes.len() <= oceans_abi::IPC_MAX_INLINE {
+        oceans_rt::ipc_call_msg(windows, op::COPY, bytes, &[], &mut [], &mut [])
+    } else {
+        let memory = oceans_rt::memory_create(bytes.len() as u64).map_err(WindowError::Ipc)?;
+        let filled = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE).map(|address| {
+            // SAFETY: mapped, and at least `bytes.len()` bytes large.
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), address, bytes.len()) };
+            let _ = oceans_rt::memory_unmap(address);
+        });
+        let shared = filled.and_then(|()| {
+            oceans_rt::duplicate(memory, rights::READ | rights::MAP | rights::TRANSFER)
+        });
+        let _ = oceans_rt::close(memory);
+        let shared = shared.map_err(WindowError::Ipc)?;
+        let len = (bytes.len() as u32).to_le_bytes();
+        oceans_rt::ipc_call_msg(windows, op::COPY, &len, &[shared], &mut [], &mut [])
+    }
+    .map_err(WindowError::Ipc)?;
+    match Status::from_label(got.label) {
+        Status::Ok => Ok(()),
+        status => Err(WindowError::Refused(status)),
+    }
+}
+
+/// After a [`kind::PASTE`] event: the clipboard's text, handed to `take`
+/// (once per paste; `Refused(NotFound)` for a second try).
+pub fn paste<T>(windows: Handle, take: impl FnOnce(&str) -> T) -> Result<T, WindowError> {
+    let mut reply = [0u8; 4];
+    let mut handles = [Handle(0); 1];
+    let got = oceans_rt::ipc_call_msg(windows, op::PASTE, &[], &[], &mut reply, &mut handles)
+        .map_err(WindowError::Ipc)?;
+    let status = Status::from_label(got.label);
+    if status != Status::Ok || got.handles_len != 1 || got.data_len < 4 {
+        for &handle in &handles[..got.handles_len] {
+            let _ = oceans_rt::close(handle);
+        }
+        return Err(WindowError::Refused(if status == Status::Ok {
+            Status::BadRequest
+        } else {
+            status
+        }));
+    }
+    let memory = handles[0];
+    let len = u32::from_le_bytes(reply) as usize;
+    let size = oceans_rt::memory_size(memory).unwrap_or(0) as usize;
+    let mapped = oceans_rt::memory_map(memory, 0, prot::READ);
+    let _ = oceans_rt::close(memory);
+    let address = mapped.map_err(WindowError::Ipc)?;
+    // SAFETY: mapped, and `len` is checked against the object's size.
+    let bytes = unsafe { core::slice::from_raw_parts(address, len.min(size)) };
+    let result = core::str::from_utf8(bytes)
+        .map(take)
+        .map_err(|_| WindowError::Refused(Status::BadRequest));
+    let _ = oceans_rt::memory_unmap(address);
+    result
 }

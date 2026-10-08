@@ -6,7 +6,9 @@
 //! Enter sends CR and Backspace DEL, like a serial terminal. The arrows,
 //! Home, End, Delete and the page keys send `display::KEY_*` (ADR-0084);
 //! other keys without an ASCII meaning (function keys) are ignored. Ctrl+Tab
-//! sends the desktop's "next window" byte (ADR-0059).
+//! sends the desktop's "next window" byte (ADR-0059). With Shift the moving
+//! keys send `KEY_SHIFTED` added, and Ctrl+Shift+C, X and V send
+//! `KEY_COPY`, `KEY_CUT` and `KEY_PASTE` (ADR-0095).
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -135,6 +137,12 @@ fn translate(code: u8) -> Option<u8> {
     let state = state & !EXTENDED;
     let released = code & 0x80 != 0;
     let key = code & 0x7f;
+    // An extended Shift (0xe0 0x2a) is a "fake shift" some keyboards wrap
+    // the moving keys in; it is no Shift the user pressed (ADR-0095).
+    if extended && (key == 0x2a || key == 0x36) {
+        STATE.store(state, Ordering::Relaxed);
+        return None;
+    }
     let modifier = match key {
         0x2a | 0x36 => SHIFT,
         0x1d => CTRL, // left or (extended) right control
@@ -158,7 +166,15 @@ fn translate(code: u8) -> Option<u8> {
         return None;
     }
     if extended {
-        return navigation(key);
+        use oceans_abi::display as d;
+        // Shift selects as it moves (ADR-0095); Shift+Delete is Delete.
+        return navigation(key).map(|byte| {
+            if state & SHIFT != 0 && byte != d::KEY_DELETE {
+                byte | d::KEY_SHIFTED
+            } else {
+                byte
+            }
+        });
     }
     let index = usize::from(key);
     let mut byte = *NORMAL.get(index)?;
@@ -168,6 +184,16 @@ fn translate(code: u8) -> Option<u8> {
     let letter = byte.is_ascii_lowercase();
     if (state & SHIFT != 0) != (letter && state & CAPS != 0) {
         byte = SHIFTED[index];
+    }
+    // Ctrl+Shift+C, X and V: the clipboard's keys (ADR-0095).
+    if state & CTRL != 0 && state & SHIFT != 0 {
+        use oceans_abi::display as d;
+        match byte.to_ascii_lowercase() {
+            b'c' => return Some(d::KEY_COPY),
+            b'x' => return Some(d::KEY_CUT),
+            b'v' => return Some(d::KEY_PASTE),
+            _ => {}
+        }
     }
     if state & CTRL != 0 && byte.is_ascii_alphabetic() {
         byte = byte.to_ascii_lowercase() & 0x1f;

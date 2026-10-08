@@ -460,9 +460,21 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@keys edited in oceans",
     b"@monitor sendkey home",
     b"@keys text ",
+    // The clipboard (ADR-0095): Shift+End selects the rest of the line,
+    // Ctrl+C copies it, and Ctrl+V pastes it on a line of its own, before
+    // the page is saved. With the Terminal focused again, Ctrl+Shift+V
+    // types it into the shell's line.
+    b"@monitor sendkey shift-end",
+    b"@monitor sendkey ctrl-c",
+    b"@monitor sendkey end",
+    b"@monitor sendkey ret",
+    b"@monitor sendkey ctrl-v",
     b"@monitor sendkey ctrl-s",
     b"app stop app.oceans.editor\r\n",
     b"cat /home/untitled.txt\r\n",
+    b"@keys echo pasted ",
+    b"@monitor sendkey ctrl-shift-v",
+    b"@keys \r",
     // Image Viewer (ADR-0090): a PNG from the host, opened by the name it
     // is started with, in the eighth window. Its left half is orange; its
     // right half is transparent, so the checkerboard shows through.
@@ -853,6 +865,13 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),
     Expect::Contains("text edited in oceans"),
+    // The clipboard (ADR-0095): copied from, and pasted into, Text Editor;
+    // then into the Terminal, where the shell echoes the line.
+    Expect::Contains("display: clipboard: 16 bytes copied from Text Editor"),
+    Expect::Contains("display: clipboard: pasted into Text Editor"),
+    Expect::Line("edited in oceans"),
+    Expect::Contains("display: clipboard: pasted into the Terminal"),
+    Expect::Line("pasted edited in oceans"),
     Expect::Contains("core: installed editor.opk from the system image"),
     Expect::Contains("core: installed viewer.opk from the system image"),
     Expect::Contains("app: started app.oceans.viewer"),

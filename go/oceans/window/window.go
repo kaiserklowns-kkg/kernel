@@ -3,7 +3,8 @@
 // its "use windows" end, draws into Pixels and presents them; the display
 // service frames each window with the app's verified name and sends it
 // events (keys while it has the focus, the pointer, focus changes, the
-// close button).
+// close button). It copies to the clipboard and takes what the user pastes
+// (ADR-0095).
 //
 // The wire format is libs/window's (oceans_window::proto); its tests and
 // these check the same encodings byte for byte.
@@ -31,7 +32,15 @@ const (
 	opEvents  = 3
 	opClose   = 4
 	opNotify  = 5
+	opCopy    = 6
+	opPaste   = 7
 )
+
+// MaxClipboard is the most text the clipboard holds, in bytes (ADR-0095).
+const MaxClipboard = 64 * 1024
+
+// maxInline is the largest inline IPC payload (oceans_abi::IPC_MAX_INLINE).
+const maxInline = 256
 
 // MaxNotification is the longest notification text, in bytes.
 const MaxNotification = 120
@@ -55,6 +64,7 @@ const (
 	Button  = 3 // a button went down or up over the focused window
 	Focus   = 4 // the window gained (Pressed) or lost the focus
 	Close   = 5 // the user clicked the close button
+	Paste   = 6 // the user pasted into the window: take the text with TakePaste (ADR-0095)
 )
 
 // Event is something that happened to a window.
@@ -84,7 +94,7 @@ func (e Event) Encode() [eventSize]byte {
 
 // DecodeEvent reads one event; false if too short or of an unknown kind.
 func DecodeEvent(b []byte) (Event, bool) {
-	if len(b) < eventSize || b[4] < Key || b[4] > Close {
+	if len(b) < eventSize || b[4] < Key || b[4] > Paste {
 		return Event{}, false
 	}
 	return Event{
@@ -249,4 +259,61 @@ func Notify(windows oceans.Handle, text string) error {
 	}
 	_, err := check(oceans.Call(windows, opNotify, []byte(text), nil))
 	return err
+}
+
+// Copy puts text on the clipboard (ADR-0095). The display takes it only
+// while this app's window has the focus and the user gave it a key or a
+// click since its last copy: copy in answer to the user's Ctrl+C.
+func Copy(windows oceans.Handle, text string) error {
+	if text == "" || len(text) > MaxClipboard || !utf8.ValidString(text) {
+		return ErrBadSize
+	}
+	if len(text) <= maxInline {
+		_, err := check(oceans.Call(windows, opCopy, []byte(text), nil))
+		return err
+	}
+	memory, err := oceans.MemoryCreate(uint64(len(text)))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = oceans.Close(memory) }()
+	if err := oceans.MemoryWrite(memory, 0, []byte(text)); err != nil {
+		return err
+	}
+	shared, err := oceans.Duplicate(memory, oceans.RightRead|oceans.RightMap|oceans.RightTransfer)
+	if err != nil {
+		return err
+	}
+	_, err = check(oceans.Call(windows, opCopy, binary.LittleEndian.AppendUint32(nil, uint32(len(text))), []oceans.Handle{shared}))
+	return err
+}
+
+// TakePaste takes the text the user pasted, after a Paste event (once per
+// paste).
+func TakePaste(windows oceans.Handle) (string, error) {
+	reply, err := check(oceans.Call(windows, opPaste, nil, nil))
+	if err != nil {
+		return "", err
+	}
+	for _, h := range reply.Handles[min(1, len(reply.Handles)):] {
+		_ = oceans.Close(h)
+	}
+	if len(reply.Handles) != 1 || len(reply.Data) < 4 {
+		return "", ErrBadSize
+	}
+	memory := reply.Handles[0]
+	defer func() { _ = oceans.Close(memory) }()
+	size, err := oceans.MemorySize(memory)
+	if err != nil {
+		return "", err
+	}
+	n := min(uint64(binary.LittleEndian.Uint32(reply.Data)), size, MaxClipboard)
+	buf := make([]byte, n)
+	if _, err := oceans.MemoryRead(memory, 0, buf); err != nil {
+		return "", err
+	}
+	if !utf8.Valid(buf) {
+		return "", ErrBadSize
+	}
+	return string(buf), nil
 }

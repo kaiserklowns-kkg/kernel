@@ -10,6 +10,10 @@
 //! [`run`] opens a window and drives the frames: a frame after every batch
 //! of events, then once more so the screen shows what the input changed.
 //! [`Ui`] works on any [`Surface`], so the toolkit is not tied to windows.
+//!
+//! **The clipboard** (ADR-0095): what the user pastes arrives in
+//! [`Input::paste`]; text fields take it, and copy and cut all of their
+//! text. An app copies with [`Ui::copy`], in answer to the user's keys.
 
 #![no_std]
 
@@ -18,6 +22,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use oceans_abi::display::{is_copy, is_cut};
 use oceans_display_proto::{Event, Window, events, kind};
 pub use oceans_draw::{Rect, Rgb, Style, Surface, Typesetter};
 use oceans_rt::Directory;
@@ -48,10 +53,14 @@ pub struct Input {
     /// A press of the main button, where it happened (taken by the widget
     /// under it).
     pub click: Option<(i32, i32)>,
+    /// The main button is held down (a drag, while `pointer` moves).
+    pub held: bool,
     /// Keys typed (bytes: ASCII; `\r` Enter, `\x08`/`\x7f` Backspace,
     /// `\x1b` Escape).
     pub keys: Vec<u8>,
     pub focused: bool,
+    /// Text the user pasted (ADR-0095), for the widget with the keyboard.
+    pub paste: Option<String>,
 }
 
 /// One frame's drawing and layout: a column of widgets from the top of
@@ -67,8 +76,12 @@ pub struct Ui<'s, 'f> {
     pub focus: &'s mut Option<u32>,
     /// Something changed the app's state: another frame is drawn.
     pub changed: bool,
+    /// Text to put on the clipboard after this frame ([`Ui::copy`]).
+    pub copied: Option<String>,
 }
 
+/// The most a text field holds, in bytes.
+const FIELD_MAX: usize = 200;
 const LINE_HEIGHT: i32 = 22;
 const GAP: i32 = 8;
 const BUTTON_HEIGHT: i32 = 30;
@@ -91,6 +104,16 @@ impl<'s, 'f> Ui<'s, 'f> {
             y,
             focus,
             changed: false,
+            copied: None,
+        }
+    }
+
+    /// Puts `text` on the clipboard when the frame ends (ADR-0095). Call
+    /// it for the user's Ctrl+C or Ctrl+X: the system refuses a copy the
+    /// user did not ask for.
+    pub fn copy(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.copied = Some(String::from(text));
         }
     }
 
@@ -265,8 +288,26 @@ impl<'s, 'f> Ui<'s, 'f> {
                     0x08 | 0x7f => {
                         text.pop();
                     }
-                    0x20..=0x7e if text.len() < 200 => text.push(char::from(key)),
+                    0x20..=0x7e if text.len() < FIELD_MAX => text.push(char::from(key)),
+                    // A field has no selection: Ctrl+C copies all of it,
+                    // Ctrl+X cuts all of it (ADR-0095).
+                    key if is_copy(key) || is_cut(key) => {
+                        self.copied = (!text.is_empty()).then(|| text.clone());
+                        if is_cut(key) {
+                            text.clear();
+                        }
+                    }
                     _ => {}
+                }
+                self.changed = true;
+            }
+            // Pasted: its first line, as far as the field goes.
+            if let Some(pasted) = self.input.paste.take() {
+                for c in pasted.lines().next().unwrap_or("").chars() {
+                    if c.is_control() || text.len() + c.len_utf8() > FIELD_MAX {
+                        continue;
+                    }
+                    text.push(c);
                 }
                 self.changed = true;
             }
@@ -402,7 +443,11 @@ pub fn run_ticking<S>(
             );
             frame(&mut ui, state);
             let changed = ui.changed;
+            let copied = ui.copied.take();
             let _ = window.present();
+            if let Some(text) = copied {
+                let _ = oceans_display_proto::copy(windows, &text);
+            }
             changed
         };
     draw(&mut window, &mut input, &mut focus, state);
@@ -430,9 +475,19 @@ pub fn run_ticking<S>(
                     kind::BUTTON if event.button == 1 && event.pressed => {
                         input.pointer = (i32::from(event.x), i32::from(event.y));
                         input.click = Some(input.pointer);
+                        input.held = true;
                     }
+                    kind::BUTTON if event.button == 1 => input.held = false,
                     kind::KEY => input.keys.push(event.key),
-                    kind::FOCUS => input.focused = event.pressed,
+                    kind::PASTE => {
+                        input.paste =
+                            oceans_display_proto::paste(windows, |text: &str| String::from(text))
+                                .ok();
+                    }
+                    kind::FOCUS => {
+                        input.focused = event.pressed;
+                        input.held = false;
+                    }
                     kind::CLOSE => {
                         let _ = window.close();
                         return 0;
@@ -445,9 +500,11 @@ pub fn run_ticking<S>(
         if draw(&mut window, &mut input, &mut focus, state) {
             input.click = None;
             input.keys.clear();
+            input.paste = None;
             draw(&mut window, &mut input, &mut focus, state);
         }
         input.click = None;
         input.keys.clear();
+        input.paste = None;
     }
 }

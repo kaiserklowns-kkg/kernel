@@ -18,6 +18,9 @@
 //!   (`DISPLAY_KEYBOARD`) and goes to the focused window, or back to the
 //!   console (`console-input`) when the Terminal has the focus. A click
 //!   or Ctrl+Tab moves the focus;
+//! - **the clipboard** (ADR-0095): text an app copies while it has the
+//!   focus, pasted only where the user pastes (Ctrl+V in a window,
+//!   Ctrl+Shift+V there and in the Terminal, a line at a time);
 //! - notifications;
 //! - **permission dialogs**: when an app needs a decision, the desktop
 //!   asks, in the system's words, and sends the answer to Core
@@ -373,6 +376,24 @@ impl Service {
                     KeyRoute::Terminal(byte) => terminal.push(byte),
                     KeyRoute::Window(_) => {}
                     KeyRoute::Consumed => dirty = true,
+                    // Ctrl+Shift+V (ADR-0095): one line, typed as if by
+                    // the user, never Enter.
+                    KeyRoute::TerminalPaste => {
+                        if let Some((line, cut)) = self.windows.terminal_paste() {
+                            terminal.extend_from_slice(line.as_bytes());
+                            say(
+                                self.log,
+                                format_args!("display: clipboard: pasted into the Terminal"),
+                            );
+                            if cut {
+                                self.toast(
+                                    String::from("Only the clipboard's first line was pasted."),
+                                    false,
+                                );
+                                dirty = true;
+                            }
+                        }
+                    }
                 }
             }
             if let Some(console) = self.console

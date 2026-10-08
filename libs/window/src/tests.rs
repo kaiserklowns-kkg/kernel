@@ -38,7 +38,7 @@ fn events_round_trip_and_unknown_kinds_are_refused() {
     let mut bad = event.encode();
     bad[4] = 0;
     assert_eq!(Event::decode(&bad), None);
-    bad[4] = 6;
+    bad[4] = 7;
     assert_eq!(Event::decode(&bad), None);
 }
 
@@ -356,4 +356,93 @@ fn minimized_windows_hide_lose_the_focus_and_come_back_on_top() {
     assert_eq!(m.frames().last().unwrap().id, b);
     assert_eq!(m.focus(), Focus::Window(b));
     assert!(m.frames()[0].minimized);
+}
+
+#[test]
+fn an_app_copies_only_while_focused_and_once_per_input() {
+    let mut m = manager();
+    let a = m.open(APP, "A", "", 100, 100).unwrap();
+    // Nothing from the user yet.
+    assert_eq!(m.copy(APP, b"hello"), Err(Status::NotAllowed));
+    m.key(proto::CTRL_V);
+    assert_eq!(m.clipboard_len(), 0);
+    m.key(0x03);
+    assert_eq!(m.copy(APP, b"hello"), Ok(5));
+    assert_eq!(m.clipboard_len(), 5);
+    // Once per key: the next copy waits for the user again.
+    assert_eq!(m.copy(APP, b"again"), Err(Status::NotAllowed));
+    // A click in the content allows it too.
+    let content = m.frames()[0].content();
+    m.button(1, true, content.x + 5, content.y + 5);
+    assert_eq!(m.copy(APP, b"clicked"), Ok(7));
+    // Another app, even with a key of its own before the focus moved on.
+    let b = m.open(OTHER, "B", "", 100, 100).unwrap();
+    m.key(b'x');
+    m.set_focus(Focus::Window(a));
+    assert_eq!(m.copy(OTHER, b"sneaky"), Err(Status::NotAllowed));
+    // Focus moving away ends what the user allowed.
+    m.key(b'y');
+    m.set_focus(Focus::Window(b));
+    m.set_focus(Focus::Window(a));
+    assert_eq!(m.copy(APP, b"late"), Err(Status::NotAllowed));
+    // Text is bounded and has no control characters but line breaks and tabs.
+    m.key(b'z');
+    assert_eq!(m.copy(APP, b""), Err(Status::BadRequest));
+    assert_eq!(m.copy(APP, b"bell\x07"), Err(Status::BadRequest));
+    assert_eq!(m.copy(APP, &[0xff]), Err(Status::BadRequest));
+    let big = std::vec![b'a'; proto::MAX_CLIPBOARD + 1];
+    assert_eq!(m.copy(APP, &big), Err(Status::BadRequest));
+    assert_eq!(m.copy(APP, "two\r\nlines\tก".as_bytes()), Ok(14));
+}
+
+#[test]
+fn pasting_is_pushed_once_to_the_focused_window() {
+    let mut m = manager();
+    let a = m.open(APP, "A", "", 100, 100).unwrap();
+    m.key(b'c');
+    m.copy(APP, b"text").unwrap();
+    m.take_events(APP, 100);
+    // Nothing was pasted: nothing to take.
+    assert_eq!(m.take_paste(APP), Err(Status::NotFound));
+    // Ctrl+V and Ctrl+Shift+V paste; the app sees an event, not the key.
+    for key in [proto::CTRL_V, proto::KEY_PASTE] {
+        assert_eq!(m.key(key), KeyRoute::Window(APP));
+        assert_eq!(kinds(&mut m, APP), [(kind::PASTE, a)]);
+        assert_eq!(m.take_paste(APP), Ok("text"));
+        assert_eq!(m.take_paste(APP), Err(Status::NotFound));
+    }
+    // Another app cannot take a paste meant for this one.
+    let b = m.open(OTHER, "B", "", 100, 100).unwrap();
+    m.set_focus(Focus::Window(a));
+    m.key(proto::CTRL_V);
+    assert_eq!(m.take_paste(OTHER), Err(Status::NotFound));
+    // Nor this one once the focus moved on.
+    m.set_focus(Focus::Window(b));
+    assert_eq!(m.take_paste(APP), Err(Status::NotFound));
+    // The clipboard outlives the app that copied.
+    assert_eq!(m.close_owner(APP), [a]);
+    assert_eq!(m.clipboard_len(), 4);
+}
+
+#[test]
+fn the_terminal_pastes_one_line_with_ctrl_shift_v_only() {
+    let mut m = manager();
+    assert_eq!(m.terminal_paste(), None);
+    assert_eq!(m.key(proto::KEY_PASTE), KeyRoute::TerminalPaste);
+    // Ctrl+V is the shell's byte; Ctrl+C stays an interrupt.
+    assert_eq!(m.key(proto::CTRL_V), KeyRoute::Terminal(proto::CTRL_V));
+    assert_eq!(m.key(0x03), KeyRoute::Terminal(0x03));
+    m.open(APP, "A", "", 100, 100).unwrap();
+    m.key(b'c');
+    m.copy(APP, b"echo hi\tthere\nrm -rf /\n").unwrap();
+    assert_eq!(
+        m.terminal_paste(),
+        Some((std::string::String::from("echo hithere"), true))
+    );
+    m.key(b'c');
+    m.copy(APP, b"one line\r\n\n").unwrap();
+    assert_eq!(
+        m.terminal_paste(),
+        Some((std::string::String::from("one line"), false))
+    );
 }

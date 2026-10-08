@@ -7,6 +7,9 @@
 //!   is saved as `untitled.txt`.
 //! - The arrows, Home, End, Page Up and Down move; Delete and Backspace
 //!   delete; a click puts the cursor.
+//! - Shift with a moving key, a drag or Ctrl+A selects; Ctrl+C, Ctrl+X
+//!   and Ctrl+V copy, cut and paste through the system's clipboard
+//!   (ADR-0095).
 //! - Changes not saved are not thrown away by Open or New without a second
 //!   click.
 //!
@@ -21,6 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
+use oceans_abi::display::{is_copy, is_cut};
 use oceans_edit::Editor;
 use oceans_fs_proto::{Kind, Node, flags};
 use oceans_rt::{Directory, Start};
@@ -61,6 +65,8 @@ struct TextEditor {
     pending: Option<Pending>,
     /// The page has had the keyboard once (it has it at the start).
     started: bool,
+    /// The main button went down on the page and is still held.
+    dragging: bool,
 }
 
 impl TextEditor {
@@ -159,6 +165,34 @@ impl TextEditor {
     }
 }
 
+/// The line and byte column under a point, `x` and `y` from the first
+/// line's top left as drawn.
+fn position(ui: &mut Ui<'_, '_>, app: &TextEditor, x: i32, y: i32) -> (usize, usize) {
+    let line = app.top + (y.max(0) / LINE) as usize;
+    let line = line.min(app.editor.lines().len() - 1);
+    let target = x + app.left;
+    let text = &app.editor.lines()[line];
+    let mut column = text.len();
+    for (i, c) in text.char_indices() {
+        let before = ui.measure(&text[..i], Style::Body);
+        let after = ui.measure(&text[..i + c.len_utf8()], Style::Body);
+        if target < (before + after) / 2 {
+            column = i;
+            break;
+        }
+    }
+    (line, column)
+}
+
+/// `r` cut to `to`.
+fn clip(r: Rect, to: Rect) -> Rect {
+    let x = r.x.max(to.x);
+    let y = r.y.max(to.y);
+    let right = (r.x + r.w).min(to.x + to.w);
+    let bottom = (r.y + r.h).min(to.y + to.h);
+    Rect::new(x, y, (right - x).max(0), (bottom - y).max(0))
+}
+
 fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
     if !app.started {
         app.started = true;
@@ -217,7 +251,8 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
     let rows = ((page.h - 20) / LINE).max(1) as usize;
     let view = Rect::new(text_x, page.y, page.w - 32, page.h);
 
-    // A click on the page: the keyboard, and the cursor where it landed.
+    // A click on the page: the keyboard, and the cursor where it landed;
+    // dragging from there selects (ADR-0095).
     if let Some((x, y)) = ui.input.click
         && page.contains(x, y)
     {
@@ -225,30 +260,45 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         ui.changed = true;
         *ui.focus = Some(PAGE);
         app.pending = None;
-        let line = app.top + ((y - text_top).max(0) / LINE) as usize;
-        let line = line.min(app.editor.lines().len() - 1);
-        let target = x - text_x + app.left;
-        let text = app.editor.lines()[line].clone();
-        let mut column = text.len();
-        for (i, c) in text.char_indices() {
-            let before = ui.measure(&text[..i], Style::Body);
-            let after = ui.measure(&text[..i + c.len_utf8()], Style::Body);
-            if target < (before + after) / 2 {
-                column = i;
-                break;
-            }
-        }
+        let (line, column) = position(ui, app, x - text_x, y - text_top);
         app.editor.set_cursor(line, column);
+        app.dragging = true;
+    } else if !ui.input.held {
+        app.dragging = false;
+    } else if app.dragging {
+        let (x, y) = ui.input.pointer;
+        let (line, column) = position(ui, app, x - text_x, y - text_top);
+        if (line, column) != app.editor.cursor() {
+            app.editor.select_to(line, column);
+            ui.changed = true;
+        }
     }
 
-    // Keys, when the page has the keyboard.
+    // Keys, when the page has the keyboard; and the clipboard (ADR-0095).
     if *ui.focus == Some(PAGE) && ui.input.focused {
         for key in core::mem::take(&mut ui.input.keys) {
             ui.changed = true;
             if key == SAVE_KEY {
                 app.save();
+            } else if is_copy(key) {
+                if let Some(text) = app.editor.selected_text() {
+                    ui.copy(&text);
+                }
+            } else if is_cut(key) {
+                if let Some(text) = app.editor.cut() {
+                    ui.copy(&text);
+                    app.pending = None;
+                }
             } else if app.editor.key(key, rows.saturating_sub(1)) {
                 app.pending = None;
+            }
+        }
+        if let Some(text) = ui.input.paste.take() {
+            ui.changed = true;
+            if app.editor.paste(&text) {
+                app.pending = None;
+            } else {
+                app.message = String::from("The page would pass 256 KiB: nothing was pasted.");
             }
         }
     }
@@ -276,8 +326,22 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         .take(rows)
         .cloned()
         .collect();
+    let selection = app.editor.selection();
     for (i, text) in shown.iter().enumerate() {
         let y = text_top + i as i32 * LINE;
+        // The selection, behind the text: from its start on its first
+        // line to its end on its last, and a little past each line break.
+        if let Some(((l1, c1), (l2, c2))) = selection {
+            let number = app.top + i;
+            if (l1..=l2).contains(&number) {
+                let from = if number == l1 { c1 } else { 0 };
+                let to = if number == l2 { c2 } else { text.len() };
+                let x1 = ui.measure(&text[..from], Style::Body);
+                let x2 = ui.measure(&text[..to], Style::Body) + if number < l2 { 6 } else { 0 };
+                let band = Rect::new(text_x - app.left + x1, y, x2 - x1, LINE - 2);
+                ui.surface.fill(clip(band, view), colour::SELECTED);
+            }
+        }
         ui.text_at(text_x - app.left, y, text, Style::Body, colour::TEXT, view);
     }
     let page_focused = *ui.focus == Some(PAGE) && ui.input.focused;
@@ -302,6 +366,9 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         line + 1,
         app.editor.column_chars() + 1
     );
+    if let Some(selected) = app.editor.selected_text() {
+        let _ = write!(text, "  ·  {} selected", selected.chars().count());
+    }
     if app.editor.edited {
         text.push_str("  ·  Edited");
     }
@@ -339,6 +406,7 @@ fn main(start: Start) -> i64 {
         message: String::new(),
         pending: None,
         started: false,
+        dragging: false,
     };
     oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut app, frame)
 }

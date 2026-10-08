@@ -15,8 +15,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use oceans_abi::display::{
-    KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_RIGHT,
-    KEY_UP,
+    CTRL_A, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_PAGE_DOWN, KEY_PAGE_UP,
+    KEY_RIGHT, KEY_UP, unshifted,
 };
 
 /// What Tab inserts.
@@ -35,6 +35,9 @@ pub struct Editor {
     limit: usize,
     /// Changed since [`Editor::saved`].
     pub edited: bool,
+    /// Where the selection started (ADR-0095); it runs from here to the
+    /// cursor.
+    anchor: Option<(usize, usize)>,
 }
 
 impl Editor {
@@ -48,6 +51,7 @@ impl Editor {
             len: 0,
             limit,
             edited: false,
+            anchor: None,
         }
     }
 
@@ -104,6 +108,83 @@ impl Editor {
         }
         self.column = column;
         self.goal = None;
+        self.anchor = None;
+    }
+
+    /// As [`Editor::set_cursor`], keeping (or starting) a selection from
+    /// where the cursor was: a drag, or a click with Shift.
+    pub fn select_to(&mut self, line: usize, column: usize) {
+        let anchor = self.anchor.unwrap_or((self.line, self.column));
+        self.set_cursor(line, column);
+        self.anchor = Some(anchor);
+    }
+
+    /// The selection, start before end; `None` when nothing is selected.
+    pub fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.anchor?;
+        let cursor = (self.line, self.column);
+        match anchor.cmp(&cursor) {
+            core::cmp::Ordering::Less => Some((anchor, cursor)),
+            core::cmp::Ordering::Greater => Some((cursor, anchor)),
+            core::cmp::Ordering::Equal => None,
+        }
+    }
+
+    /// The selected text, lines joined by LF.
+    pub fn selected_text(&self) -> Option<String> {
+        let ((l1, c1), (l2, c2)) = self.selection()?;
+        if l1 == l2 {
+            return Some(String::from(&self.lines[l1][c1..c2]));
+        }
+        let mut text = String::from(&self.lines[l1][c1..]);
+        for line in &self.lines[l1 + 1..l2] {
+            text.push('\n');
+            text.push_str(line);
+        }
+        text.push('\n');
+        text.push_str(&self.lines[l2][..c2]);
+        Some(text)
+    }
+
+    /// Selects everything (Ctrl+A).
+    pub fn select_all(&mut self) {
+        self.anchor = Some((0, 0));
+        self.line = self.lines.len() - 1;
+        self.column = self.lines[self.line].len();
+        self.goal = None;
+    }
+
+    /// Bytes selected, newlines counted.
+    fn selected_len(&self) -> usize {
+        self.selected_text().map_or(0, |text| text.len())
+    }
+
+    /// Deletes the selection, the cursor left where it began; `false` if
+    /// nothing was selected.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some(((l1, c1), (l2, c2))) = self.selection() else {
+            self.anchor = None;
+            return false;
+        };
+        let removed = self.selected_len();
+        let tail = self.lines[l2].split_off(c2);
+        self.lines[l1].truncate(c1);
+        self.lines[l1].push_str(&tail);
+        self.lines.drain(l1 + 1..=l2);
+        self.len -= removed;
+        self.line = l1;
+        self.column = c1;
+        self.goal = None;
+        self.anchor = None;
+        self.edited = true;
+        true
+    }
+
+    /// Cuts the selection: its text, gone from the page (Ctrl+X).
+    pub fn cut(&mut self) -> Option<String> {
+        let text = self.selected_text()?;
+        self.delete_selection();
+        Some(text)
     }
 
     /// Marks the text as saved.
@@ -111,12 +192,26 @@ impl Editor {
         self.edited = false;
     }
 
-    /// Inserts `text` at the cursor (a newline splits the line); `false`
-    /// when it would pass the limit, and nothing is inserted.
+    /// Pasted text in place of the selection: CR LF and lone CRs become
+    /// line breaks, other control characters but tabs are left out.
+    /// `false` when it would pass the limit, and nothing changes.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text: String = text
+            .chars()
+            .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+            .collect();
+        self.insert(&text)
+    }
+
+    /// Inserts `text` at the cursor in place of the selection (a newline
+    /// splits the line); `false` when it would pass the limit, and nothing
+    /// changes.
     pub fn insert(&mut self, text: &str) -> bool {
-        if self.len + text.len() > self.limit {
+        if self.len - self.selected_len() + text.len() > self.limit {
             return false;
         }
+        self.delete_selection();
         for (i, part) in text.split('\n').enumerate() {
             if i > 0 {
                 self.newline();
@@ -138,9 +233,12 @@ impl Editor {
         self.len += 1;
     }
 
-    /// Deletes the character before the cursor (joining lines at a line's
-    /// start).
+    /// Deletes the selection, or the character before the cursor (joining
+    /// lines at a line's start).
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.column == 0 && self.line == 0 {
             return;
         }
@@ -148,9 +246,12 @@ impl Editor {
         self.delete();
     }
 
-    /// Deletes the character after the cursor (joining lines at a line's
-    /// end).
+    /// Deletes the selection, or the character after the cursor (joining
+    /// lines at a line's end).
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let text = &mut self.lines[self.line];
         if let Some(c) = text[self.column..].chars().next() {
             text.remove(self.column);
@@ -207,12 +308,59 @@ impl Editor {
         self.goal = None;
     }
 
+    /// Moves by a moving key (`KEY_UP` … `KEY_PAGE_DOWN`, not Delete).
+    fn moved(&mut self, key: u8, page: isize) {
+        match key {
+            KEY_UP => self.vertical(-1),
+            KEY_DOWN => self.vertical(1),
+            KEY_LEFT => self.left(),
+            KEY_RIGHT => self.right(),
+            KEY_HOME => self.home(),
+            KEY_END => self.end(),
+            KEY_PAGE_UP => self.vertical(-page),
+            KEY_PAGE_DOWN => self.vertical(page),
+            _ => {}
+        }
+    }
+
     /// Answers one key byte; `page` is how many lines Page Up and Page
-    /// Down move. `false` for bytes it does not use (Ctrl+letters, Escape),
-    /// which the app may take.
+    /// Down move. With Shift (`KEY_SHIFTED`) a moving key selects as it
+    /// goes; without, Left and Right end a selection at its start and
+    /// end, the others move from the cursor (ADR-0095). Ctrl+A selects
+    /// everything. `false` for bytes it does not use (other Ctrl+letters,
+    /// copying and pasting, Escape), which the app may take.
     pub fn key(&mut self, key: u8, page: usize) -> bool {
         let page = page.max(1) as isize;
+        if let Some(moving) = unshifted(key) {
+            let anchor = self.anchor.unwrap_or((self.line, self.column));
+            self.moved(moving, page);
+            self.anchor = Some(anchor);
+            return true;
+        }
+        if let Some(((l1, c1), (l2, c2))) = self.selection()
+            && matches!(key, KEY_LEFT | KEY_RIGHT)
+        {
+            let (line, column) = if key == KEY_LEFT { (l1, c1) } else { (l2, c2) };
+            self.set_cursor(line, column);
+            return true;
+        }
+        if matches!(
+            key,
+            KEY_UP
+                | KEY_DOWN
+                | KEY_LEFT
+                | KEY_RIGHT
+                | KEY_HOME
+                | KEY_END
+                | KEY_PAGE_UP
+                | KEY_PAGE_DOWN
+        ) {
+            self.anchor = None;
+            self.moved(key, page);
+            return true;
+        }
         match key {
+            CTRL_A => self.select_all(),
             b'\r' | b'\n' => {
                 self.insert("\n");
             }
@@ -225,15 +373,7 @@ impl Editor {
                 // ASCII: always UTF-8.
                 self.insert(core::str::from_utf8(&byte).unwrap_or_default());
             }
-            KEY_UP => self.vertical(-1),
-            KEY_DOWN => self.vertical(1),
-            KEY_LEFT => self.left(),
-            KEY_RIGHT => self.right(),
-            KEY_HOME => self.home(),
-            KEY_END => self.end(),
             KEY_DELETE => self.delete(),
-            KEY_PAGE_UP => self.vertical(-page),
-            KEY_PAGE_DOWN => self.vertical(page),
             _ => return false,
         }
         true
@@ -354,11 +494,88 @@ mod tests {
     #[test]
     fn other_bytes_are_left_to_the_app() {
         let mut editor = Editor::new(10);
-        // Ctrl+S, Escape, the next window.
-        for key in [0x13, 0x1b, 0x1e] {
+        // Ctrl+S, Escape, the next window, copying and pasting.
+        for key in [0x13, 0x1b, 0x1e, 0x03, 0x18, 0x16, 0x89, 0x8a, 0x8b, 0x96] {
             assert!(!editor.key(key, 10));
         }
         assert!(editor.is_empty());
         assert!(!editor.edited);
+    }
+
+    const SHIFT: u8 = oceans_abi::display::KEY_SHIFTED;
+
+    #[test]
+    fn shift_selects_and_typing_replaces_the_selection() {
+        let mut editor = Editor::from_text("text edited in oceans", 1000);
+        editor.set_cursor(0, 5);
+        typed(&mut editor, &[KEY_END | SHIFT]);
+        assert_eq!(editor.selected_text().as_deref(), Some("edited in oceans"));
+        assert_eq!(editor.selection(), Some(((0, 5), (0, 21))));
+        // Shift+Left takes one back; the anchor stays.
+        typed(&mut editor, &[KEY_LEFT | SHIFT]);
+        assert_eq!(editor.selected_text().as_deref(), Some("edited in ocean"));
+        typed(&mut editor, b"X");
+        assert_eq!(editor.text(), "text Xs");
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.len(), 7);
+        // Left and Right end a selection at its ends.
+        editor.set_cursor(0, 0);
+        typed(
+            &mut editor,
+            &[KEY_RIGHT | SHIFT, KEY_RIGHT | SHIFT, KEY_RIGHT],
+        );
+        assert_eq!((editor.cursor(), editor.selection()), ((0, 2), None));
+        typed(&mut editor, &[KEY_LEFT | SHIFT, KEY_LEFT | SHIFT, KEY_LEFT]);
+        assert_eq!(editor.cursor(), (0, 0));
+        // Other keys forget it.
+        typed(&mut editor, &[KEY_END | SHIFT, KEY_HOME]);
+        assert_eq!((editor.cursor(), editor.selection()), ((0, 0), None));
+    }
+
+    #[test]
+    fn selections_across_lines_cut_and_delete() {
+        let mut editor = Editor::from_text("one\ntwo\nthree", 1000);
+        editor.set_cursor(0, 1);
+        typed(&mut editor, &[KEY_DOWN | SHIFT, KEY_DOWN | SHIFT]);
+        assert_eq!(editor.selected_text().as_deref(), Some("ne\ntwo\nt"));
+        assert_eq!(editor.cut().as_deref(), Some("ne\ntwo\nt"));
+        assert_eq!(editor.text(), "ohree");
+        assert_eq!((editor.cursor(), editor.len()), ((0, 1), 5));
+        assert_eq!(editor.cut(), None);
+        // Backspace and Delete take a selection whole.
+        typed(&mut editor, &[KEY_END | SHIFT, 0x7f]);
+        assert_eq!(editor.text(), "o");
+        typed(&mut editor, &[KEY_HOME | SHIFT, KEY_DELETE]);
+        assert_eq!(editor.text(), "");
+        // Backwards (anchor after the cursor) is the same selection.
+        let mut editor = Editor::from_text("abc\ndef", 1000);
+        editor.set_cursor(1, 2);
+        editor.select_to(0, 1);
+        assert_eq!(editor.selected_text().as_deref(), Some("bc\nde"));
+    }
+
+    #[test]
+    fn select_all_and_paste() {
+        let mut editor = Editor::from_text("ไทย\nab", 1000);
+        typed(&mut editor, &[CTRL_A]);
+        assert_eq!(editor.selected_text().as_deref(), Some("ไทย\nab"));
+        assert!(editor.paste("x\r\ny\rz\t\x07!"));
+        assert_eq!(editor.text(), "x\ny\nz\t!");
+        assert_eq!(editor.cursor(), (2, 3));
+        assert_eq!(editor.len(), editor.text().len());
+        assert!(editor.edited);
+    }
+
+    #[test]
+    fn a_paste_past_the_limit_changes_nothing() {
+        let mut editor = Editor::from_text("abcd", 6);
+        typed(&mut editor, &[KEY_END, KEY_LEFT | SHIFT, KEY_LEFT | SHIFT]);
+        // 4 - 2 + 5 > 6: refused, the selection kept.
+        assert!(!editor.paste("12345"));
+        assert_eq!(editor.text(), "abcd");
+        assert_eq!(editor.selected_text().as_deref(), Some("cd"));
+        // 4 - 2 + 4 fits.
+        assert!(editor.paste("1234"));
+        assert_eq!(editor.text(), "ab1234");
     }
 }

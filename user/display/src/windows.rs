@@ -1,14 +1,17 @@
 //! App windows (ADR-0059): the window endpoint's requests, the apps behind
 //! them, and the pixel memory each window shares with its app. Where
 //! windows are, which has the focus and whose events are queued is
-//! `oceans_window::Manager`'s.
+//! `oceans_window::Manager`'s, and so is who may copy and paste (the
+//! clipboard, ADR-0095); the text moves here.
 
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use oceans_core_proto::{display_grant, op as core_op, parts};
 use oceans_rt::{Handle, Received};
 use oceans_window::proto::{
-    Event, MAX_EVENTS, NOTIFY_INTERVAL_MS, OpenRequest, Status, notification_text, op, pixel_bytes,
+    Event, MAX_CLIPBOARD, MAX_EVENTS, NOTIFY_INTERVAL_MS, OpenRequest, Status, notification_text,
+    op, pixel_bytes,
 };
 
 use super::{Service, prot, rights, say};
@@ -46,6 +49,36 @@ fn close_all(handles: &[Handle]) {
     for &handle in handles {
         let _ = oceans_rt::close(handle);
     }
+}
+
+/// The first `len` bytes of an app's memory object, copied here; `None`
+/// if it is smaller or `len` passes the clipboard's limit.
+fn read_shared(memory: Handle, len: usize) -> Option<Vec<u8>> {
+    let size = oceans_rt::memory_size(memory).ok()? as usize;
+    if len > size || len > MAX_CLIPBOARD {
+        return None;
+    }
+    let address = oceans_rt::memory_map(memory, 0, prot::READ).ok()?;
+    // SAFETY: the object is mapped, and at least `len` bytes large.
+    let bytes = unsafe { core::slice::from_raw_parts(address, len) }.to_vec();
+    let _ = oceans_rt::memory_unmap(address);
+    Some(bytes)
+}
+
+/// `text` in a new memory object, as an end that can only be read and
+/// mapped.
+fn share_text(text: &str) -> Option<Handle> {
+    let memory = oceans_rt::memory_create(text.len().max(1) as u64).ok()?;
+    let theirs = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
+        .ok()
+        .and_then(|address| {
+            // SAFETY: mapped, and at least `text.len()` bytes large.
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), address, text.len()) };
+            let _ = oceans_rt::memory_unmap(address);
+            oceans_rt::duplicate(memory, rights::READ | rights::MAP | rights::TRANSFER).ok()
+        });
+    let _ = oceans_rt::close(memory);
+    theirs
 }
 
 fn window_of(data: &[u8]) -> Option<u32> {
@@ -119,6 +152,12 @@ impl Service {
                 op::NOTIFY => {
                     close_all(handles);
                     self.notify(got.badge, data)
+                }
+                op::COPY => (self.copy(got.badge, data, handles), false),
+                op::PASTE => {
+                    close_all(handles);
+                    self.paste(got.badge);
+                    return false;
                 }
                 op::EVENTS => {
                     close_all(handles);
@@ -260,6 +299,69 @@ impl Service {
         say(log, format_args!("desktop: notification: {shown}"));
         self.toast(shown, false);
         (Status::Ok, true)
+    }
+
+    /// `COPY` (ADR-0095): text from the app behind `badge` onto the
+    /// clipboard, inline or in a memory object of its own, which is copied
+    /// before it is looked at (the app could change it meanwhile). The
+    /// text is never logged; who copied and how much is.
+    fn copy(&mut self, badge: u64, data: &[u8], handles: &[Handle]) -> Status {
+        let text = match handles {
+            [] => Some(data.to_vec()),
+            &[memory] => {
+                let text = data
+                    .get(..4)
+                    .and_then(|len| len.try_into().ok())
+                    .map(|len| u32::from_le_bytes(len) as usize)
+                    .and_then(|len| read_shared(memory, len));
+                let _ = oceans_rt::close(memory);
+                text
+            }
+            _ => {
+                close_all(handles);
+                None
+            }
+        };
+        let Some(text) = text else {
+            return Status::BadRequest;
+        };
+        match self.windows.copy(badge, &text) {
+            Ok(bytes) => {
+                let app = self.owners.get(&badge).map_or("?", |o| o.app.as_str());
+                say(
+                    self.log,
+                    format_args!("display: clipboard: {bytes} bytes copied from {app}"),
+                );
+                Status::Ok
+            }
+            Err(status) => status,
+        }
+    }
+
+    /// `PASTE`: the clipboard's text, in a memory object only the app
+    /// pasted into gets, once per paste.
+    fn paste(&mut self, badge: u64) {
+        let text = match self.windows.take_paste(badge) {
+            Ok(text) => String::from(text),
+            Err(status) => {
+                let _ = oceans_rt::ipc_reply_msg(status as u64, &[], &[]);
+                return;
+            }
+        };
+        let Some(memory) = share_text(&text) else {
+            let _ = oceans_rt::ipc_reply_msg(Status::NoMemory as u64, &[], &[]);
+            return;
+        };
+        let len = (text.len() as u32).to_le_bytes();
+        if oceans_rt::ipc_reply_msg(Status::Ok as u64, &len, &[memory]).is_err() {
+            let _ = oceans_rt::close(memory);
+            return;
+        }
+        let app = self.owners.get(&badge).map_or("?", |o| o.app.as_str());
+        say(
+            self.log,
+            format_args!("display: clipboard: pasted into {app}"),
+        );
     }
 
     /// The app behind `badge` is gone: its windows close. `true` if it had

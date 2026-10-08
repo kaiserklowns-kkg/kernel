@@ -304,6 +304,44 @@ pub mod display {
     pub const KEY_PAGE_UP: u8 = 0x87;
     pub const KEY_PAGE_DOWN: u8 = 0x88;
 
+    /// Ctrl+Shift+C, X and V, and the Copy, Cut and Paste keys of
+    /// keyboards that have them (ADR-0095). Ctrl+C, X and V stay the
+    /// control bytes 0x03, 0x18 and 0x16: in a window they copy, cut and
+    /// paste as well; in the Terminal Ctrl+C interrupts, so there only
+    /// these do.
+    pub const KEY_COPY: u8 = 0x89;
+    pub const KEY_CUT: u8 = 0x8a;
+    pub const KEY_PASTE: u8 = 0x8b;
+    /// Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A as keyboards send them.
+    pub const CTRL_A: u8 = 0x01;
+    pub const CTRL_C: u8 = 0x03;
+    pub const CTRL_V: u8 = 0x16;
+    pub const CTRL_X: u8 = 0x18;
+
+    /// What Shift adds to a moving key (`KEY_UP` … `KEY_PAGE_DOWN`, but
+    /// Delete): the same move, selecting as it goes (ADR-0095).
+    pub const KEY_SHIFTED: u8 = 0x10;
+
+    /// The moving key behind a shifted one (`KEY_UP | KEY_SHIFTED` →
+    /// `KEY_UP`).
+    pub const fn unshifted(key: u8) -> Option<u8> {
+        match key {
+            0x90..=0x98 if key != KEY_DELETE | KEY_SHIFTED => Some(key & !KEY_SHIFTED),
+            _ => None,
+        }
+    }
+
+    /// Whether `key` copies, cuts or pastes (by either of its keys).
+    pub const fn is_copy(key: u8) -> bool {
+        key == CTRL_C || key == KEY_COPY
+    }
+    pub const fn is_cut(key: u8) -> bool {
+        key == CTRL_X || key == KEY_CUT
+    }
+    pub const fn is_paste(key: u8) -> bool {
+        key == CTRL_V || key == KEY_PASTE
+    }
+
     /// The screen.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Info {
