@@ -289,10 +289,13 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app install /keep/hello.opk\r\n",
     b"app run app.oceans.hello\r\n",
     b"app start app.oceans.hello wait\r\n",
+    // Counted in its storage before it is stopped (the revoke below).
+    b"@wait hello: waiting until stopped",
     b"app list\r\n",
     b"app revoke app.oceans.hello network\r\n",
     b"app rollback app.oceans.hello\r\n",
     b"app start app.oceans.hello wait\r\n",
+    b"@wait hello: waiting until stopped",
     b"app stop app.oceans.hello\r\n",
     b"app audit\r\n",
     // Narrower Core capabilities (ADR-0048): `apps` gets only what is
@@ -809,8 +812,9 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  app.oceans.hello  1.0.0  Hello"),
     // One run was the desktop's (ADR-0057), two the web experience's
     // (ADR-0058): one started from the browser, one by Oceans AI with the
-    // browser's approval.
-    Expect::Line("hello: run 11 (counted in my storage)"),
+    // browser's approval. Up to 11; started and stopped at once, a run may
+    // end before it counts itself, so at least the 6 that cannot.
+    Expect::Count("hello: run ", 6, 11, " (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
     Expect::Contains("core: started service app.oceans.heartbeat"),
     Expect::Contains("heartbeat: run 3, beating"),
@@ -1260,6 +1264,9 @@ const SHELL_EXPECT: &[Expect] = &[
 enum Expect {
     Line(&'static str),
     Contains(&'static str),
+    /// A line `PREFIX N SUFFIX` with N from `min` to `max`: a count some of
+    /// whose steps race the script (an app stopped as it starts).
+    Count(&'static str, u32, u32, &'static str),
 }
 
 impl Expect {
@@ -1270,6 +1277,11 @@ impl Expect {
         match self {
             Self::Line(expected) => output == expected,
             Self::Contains(expected) => output.contains(expected),
+            Self::Count(prefix, min, max, suffix) => output
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_suffix(suffix))
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| (min..=max).contains(&n)),
         }
     }
 }
@@ -3178,6 +3190,8 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                     if command.starts_with(b"@") {
                         continue;
                     }
+                    // `@wait` looks only at what this command prints.
+                    recent.clear();
                     for byte in expand(command) {
                         serial_input
                             .write_all(&[byte])
