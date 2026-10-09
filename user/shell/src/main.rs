@@ -237,6 +237,7 @@ impl Shell {
             ["shutdown"] => self.power(oceans_rt::power::OFF),
             ["reboot"] => self.power(oceans_rt::power::RESTART),
             ["app", words @ ..] => self.app(words),
+            ["volume", words @ ..] => self.volume(words),
             ["ai", words @ ..] => self.ai(words),
             ["ui", words @ ..] => self.ui(words),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
@@ -290,6 +291,7 @@ impl Shell {
              \x20 ai activity                what the AI did, and what you decided\r\n\
              \x20 ui pair | unpair | status  let a browser use the Oceans web experience\r\n\
              \x20                              (it may list, start and stop apps, never decide)\r\n\
+             \x20 volume [0-100 | mute | unmute]  the system volume (kept across reboots)\r\n\
              \x20 shutdown | reboot          stop the system, then switch off or restart\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"

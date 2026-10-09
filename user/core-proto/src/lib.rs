@@ -101,6 +101,11 @@ pub mod op {
     /// version.
     /// `CannotStart` if the app is not a web app (ADR-0064).
     pub const WEB_BUNDLE: u64 = 21;
+    /// → `[level u8][muted u8]`: the system volume (ADR-0100).
+    pub const VOLUME: u64 = 22;
+    /// data = `[level u8][muted u8]`: sets the system volume, kept across
+    /// reboots (ADR-0100) → it as set. `NotFound` without a sound device.
+    pub const SET_VOLUME: u64 = 23;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -149,7 +154,8 @@ pub mod access {
             | op::WINDOW_OWNER
             | op::PENDING
             | op::TRUSTED
-            | op::WEB_BUNDLE => QUERY,
+            | op::WEB_BUNDLE
+            | op::VOLUME => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -158,7 +164,8 @@ pub mod access {
             | op::DISABLE
             | op::WINDOWS
             | op::TRUST => MANAGE,
-            op::DECIDE | op::ACCEPT => DECIDE,
+            // The user's setting, as a decision is (ADR-0100).
+            op::DECIDE | op::ACCEPT | op::SET_VOLUME => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

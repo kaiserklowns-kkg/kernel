@@ -37,10 +37,10 @@
 use core::fmt::Write;
 use core::ptr;
 
-use oceans_audio_proto::{PLAYER_BADGE, Play, READER_BADGE, Status, op, open_flags};
+use oceans_audio_proto::{MAX_VOLUME, PLAYER_BADGE, Play, READER_BADGE, Status, op, open_flags};
 use oceans_hda::{
     Capabilities, Capture, FORMAT_48K_16_STEREO, Jack, Path, Ring, Widget, WidgetCaps, WidgetType,
-    long_verb, param, reg, sd, v, verb,
+    long_verb, param, reg, sd, v, verb, volume,
 };
 use oceans_rt::{Buffer, Directory, Handle, Start, prot};
 use oceans_virtio::Dma;
@@ -318,6 +318,9 @@ struct Sound {
     running: bool,
     description: Buffer<120>,
     input: Option<Input>,
+    /// The system volume (ADR-0100): level and muted. Core sets it from
+    /// what it kept; until then, as played.
+    volume: (u8, bool),
 }
 
 /// The input stream (ADR-0087).
@@ -457,6 +460,7 @@ impl Sound {
             running: false,
             description,
             input,
+            volume: (MAX_VOLUME, false),
         };
         sound.program_stream()?;
         match &sound.input {
@@ -565,6 +569,36 @@ impl Sound {
         }
     }
 
+    /// Copies `bytes` to `at` in the cyclic buffer at the system volume
+    /// (ADR-0100), a piece at a time.
+    fn copy_scaled(&mut self, at: usize, bytes: &[u8]) {
+        let gain = volume::gain(self.volume.0, self.volume.1);
+        if gain >= volume::UNITY {
+            return self.ring_memory.copy_in(at, bytes);
+        }
+        let mut piece = [0u8; 1024];
+        for (i, chunk) in bytes.chunks(piece.len()).enumerate() {
+            let piece = &mut piece[..chunk.len()];
+            piece.copy_from_slice(chunk);
+            volume::apply(piece, gain);
+            self.ring_memory.copy_in(at + i * 1024, piece);
+        }
+    }
+
+    /// `SET_VOLUME` (ADR-0100).
+    fn set_volume(&mut self, level: u8, muted: bool) -> (u8, bool) {
+        self.volume = (level.min(MAX_VOLUME), muted);
+        say(
+            self.log,
+            format_args!(
+                "hda: volume {}%{}",
+                self.volume.0,
+                if muted { ", muted" } else { "" }
+            ),
+        );
+        self.volume
+    }
+
     /// `PLAY`: copies `bytes` into the cyclic buffer, waiting while it is
     /// full.
     fn play(&mut self, bytes: &[u8]) -> Status {
@@ -580,7 +614,7 @@ impl Sound {
             }
             let at = self.ring.write_offset();
             let take = free.min(bytes.len() - done).min(RING_SIZE - at);
-            self.ring_memory.copy_in(at, &bytes[done..done + take]);
+            self.copy_scaled(at, &bytes[done..done + take]);
             self.ring.written += take as u64;
             done += take;
         }
@@ -1041,12 +1075,28 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>, stop: Option<Ha
         let mut text = Buffer::<120>::new();
         // A reply that is a number rather than words (`QUEUED`).
         let mut number: Option<[u8; 4]> = None;
+        // The volume, as `[level][muted]` (ADR-0100).
+        let mut pair: Option<[u8; 2]> = None;
         let status = match (sound.as_mut(), got.label, session) {
             (None, _, _) => Status::IoError,
             (Some(sound), op::QUEUED, Some(session)) if !session.capture => {
                 number = Some(sound.queued().to_le_bytes());
                 Status::Ok
             }
+            (Some(sound), op::VOLUME, _) => {
+                pair = Some([sound.volume.0, u8::from(sound.volume.1)]);
+                Status::Ok
+            }
+            // Only the driver's own end (Core's) sets it: players and readers
+            // are badged.
+            (Some(sound), op::SET_VOLUME, None) if got.badge == 0 => match &data[..got.data_len] {
+                &[level, muted] if muted <= 1 => {
+                    let (level, muted) = sound.set_volume(level, muted == 1);
+                    pair = Some([level, u8::from(muted)]);
+                    Status::Ok
+                }
+                _ => Status::BadRequest,
+            },
             (Some(sound), op::INFO, _) => {
                 let _ = text.write_str(sound.description.as_str());
                 Status::Ok
@@ -1156,9 +1206,10 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>, stop: Option<Ha
             Some(handle) => core::slice::from_ref(handle),
             None => &[],
         };
-        let data = match &number {
-            Some(bytes) => &bytes[..],
-            None => text.as_str().as_bytes(),
+        let data = match (&number, &pair) {
+            (Some(bytes), _) => &bytes[..],
+            (None, Some(pair)) => &pair[..],
+            (None, None) => text.as_str().as_bytes(),
         };
         if oceans_rt::ipc_reply_msg(status as u64, data, reply).is_err()
             && let Some(handle) = reply_handle

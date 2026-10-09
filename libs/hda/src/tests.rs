@@ -239,3 +239,32 @@ fn the_ring_counts_what_was_written_and_played() {
     }
     assert_eq!(sizes, [1200, 1400, 1400]);
 }
+
+#[test]
+fn the_volume_scales_samples_by_the_square_of_its_level() {
+    use crate::volume::{MAX, UNITY, apply, gain};
+    assert_eq!(gain(MAX, false), UNITY);
+    assert_eq!(gain(250, false), UNITY);
+    assert_eq!(gain(50, false), UNITY / 4);
+    assert_eq!(gain(10, false), UNITY / 100);
+    assert_eq!(gain(0, false), 0);
+    assert_eq!(gain(MAX, true), 0);
+    // Full volume leaves the bytes alone; a quarter shrinks both signs.
+    let samples: [i16; 4] = [i16::MAX, i16::MIN, -400, 3];
+    let mut bytes: std::vec::Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let original = bytes.clone();
+    apply(&mut bytes, gain(MAX, false));
+    assert_eq!(bytes, original);
+    apply(&mut bytes, gain(50, false));
+    let scaled: std::vec::Vec<i16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b))
+        .collect();
+    assert_eq!(scaled, [8191, -8192, -100, 0]);
+    // Muted: silence; an odd last byte is left.
+    let mut odd = [0x34, 0x12, 0x7f];
+    apply(&mut odd, 0);
+    assert_eq!(odd, [0, 0, 0x7f]);
+}

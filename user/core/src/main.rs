@@ -74,6 +74,8 @@ const FILE_BUFFER: usize = 128 * 1024;
 const WEB_APP: &str = "a web app: open it from Apps in the Oceans web experience";
 /// Developers' keys the user trusts (ADR-0063), in `/system`.
 const TRUST_FILE: &str = "trust.keys";
+/// The system volume the user set (ADR-0100), in `/system`.
+const VOLUME_FILE: &str = "volume";
 /// Audit entries kept in memory for `AUDIT` (all go to the log file).
 const AUDIT_KEPT: usize = 64;
 /// Handles an app may get besides its directory: one per permission, a
@@ -426,6 +428,7 @@ impl Core {
         core.load_decisions();
         core.install_bundled(directory);
         core.load_enabled();
+        core.restore_volume();
         say(
             log,
             format_args!(
@@ -568,6 +571,55 @@ impl Core {
             let _ = writeln!(text, "{id}");
         }
         write_file(&self.system_dir, "services", text.as_bytes()).map_err(io)
+    }
+
+    /// The system volume as the sound driver has it (ADR-0100).
+    fn volume_now(&self) -> Result<(u8, bool), Refusal> {
+        let audio = self.audio.ok_or(Status::NotFound)?;
+        oceans_audio_proto::volume(audio).map_err(|_| Status::NotFound.into())
+    }
+
+    /// `SET_VOLUME` (ADR-0100): the driver's volume, kept in
+    /// `/system/volume` as `LEVEL` or `LEVEL muted`.
+    fn set_volume(&mut self, level: u8, muted: bool) -> Result<(u8, bool), Refusal> {
+        let audio = self.audio.ok_or(Status::NotFound)?;
+        let (level, muted) = oceans_audio_proto::set_volume(audio, level, muted)
+            .map_err(|_| Refusal::from(Status::NotFound))?;
+        let text = alloc::format!("{level}{}\n", if muted { " muted" } else { "" });
+        write_file(&self.system_dir, VOLUME_FILE, text.as_bytes()).map_err(io)?;
+        say(
+            self.log,
+            format_args!(
+                "core: volume {level}%{}",
+                if muted { ", muted" } else { "" }
+            ),
+        );
+        Ok((level, muted))
+    }
+
+    /// At boot: the volume the user left (ADR-0100), if one was kept.
+    fn restore_volume(&mut self) {
+        let Ok(bytes) = read_path(&self.system_dir, VOLUME_FILE) else {
+            return;
+        };
+        let text = core::str::from_utf8(&bytes).unwrap_or("");
+        let mut words = text.split_ascii_whitespace();
+        let Some(level) = words.next().and_then(|w| w.parse::<u8>().ok()) else {
+            return;
+        };
+        let muted = words.next() == Some("muted");
+        let Some(audio) = self.audio else {
+            return;
+        };
+        if let Ok((level, muted)) = oceans_audio_proto::set_volume(audio, level, muted) {
+            say(
+                self.log,
+                format_args!(
+                    "core: volume {level}%{}, kept from before",
+                    if muted { ", muted" } else { "" }
+                ),
+            );
+        }
     }
 
     /// Starts the enabled services (at boot, once the endpoint is bound).
@@ -955,6 +1007,19 @@ impl Core {
                         Ok(())
                     }
                     op::ACCEPT => self.accept(data, reply),
+                    op::VOLUME => {
+                        let (level, muted) = self.volume_now()?;
+                        reply.extend_from_slice(&[level, u8::from(muted)]);
+                        Ok(())
+                    }
+                    op::SET_VOLUME => match data {
+                        &[level, muted] if muted <= 1 => {
+                            let (level, muted) = self.set_volume(level, muted == 1)?;
+                            reply.extend_from_slice(&[level, u8::from(muted)]);
+                            Ok(())
+                        }
+                        _ => Err(Status::BadRequest.into()),
+                    },
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;

@@ -160,6 +160,11 @@ pub struct Desktop {
     /// This desktop may switch the machine off (`grant = power`): the apps
     /// panel shows Restart and Shut Down.
     pub can_power: bool,
+    /// The system volume, as Core says (ADR-0100): `None` without a sound
+    /// device. The speaker in the menu bar shows it.
+    pub volume: Option<(u8, bool)>,
+    /// The sound panel is open below the speaker.
+    pub volume_open: bool,
 }
 
 /// An app window to draw.
@@ -193,6 +198,13 @@ pub enum Hit {
     TerminalMinimize,
     /// The Terminal itself.
     Terminal,
+    /// The speaker in the menu bar (ADR-0100).
+    Volume,
+    /// The sound panel's slider, at that level.
+    VolumeLevel(u8),
+    VolumeMute,
+    /// Somewhere else in the sound panel.
+    VolumePanel,
     Allow,
     Deny,
     Nothing,
@@ -212,6 +224,49 @@ pub fn menu_bar(width: i32) -> Rect {
 /// The Oceans mark at the menu bar's left: it opens the apps panel.
 pub fn menu_mark() -> Rect {
     Rect::new(8, 0, 36, MENU_HEIGHT)
+}
+
+/// What the clock and the system's state take at the menu bar's right,
+/// at most: the speaker stays in one place left of them (ADR-0100).
+const CLOCK_SLOT: i32 = 128;
+const STATUS_SLOT: i32 = 76;
+
+/// The speaker in the menu bar (ADR-0100).
+pub fn volume_button(width: i32) -> Rect {
+    Rect::new(
+        width - 14 - CLOCK_SLOT - 20 - STATUS_SLOT - 16 - 28,
+        2,
+        28,
+        MENU_HEIGHT - 4,
+    )
+}
+
+/// The sound panel, below the speaker.
+pub fn volume_panel(width: i32) -> Rect {
+    let button = volume_button(width);
+    Rect::new(button.x + button.w - 260, MENU_HEIGHT + 6, 260, 106)
+}
+
+/// The panel's slider: its track, and the strip a click on it takes.
+pub fn volume_track(width: i32) -> Rect {
+    let panel = volume_panel(width);
+    Rect::new(panel.x + 16, panel.y + 50, panel.w - 32, 6)
+}
+
+fn volume_track_target(width: i32) -> Rect {
+    let track = volume_track(width);
+    Rect::new(track.x - 8, track.y - 12, track.w + 16, track.h + 24)
+}
+
+pub fn volume_mute(width: i32) -> Rect {
+    let panel = volume_panel(width);
+    Rect::new(panel.x + 16, panel.y + 70, 96, 26)
+}
+
+/// The level (0 to 100) at `x` along the slider.
+pub fn volume_at(width: i32, x: i32) -> u8 {
+    let track = volume_track(width);
+    ((x - track.x) * 100 / track.w.max(1)).clamp(0, 100) as u8
 }
 
 /// The dock holding `count` icons, centred over the bottom edge.
@@ -428,6 +483,19 @@ impl Desktop {
         if dock_item(width, height, 0, count).contains(x, y) || menu_mark().contains(x, y) {
             return Hit::Start;
         }
+        // The speaker and its panel (ADR-0100).
+        if self.volume.is_some() && volume_button(width).contains(x, y) {
+            return Hit::Volume;
+        }
+        if self.volume_open && volume_panel(width).contains(x, y) {
+            return if volume_track_target(width).contains(x, y) {
+                Hit::VolumeLevel(volume_at(width, x))
+            } else if volume_mute(width).contains(x, y) {
+                Hit::VolumeMute
+            } else {
+                Hit::VolumePanel
+            };
+        }
         if self.start_open {
             if start_menu(width, height).contains(x, y) {
                 if tile(width, height, 0).contains(x, y) {
@@ -486,6 +554,11 @@ impl Desktop {
         self.draw_dock(canvas, windows);
         if self.start_open {
             self.draw_apps_panel(canvas);
+        }
+        if self.volume_open
+            && let Some(volume) = self.volume
+        {
+            self.draw_volume_panel(canvas, volume);
         }
 
         // A notification, at the top right.
@@ -581,6 +654,50 @@ impl Desktop {
         canvas.text(clock_x, 6, &self.clock, Font::Body, TEXT, bar);
         let status_x = clock_x - 24 - canvas.measure(&self.status, Font::Body);
         canvas.text(status_x, 6, &self.status, Font::Body, TEXT, bar);
+        // The speaker (ADR-0100), in one place left of them.
+        if let Some((level, muted)) = self.volume {
+            let button = volume_button(w);
+            if self.volume_open || button.contains(self.pointer.0, self.pointer.1) {
+                canvas.tint(button, 6, BLACK, 25);
+            }
+            speaker(canvas, button, level, muted);
+        }
+    }
+
+    /// The sound panel (ADR-0100): the level, a slider and Mute.
+    fn draw_volume_panel(&self, canvas: &mut Canvas, (level, muted): (u8, bool)) {
+        let w = canvas.width;
+        let panel = volume_panel(w);
+        canvas.shadow(panel, 12, 70);
+        canvas.round_fill(panel, 12, DIALOG_SURFACE);
+        canvas.text(
+            panel.x + 16,
+            panel.y + 12,
+            "Sound",
+            Font::Strong,
+            TEXT,
+            panel,
+        );
+        let shown = if muted {
+            String::from("Muted")
+        } else {
+            alloc::format!("{level}%")
+        };
+        let x = panel.x + panel.w - 16 - canvas.measure(&shown, Font::Body);
+        canvas.text(x, panel.y + 12, &shown, Font::Body, MUTED, panel);
+        let track = volume_track(w);
+        canvas.round_fill(track, 3, BUTTON_SECONDARY);
+        let filled = track.w * i32::from(level) / 100;
+        let ink = if muted { MUTED } else { ACCENT };
+        canvas.round_fill(Rect::new(track.x, track.y, filled, track.h), 3, ink);
+        canvas.circle(track.x + filled, track.y + track.h / 2, 8, WINDOW_BORDER);
+        canvas.circle(track.x + filled, track.y + track.h / 2, 7, WHITE);
+        let mute = volume_mute(w);
+        canvas.round_fill(mute, 7, if muted { ACCENT } else { BUTTON_SECONDARY });
+        let label = if muted { "Unmute" } else { "Mute" };
+        let ink = if muted { WHITE } else { TEXT };
+        let lx = mute.x + (mute.w - canvas.measure(label, Font::Body)) / 2;
+        canvas.text(lx, mute.y + 4, label, Font::Body, ink, mute);
     }
 
     fn draw_dock(&self, canvas: &mut Canvas, windows: &[WindowView<'_>]) {
@@ -822,6 +939,32 @@ fn apps_icon(canvas: &mut Canvas, r: Rect) {
         for col in 1..4 {
             canvas.circle(r.x + col * step, r.y + row * step, 3, WHITE);
         }
+    }
+}
+
+/// A speaker centred in `r` (ADR-0100): a body and a cone, then up to three
+/// bars for the level, or a cross when muted.
+fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool) {
+    let (cx, cy) = (r.x + r.w / 2 - 6, r.y + r.h / 2);
+    canvas.fill(Rect::new(cx - 5, cy - 3, 4, 7), TEXT);
+    for i in 0..5 {
+        canvas.fill(Rect::new(cx - 1 + i, cy - 3 - i, 1, 7 + 2 * i), TEXT);
+    }
+    if muted || level == 0 {
+        for i in 0..7 {
+            canvas.fill(Rect::new(cx + 7 + i, cy - 3 + i, 2, 1), TEXT);
+            canvas.fill(Rect::new(cx + 13 - i, cy - 3 + i, 2, 1), TEXT);
+        }
+        return;
+    }
+    let bars = match level {
+        0..=33 => 1,
+        34..=66 => 2,
+        _ => 3,
+    };
+    for i in 0..bars {
+        let h = 4 + 3 * i;
+        canvas.fill(Rect::new(cx + 7 + 3 * i, cy - h / 2, 2, h), TEXT);
     }
 }
 

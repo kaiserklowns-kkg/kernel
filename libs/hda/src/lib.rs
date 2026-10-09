@@ -592,5 +592,39 @@ impl Capture {
     }
 }
 
+/// The system volume (ADR-0100), applied to what is played before it
+/// reaches the controller: the same on every codec, whatever amplifiers it
+/// has.
+pub mod volume {
+    /// The loudest level: the samples as they are.
+    pub const MAX: u8 = 100;
+    /// Gain is a fraction of [`UNITY`].
+    pub const UNITY: u32 = 1 << 16;
+
+    /// The gain for `level` (0 to [`MAX`], more is [`MAX`]): its square, so
+    /// that equal steps sound like equal steps (half the level is a quarter
+    /// of the power, about 12 dB down); none when muted.
+    pub fn gain(level: u8, muted: bool) -> u32 {
+        if muted {
+            return 0;
+        }
+        let level = u32::from(level.min(MAX));
+        level * level * UNITY / (u32::from(MAX) * u32::from(MAX))
+    }
+
+    /// Scales 16-bit little-endian samples by `gain` (a trailing odd byte is
+    /// left as it is).
+    pub fn apply(samples: &mut [u8], gain: u32) {
+        if gain >= UNITY {
+            return;
+        }
+        for sample in samples.as_chunks_mut::<2>().0 {
+            let value = i32::from(i16::from_le_bytes([sample[0], sample[1]]));
+            let scaled = ((i64::from(value) * i64::from(gain)) >> 16) as i16;
+            sample.copy_from_slice(&scaled.to_le_bytes());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

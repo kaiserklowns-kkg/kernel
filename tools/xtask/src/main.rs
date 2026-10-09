@@ -550,7 +550,30 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 672 451 e8613c picture.png opened with Image Viewer, chosen",
     b"app stop app.oceans.viewer\r\n",
     b"app stop app.oceans.files\r\n",
+    // The system volume (ADR-0100), after every sound this boot records:
+    // set from the shell, then in the menu bar's sound panel. The speaker
+    // is at 1012,14; its panel (766,34, 260 by 106) has the slider from
+    // 782,84, 228 wide (75% at 953,87), and Mute at 830,117.
+    b"volume\r\n",
+    b"volume 40\r\n",
+    b"@monitor mouse_move 210 -312",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 1000 130 f9f9fb the sound panel",
+    b"@monitor mouse_move -59 73",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move -123 30",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 790 112 2f7cf6 the sound panel, muted",
+    b"@monitor mouse_move 182 -103",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
+    b"volume\r\n",
+    // Kept by Core: the next boot starts at 70%.
+    b"volume 70\r\n",
     // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
     // until the developer's key is trusted at the console; then the Rust
     // app and the Go app install and run.
@@ -721,6 +744,9 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"shutdown\r\n",
 ];
 const REBOOT_EXPECT: &[Expect] = &[
+    // The volume the first boot left (ADR-0100), set again by Core.
+    Expect::Contains("core: volume 70%, kept from before"),
+    Expect::Contains("hda: volume 70%"),
     // Switching off (ADR-0085): the system stopped in order.
     Expect::Line("Stopping the system, then switching off..."),
     Expect::Contains("init: asked to switch off: stopping the system"),
@@ -950,6 +976,17 @@ const SHELL_EXPECT: &[Expect] = &[
         "desktop: opening picture.png with app.oceans.viewer (the default), for Files",
     ),
     Expect::Contains("desktop: opening picture.png with app.oceans.viewer (chosen), for Files"),
+    // The system volume (ADR-0100): at full on a fresh disk; set from the
+    // shell, the driver applies it and Core keeps it; the panel's slider
+    // and Mute go the same way.
+    Expect::Line("volume: 100%"),
+    Expect::Line("volume: 40%"),
+    Expect::Contains("hda: volume 40%"),
+    Expect::Contains("core: volume 40%"),
+    Expect::Contains("core: volume 75%"),
+    Expect::Contains("core: volume 75%, muted"),
+    Expect::Line("volume: 75%, muted"),
+    Expect::Line("volume: 70%"),
     Expect::Line("pasted edited in oceans"),
     Expect::Contains("core: installed editor.opk from the system image"),
     Expect::Contains("core: installed viewer.opk from the system image"),

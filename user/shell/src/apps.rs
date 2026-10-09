@@ -505,3 +505,49 @@ fn permission_reply(bytes: &[u8]) -> Option<(Permission, Decision)> {
         Decision::from_byte(*decision)?,
     ))
 }
+
+impl Shell {
+    /// `volume [LEVEL | mute | unmute]`: the system volume (ADR-0100), kept
+    /// by Core. A level (0 to 100) also unmutes, as volume keys do.
+    pub(super) fn volume(&self, words: &[&str]) {
+        let Some(core) = self.core() else {
+            return self.print(format_args!(
+                "volume: this shell cannot reach Oceans Core\r\n"
+            ));
+        };
+        let mut reply = [0u8; 8];
+        let now = match core.call(op::VOLUME, &[], &[], &mut reply) {
+            Ok(got) if got.len == 2 => (reply[0], reply[1] != 0),
+            Ok(_) => return self.print(format_args!("volume: no answer\r\n")),
+            Err((error, _)) => {
+                return self.print(format_args!("volume: {}\r\n", error.message()));
+            }
+        };
+        let wanted = match words {
+            [] => None,
+            ["mute"] => Some((now.0, true)),
+            ["unmute"] => Some((now.0, false)),
+            [level] => match level.trim_end_matches('%').parse::<u8>() {
+                Ok(level) if level <= 100 => Some((level, false)),
+                _ => return self.print(format_args!("usage: volume [0-100 | mute | unmute]\r\n")),
+            },
+            _ => return self.print(format_args!("usage: volume [0-100 | mute | unmute]\r\n")),
+        };
+        let (level, muted) = match wanted {
+            None => now,
+            Some((level, muted)) => {
+                match core.call(op::SET_VOLUME, &[level, u8::from(muted)], &[], &mut reply) {
+                    Ok(got) if got.len == 2 => (reply[0], reply[1] != 0),
+                    Ok(_) => return self.print(format_args!("volume: no answer\r\n")),
+                    Err((error, _)) => {
+                        return self.print(format_args!("volume: {}\r\n", error.message()));
+                    }
+                }
+            }
+        };
+        self.print(format_args!(
+            "volume: {level}%{}\r\n",
+            if muted { ", muted" } else { "" }
+        ));
+    }
+}

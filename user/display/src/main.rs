@@ -27,6 +27,8 @@
 //! - **opening files** (ADR-0099): an app asks, after the user's key or
 //!   click, to open a file of Home; it starts in the app that opens its
 //!   kind (the system's own first) or the one the user chose;
+//! - **the system volume** (ADR-0100): a speaker in the menu bar opens a
+//!   panel with a slider and Mute; Core sets it and keeps it;
 //! - notifications;
 //! - **permission dialogs**: when an app needs a decision, the desktop
 //!   asks, in the system's words, and sends the answer to Core
@@ -117,6 +119,8 @@ struct Service {
     /// What the app being asked about is started with once the user has
     /// answered (a file to open, ADR-0099).
     pending_args: String,
+    /// The sound panel's slider is held (ADR-0100).
+    volume_drag: bool,
 }
 
 fn main(start: Start) -> i64 {
@@ -209,6 +213,7 @@ fn main(start: Start) -> i64 {
         pending: Vec::new(),
         last_press: None,
         pending_args: String::new(),
+        volume_drag: false,
         text_capacity: 16 + info.cols as usize * info.rows as usize,
         console,
         windows: Manager::new(area, 2 * screen_pixels),
@@ -230,6 +235,7 @@ fn main(start: Start) -> i64 {
         ),
     }
     service.refresh_apps();
+    service.refresh_volume();
     service.refresh_clock();
     service.refresh_terminal();
     service.draw(&mut canvas);
@@ -287,6 +293,7 @@ fn main(start: Start) -> i64 {
             if now.saturating_sub(last_apps) >= APPS_EVERY_MS {
                 last_apps = now;
                 dirty |= service.refresh_apps();
+                dirty |= service.refresh_volume();
                 dirty |= service.refresh_pending();
             }
             if service
@@ -352,12 +359,22 @@ impl Service {
             }
             Kind::Button { button, pressed } => {
                 let (x, y) = self.desktop.pointer;
+                // The slider let go (ADR-0100): the level it shows is set.
+                if button == 1 && !pressed && self.volume_drag {
+                    self.volume_drag = false;
+                    if let Some((level, _)) = self.desktop.volume {
+                        self.set_volume(level, false);
+                    }
+                    return true;
+                }
                 // A permission dialog is modal: windows get nothing. The
-                // taskbar and an open Start menu lie over the windows, but
-                // a release always reaches them (it ends a drag).
+                // taskbar, an open Start menu and the sound panel lie over
+                // the windows, but a release always reaches them (it ends a
+                // drag).
                 let over = self.desktop.start_open
                     || y < desktop::MENU_HEIGHT
-                    || y >= h - desktop::DOCK_RESERVE;
+                    || y >= h - desktop::DOCK_RESERVE
+                    || (self.desktop.volume_open && desktop::volume_panel(w).contains(x, y));
                 // A second press of the main button soon after the first,
                 // where it was: a double click (ADR-0097). Timed when the
                 // input service read them, not when they are handled here
@@ -373,6 +390,14 @@ impl Service {
                 if button == 1 && pressed {
                     self.last_press = (!double).then_some((now, x, y));
                 }
+                // A press away from the sound panel closes it.
+                if pressed
+                    && self.desktop.volume_open
+                    && !desktop::volume_panel(w).contains(x, y)
+                    && !desktop::volume_button(w).contains(x, y)
+                {
+                    self.desktop.volume_open = false;
+                }
                 if self.desktop.dialog.is_none()
                     && (!pressed || !over)
                     && self.windows.button(button, pressed, x, y)
@@ -386,11 +411,57 @@ impl Service {
             }
             _ => return false,
         }
+        // Dragging the slider: the level follows, set when let go.
+        if self.volume_drag
+            && let Some((_, muted)) = self.desktop.volume
+        {
+            let level = desktop::volume_at(w, self.desktop.pointer.0);
+            self.desktop.volume = Some((level, muted));
+            return true;
+        }
         if self.desktop.dialog.is_none() {
             let (x, y) = self.desktop.pointer;
             self.windows.pointer_moved(x, y);
         }
         true
+    }
+
+    /// The system volume from Core (ADR-0100); `true` if it changed.
+    fn refresh_volume(&mut self) -> bool {
+        if self.volume_drag {
+            return false;
+        }
+        let volume = self.core.and_then(|core| {
+            let mut reply = [0u8; 8];
+            match core.call(op::VOLUME, &[], &[], &mut reply) {
+                Ok(got) if got.len == 2 => Some((reply[0], reply[1] != 0)),
+                _ => None,
+            }
+        });
+        let changed = volume != self.desktop.volume;
+        self.desktop.volume = volume;
+        if volume.is_none() {
+            self.desktop.volume_open = false;
+        }
+        changed
+    }
+
+    /// Sets the system volume through Core, which keeps it (ADR-0100).
+    fn set_volume(&mut self, level: u8, muted: bool) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 8];
+        match core.call(op::SET_VOLUME, &[level, u8::from(muted)], &[], &mut reply) {
+            Ok(got) if got.len == 2 => {
+                self.desktop.volume = Some((reply[0], reply[1] != 0));
+            }
+            Ok(_) => {}
+            Err((error, _)) => {
+                self.toast(alloc::format!("The volume: {}", error.message()), true);
+                self.refresh_volume();
+            }
+        }
     }
 
     /// Keys from the keyboard (`DISPLAY_KEYS`): to the focused window, or
@@ -446,6 +517,26 @@ impl Service {
         windows.sort_unstable();
         let hit = self.desktop.hit(x, y, width, height, &windows);
         match hit {
+            // The speaker and its panel (ADR-0100).
+            Hit::Volume => {
+                self.desktop.volume_open = !self.desktop.volume_open;
+                self.desktop.start_open = false;
+                self.refresh_volume();
+                true
+            }
+            Hit::VolumeLevel(level) => {
+                // Shown at once, set when the button comes up.
+                self.desktop.volume = Some((level, false));
+                self.volume_drag = true;
+                true
+            }
+            Hit::VolumeMute => {
+                if let Some((level, muted)) = self.desktop.volume {
+                    self.set_volume(level, !muted);
+                }
+                true
+            }
+            Hit::VolumePanel => false,
             Hit::Start => {
                 self.desktop.start_open = !self.desktop.start_open;
                 true

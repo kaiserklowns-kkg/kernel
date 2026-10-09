@@ -20,6 +20,10 @@
 //! with the `sound` permission, by way of Core) plays sound but never
 //! records.
 //!
+//! **The system volume** (ADR-0100) scales everything played, in the
+//! driver: anyone may read it (`VOLUME`), only the holder of the driver's
+//! own end sets it (`SET_VOLUME`): Core, for the user.
+//!
 //! One format: 48 kHz, 16-bit little-endian, two channels interleaved
 //! ([`FORMAT`]). Clients convert.
 
@@ -69,6 +73,14 @@ pub mod op {
     /// `INPUT_INFO` answer: what the system's settings show, without
     /// playing or recording.
     pub const READER: u64 = 10;
+    /// On any end or session: → `[level u8][muted u8]`, the system volume
+    /// (ADR-0100): 0 to [`super::MAX_VOLUME`], and whether it is muted.
+    pub const VOLUME: u64 = 11;
+    /// On the driver endpoint's own (unbadged) end only: data = `[level
+    /// u8][muted u8]` sets the system volume (a level above
+    /// [`super::MAX_VOLUME`] is the most) → the new `[level][muted]`.
+    /// Applies to what is played from then on.
+    pub const SET_VOLUME: u64 = 12;
 }
 
 /// The badge of reader ends (ADR-0096); like [`PLAYER_BADGE`], beyond any
@@ -91,6 +103,8 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u32 = 2;
 /// Bytes per frame (one sample of each channel).
 pub const FRAME: usize = 4;
+/// The loudest system volume: as played.
+pub const MAX_VOLUME: u8 = 100;
 /// Largest session buffer a driver accepts.
 pub const MAX_BUFFER: usize = 256 * 1024;
 
@@ -236,6 +250,33 @@ pub fn reader(driver: Handle) -> Result<Handle, AudioError> {
         return Err(AudioError::Status(Status::BadRequest));
     }
     Ok(end[0])
+}
+
+/// The system volume (ADR-0100): its level (0 to [`MAX_VOLUME`]) and
+/// whether it is muted. Any end or session may ask.
+pub fn volume(handle: Handle) -> Result<(u8, bool), AudioError> {
+    let mut reply = [0u8; 2];
+    match request(handle, op::VOLUME, &[], &[], &mut reply, &mut [])? {
+        (2, _) => Ok((reply[0], reply[1] != 0)),
+        _ => Err(AudioError::Status(Status::BadRequest)),
+    }
+}
+
+/// Sets the system volume (ADR-0100); only on the driver's own end. Returns
+/// it as set.
+pub fn set_volume(driver: Handle, level: u8, muted: bool) -> Result<(u8, bool), AudioError> {
+    let mut reply = [0u8; 2];
+    match request(
+        driver,
+        op::SET_VOLUME,
+        &[level, u8::from(muted)],
+        &[],
+        &mut reply,
+        &mut [],
+    )? {
+        (2, _) => Ok((reply[0], reply[1] != 0)),
+        _ => Err(AudioError::Status(Status::BadRequest)),
+    }
 }
 
 /// A capture session (ADR-0087): a buffer the driver writes what came in
