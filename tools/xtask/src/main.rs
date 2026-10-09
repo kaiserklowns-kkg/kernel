@@ -358,6 +358,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
+    // Moved and clicked only once the guest has it.
+    b"@wait usb-hid: port 6.3: mouse, boot protocol, pointer 2",
     b"@monitor screendump build/smoke-desktop.ppm",
     b"@monitor mouse_move -3000 -3000",
     b"@monitor mouse_move 612 760",
@@ -404,6 +406,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // again. Nothing is installed before that.
     b"@bridge store",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
+    // Moved and clicked only once the guest has it.
+    b"@wait usb-hid: port 6.3: mouse, boot protocol, pointer 3",
     b"@monitor mouse_move -3000 -3000",
     b"@monitor mouse_move 836 466",
     b"@screen 380 494 f9f9fb the install dialog",
@@ -436,6 +440,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app start app.oceans.settings\r\n",
     b"@screen 376 523 e9e9ee Settings' sidebar",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
+    // Moved and clicked only once the guest has it.
+    b"@wait usb-hid: port 6.3: mouse, boot protocol, pointer 4",
     b"@monitor mouse_move -3000 -3000",
     b"@monitor mouse_move 446 260",
     b"@monitor mouse_button 1",
@@ -3024,6 +3030,8 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     // The console line `@wait` waits for, and the last lines seen (it may
     // have come already).
     let mut waiting: Option<String> = None;
+    // When the line `@wait` waits for is overdue.
+    let mut wait_until = Instant::now();
     let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut unmet: Vec<Expect> = expected.to_vec();
     let (mut udp_answered, mut tcp_answered) = (false, false);
@@ -3031,7 +3039,22 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
         if commands.peek().is_none() {
             resume = None;
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Some(text) = &waiting
+            && Instant::now() > wait_until
+        {
+            // What QEMU has plugged in, to tell a device the guest missed.
+            println!("{}", monitor_query(monitor_port, b"info usb"));
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "nothing printed `{text}` within {}s",
+                WAIT_LIMIT.as_secs()
+            ));
+        }
+        let mut remaining = deadline.saturating_duration_since(Instant::now());
+        if waiting.is_some() {
+            remaining = remaining.min(wait_until.saturating_duration_since(Instant::now()));
+        }
         match events_rx.recv_timeout(remaining) {
             Ok(Console::Line(line)) => {
                 println!("  | {line}");
@@ -3113,6 +3136,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                             let text = String::from_utf8_lossy(text).into_owned();
                             if !recent.iter().any(|line| line.contains(text.as_str())) {
                                 waiting = Some(text);
+                                wait_until = Instant::now() + WAIT_LIMIT;
                                 break;
                             }
                         } else if let Some(probe) = command.strip_prefix(b"@screen ") {
@@ -3185,19 +3209,25 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             Ok(Console::Prompt) => prompt_waiting = true,
             // Reader finished: QEMU closed stdout, i.e. exited.
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            // An overdue `@wait`: reported at the top of the loop.
+            Err(mpsc::RecvTimeoutError::Timeout)
+                if waiting.is_some() && Instant::now() < deadline => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // What every thread waits on (the kernel's diagnostic key,
                 // Ctrl+\\), then where each CPU is: for a hang to be found
                 // afterwards.
-                let _ = serial_input
-                    .write_all(&[0x1c])
-                    .and_then(|()| serial_input.flush());
-                let until = Instant::now() + Duration::from_secs(3);
-                while let Ok(event) =
-                    events_rx.recv_timeout(until.saturating_duration_since(Instant::now()))
-                {
-                    if let Console::Line(line) = event {
-                        println!("  | {line}");
+                // Twice, 5 s apart: whether the clock still moves shows.
+                for _ in 0..2 {
+                    let _ = serial_input
+                        .write_all(&[0x1c])
+                        .and_then(|()| serial_input.flush());
+                    let until = Instant::now() + Duration::from_secs(5);
+                    while let Ok(event) =
+                        events_rx.recv_timeout(until.saturating_duration_since(Instant::now()))
+                    {
+                        if let Console::Line(line) = event {
+                            println!("  | {line}");
+                        }
                     }
                 }
                 report_cpus(monitor_port);
@@ -3718,6 +3748,8 @@ const MONITOR_EVENT_GAP: Duration = Duration::from_millis(300);
 const DOUBLE_CLICK_GAP: Duration = Duration::from_millis(100);
 /// Console lines kept for `@wait`, which may come after its line.
 const RECENT_LINES: usize = 64;
+/// How long `@wait` waits for its line.
+const WAIT_LIMIT: Duration = Duration::from_secs(90);
 
 /// Presses `text` (lowercase letters, digits, space, CR) on the guest's
 /// USB keyboard through QEMU's monitor (`sendkey`).
@@ -3859,6 +3891,30 @@ fn report_cpus(port: u16) {
             .collect();
         println!("cpu {cpu} stack: {}", code.join(" "));
     }
+}
+
+/// Asks QEMU's monitor one question and returns what it printed.
+fn monitor_query(port: u16, line: &[u8]) -> String {
+    use std::io::Read as _;
+    let Ok(mut monitor) = TcpStream::connect(("127.0.0.1", port)) else {
+        return String::from("(no monitor)");
+    };
+    let _ = monitor.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = monitor
+        .write_all(line)
+        .and_then(|()| monitor.write_all(b"\n"));
+    let mut text = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        match monitor.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => text.extend_from_slice(&chunk[..n]),
+            Err(_) if !text.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    String::from_utf8_lossy(&text).into_owned()
 }
 
 fn monitor_command(port: u16, line: &[u8]) -> Result {
