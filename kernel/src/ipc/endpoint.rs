@@ -137,8 +137,10 @@ impl ClientEnd {
             if sched::interrupted() {
                 return Err(IpcError::Interrupted);
             }
+            let me = sched::current();
+            me.waits(sched::Wait::Call, Arc::as_ptr(&self.endpoint) as usize);
             let slot = Arc::new(Mutex::new(Call {
-                caller: sched::current(),
+                caller: me.clone(),
                 badge: self.badge,
                 request: Some(request),
                 reply: None,
@@ -155,6 +157,7 @@ impl ClientEnd {
                 Some(server) => sched::block_and_switch_to(server),
                 None => sched::block(),
             }
+            me.waits_no_more();
             let reply = slot.lock().reply.take();
             match reply {
                 Some(reply) => reply,
@@ -209,7 +212,9 @@ impl ServerEnd {
     /// Blocks until a call or a close event arrives, or (if
     /// `notifications`) the bound notification is signalled.
     pub fn receive_event(&self, notifications: bool) -> Result<Event, IpcError> {
-        arch::without_interrupts(|| {
+        let me = sched::current();
+        me.waits(sched::Wait::Receive, Arc::as_ptr(&self.endpoint) as usize);
+        let event = arch::without_interrupts(|| {
             loop {
                 {
                     let mut state = self.endpoint.state.lock();
@@ -238,17 +243,18 @@ impl ServerEnd {
                         return Err(IpcError::PeerClosed);
                     }
                     if sched::interrupted() {
-                        let me = sched::current();
                         state
                             .receivers
                             .retain(|receiver| !Arc::ptr_eq(receiver, &me));
                         return Err(IpcError::Interrupted);
                     }
-                    state.receivers.push_back(sched::current());
+                    state.receivers.push_back(me.clone());
                 }
                 sched::block();
             }
-        })
+        });
+        me.waits_no_more();
+        event
     }
 
     /// Blocks until a call arrives (close events are skipped). Returns the

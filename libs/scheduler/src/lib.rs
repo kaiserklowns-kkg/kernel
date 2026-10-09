@@ -57,6 +57,18 @@ impl<T> RunQueue<T> {
         self.sleeping.len()
     }
 
+    /// The sleepers and their deadlines, earliest first (for diagnostics).
+    pub fn sleepers(&self) -> impl Iterator<Item = (u64, &T)> {
+        self.sleeping
+            .iter()
+            .map(|(&(deadline, _), thread)| (deadline, thread))
+    }
+
+    /// The ready threads, in order (for diagnostics).
+    pub fn ready(&self) -> impl Iterator<Item = &T> {
+        self.ready.iter()
+    }
+
     /// Parks `thread` until tick `deadline`.
     pub fn sleep_until(&mut self, thread: T, deadline: u64) {
         self.sequence += 1;

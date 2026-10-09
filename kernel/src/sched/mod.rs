@@ -28,7 +28,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use oceans_scheduler::{RunQueue, TimeSlice};
 use spin::Mutex;
@@ -74,6 +74,10 @@ pub struct Thread {
     process: Option<Arc<Process>>,
     /// Call received with `IPC_RECEIVE`, answered by `IPC_REPLY`.
     pending_call: Mutex<Option<ReplyToken>>,
+    /// What it waits on, for diagnostics: a [`Wait`] kind and the object's
+    /// address (0: nothing).
+    wait_kind: AtomicU8,
+    wait_object: AtomicUsize,
     /// The thread's stack; freed when the thread is reaped.
     stack: KernelStack,
 }
@@ -194,6 +198,8 @@ fn adopt(name: &'static str, stack: KernelStack) -> Arc<Thread> {
         root: paging::kernel_root(),
         process: None,
         pending_call: Mutex::new(None),
+        wait_kind: AtomicU8::new(0),
+        wait_object: AtomicUsize::new(0),
         stack,
     })
 }
@@ -405,6 +411,17 @@ pub fn dump() {
         scheduler.queue.ready_len(),
         scheduler.queue.sleeping_len()
     );
+    klog::diagnostic!("tick {}", time::ticks());
+    for thread in scheduler.queue.ready() {
+        klog::diagnostic!("ready: thread {} {}", thread.id.0, thread.name);
+    }
+    for (deadline, thread) in scheduler.queue.sleepers() {
+        klog::diagnostic!(
+            "asleep: thread {} {} until tick {deadline}",
+            thread.id.0,
+            thread.name
+        );
+    }
     for (index, cpu) in scheduler.cpus.iter().enumerate() {
         if let Some(current) = &cpu.current {
             klog::diagnostic!(
@@ -414,6 +431,31 @@ pub fn dump() {
                 if cpu.is_idle() { " (idle)" } else { "" }
             );
         }
+    }
+}
+
+/// What a thread waits on, for diagnostics (the diagnostic key).
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum Wait {
+    /// A reply from a server, through the endpoint at the address.
+    Call = 1,
+    /// A call, on the endpoint at the address.
+    Receive = 2,
+    /// A signal of the notification at the address.
+    Notification = 3,
+}
+
+impl Thread {
+    /// Notes what the thread is about to wait on (`object` is its address),
+    /// for diagnostics, until [`Thread::waits_no_more`].
+    pub fn waits(&self, wait: Wait, object: usize) {
+        self.wait_object.store(object, Ordering::Relaxed);
+        self.wait_kind.store(wait as u8, Ordering::Relaxed);
+    }
+
+    pub fn waits_no_more(&self) {
+        self.wait_kind.store(0, Ordering::Relaxed);
     }
 }
 
@@ -436,6 +478,13 @@ pub fn describe(thread: &Thread) -> alloc::string::String {
         .is_some_and(|call| call.is_some())
     {
         words.push_str("answering-a-call ");
+    }
+    let object = thread.wait_object.load(Ordering::Relaxed);
+    match thread.wait_kind.load(Ordering::Relaxed) {
+        1 => words.push_str(&alloc::format!("calling {object:#x} ")),
+        2 => words.push_str(&alloc::format!("receiving {object:#x} ")),
+        3 => words.push_str(&alloc::format!("waiting {object:#x} ")),
+        _ => {}
     }
     words
 }
@@ -476,6 +525,8 @@ fn new_thread(
         root,
         process,
         pending_call: Mutex::new(None),
+        wait_kind: AtomicU8::new(0),
+        wait_object: AtomicUsize::new(0),
         stack,
     }))
 }
