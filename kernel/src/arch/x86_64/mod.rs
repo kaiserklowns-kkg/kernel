@@ -159,9 +159,23 @@ pub enum EmulatorExit {
     Failure = 0x11,
 }
 
+/// Lets the console's last lines reach the other end before the machine
+/// stops, restarts or (QEMU) ends: a virtual machine's serial line drops
+/// what it still carries (the smokes saw a boot's last lines missing).
+/// Every byte out of the UART, then a moment (about a third of a second at
+/// 3 GHz; the clock may be stopped here, after a panic) to pass them on.
+pub fn console_drain() {
+    serial::drain();
+    let start = cycles();
+    while cycles().wrapping_sub(start) < 1_000_000_000 {
+        core::hint::spin_loop();
+    }
+}
+
 /// Terminates QEMU. Only called in smoke-test mode; on hardware without the
 /// device the write is ignored and the CPU halts.
 pub fn exit_emulator(code: EmulatorExit) -> ! {
+    console_drain();
     // SAFETY: port 0xf4 is reserved for the debug-exit device in our QEMU
     // configuration and unassigned on supported hardware.
     unsafe { Port::<u32>::new(0xf4).write(code as u32) };

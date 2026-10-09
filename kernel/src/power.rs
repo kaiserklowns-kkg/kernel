@@ -241,6 +241,7 @@ pub fn off() {
         return;
     };
     klog::info!("switching off (ACPI S5)");
+    arch::console_drain();
     arch::disable_interrupts();
     match off {
         Off::Pm1 {
@@ -284,6 +285,7 @@ pub fn off() {
 /// Restarts the machine.
 pub fn restart() -> ! {
     klog::info!("restarting");
+    arch::console_drain();
     arch::disable_interrupts();
     hw::flush_caches();
     if let Some((reset, value)) = POWER.get().and_then(|p| p.reset) {

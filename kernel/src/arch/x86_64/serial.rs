@@ -16,6 +16,8 @@ const LINE_STATUS_DATA_READY: u8 = 1 << 0;
 /// A byte arrived with the FIFO full: input was lost.
 const LINE_STATUS_OVERRUN: u8 = 1 << 1;
 const LINE_STATUS_THR_EMPTY: u8 = 1 << 5;
+/// The transmitter holds nothing more: every byte has left.
+const LINE_STATUS_TRANSMITTER_EMPTY: u8 = 1 << 6;
 const IER_RECEIVED_DATA: u8 = 1 << 0;
 const MCR_DTR_RTS: u8 = 0x03;
 /// OUT2 gates the UART's interrupt line on PC-compatible boards.
@@ -86,6 +88,16 @@ pub fn write_str(s: &str) {
             write_byte(b'\r');
         }
         write_byte(byte);
+    }
+}
+
+/// Waits until every byte written has left the UART.
+pub fn drain() {
+    if !PRESENT.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    while inb(LINE_STATUS) & LINE_STATUS_TRANSMITTER_EMPTY == 0 {
+        core::hint::spin_loop();
     }
 }
 
