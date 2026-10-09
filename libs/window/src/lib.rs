@@ -215,7 +215,6 @@ pub enum KeyRoute {
     /// Ctrl+Shift+V with the Terminal focused: the display types
     /// [`Manager::terminal_paste`] into the console (ADR-0095).
     TerminalPaste,
-}
     /// A volume key (ADR-0101), whoever has the focus: the desktop
     /// changes the system volume.
     Volume(VolumeKey),

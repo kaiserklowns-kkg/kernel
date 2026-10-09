@@ -229,7 +229,9 @@ impl Service {
                 }
                 op::NOW_PLAYING => {
                     close_all(handles);
-                    match window_of(data).map(|id| self.windows.set_now_playing(got.badge, id, &data[4..])) {
+                    match window_of(data)
+                        .map(|id| self.windows.set_now_playing(got.badge, id, &data[4..]))
+                    {
                         // The sound panel shows it.
                         Some(Ok(())) => (Status::Ok, true),
                         Some(Err(status)) => (status, false),

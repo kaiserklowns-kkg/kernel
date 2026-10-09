@@ -523,7 +523,7 @@ fn run_window<S>(
     let mut batch = [Event::default(); 20];
     let mut draw =
         |window: &mut Window, input: &mut Input, focus: &mut Option<u32>, state: &mut S| {
-            let (w, h) = (window.width, window.height);
+            let (w, h, id) = (window.width, window.height, window.id);
             let Some(mut surface) = Surface::new(window.pixels(), w, h) else {
                 return false;
             };
@@ -535,7 +535,7 @@ fn run_window<S>(
                 Rect::new(0, 0, w as i32, h as i32),
             );
             ui.windows = Some(windows);
-            ui.window = window.id;
+            ui.window = id;
             frame(&mut ui, state);
             let changed = ui.changed;
             let copied = ui.copied.take();

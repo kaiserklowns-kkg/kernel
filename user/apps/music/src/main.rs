@@ -112,7 +112,9 @@ impl Music {
             Some(p) => (playing::PLAYING, Some(p.index)),
             None => (playing::STOPPED, self.selected),
         };
-        let name = index.and_then(|i| self.songs.get(i)).map_or("", String::as_str);
+        let name = index
+            .and_then(|i| self.songs.get(i))
+            .map_or("", String::as_str);
         // The name without its folder, cut to what the desktop takes.
         let name = name.rsplit('/').next().unwrap_or(name);
         let mut title = String::new();

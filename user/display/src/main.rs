@@ -323,7 +323,8 @@ fn main(start: Start) -> i64 {
                 service.desktop.toast = None;
                 dirty = true;
             }
-            if service.desktop.volume_shown_until != 0 && service.desktop.volume_shown_until <= now {
+            if service.desktop.volume_shown_until != 0 && service.desktop.volume_shown_until <= now
+            {
                 service.desktop.volume_shown_until = 0;
                 dirty = true;
             }
@@ -402,7 +403,8 @@ impl Service {
                     || y < desktop::MENU_HEIGHT
                     || y >= h - desktop::DOCK_RESERVE
                     || (self.desktop.volume_open
-                        && desktop::sound_panel(w, self.desktop.now_playing.is_some()).contains(x, y));
+                        && desktop::sound_panel(w, self.desktop.now_playing.is_some())
+                            .contains(x, y));
                 // A second press of the main button soon after the first,
                 // where it was: a double click (ADR-0097). Timed when the
                 // input service read them, not when they are handled here

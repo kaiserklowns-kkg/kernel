@@ -15,8 +15,8 @@
 
 use crate::pointer::{
     APPLICATION, COLLECTION, CONSTANT, END_COLLECTION, Field, GLOBAL, Globals, INPUT, LOCAL,
-    LONG_ITEM, Locals, MAIN, MAX_DEPTH, MAX_FIELD_BITS, MAX_PUSH, MAX_REPORT, MAX_USAGES,
-    VARIABLE, sign_extend,
+    LONG_ITEM, Locals, MAIN, MAX_DEPTH, MAX_FIELD_BITS, MAX_PUSH, MAX_REPORT, MAX_USAGES, VARIABLE,
+    sign_extend,
 };
 
 /// The Consumer page, and its Consumer Control collection.
@@ -117,9 +117,12 @@ impl Array {
             return None;
         }
         if self.usages.count > 0 {
-            return self.usages.usages.get(index as usize).copied().filter(|_| {
-                (index as usize) < self.usages.count
-            });
+            return self
+                .usages
+                .usages
+                .get(index as usize)
+                .copied()
+                .filter(|_| (index as usize) < self.usages.count);
         }
         let (min, max) = self.usages.range?;
         let usage = min.checked_add(index)?;
@@ -243,7 +246,9 @@ impl Layout {
                     if offsets[id] > 8 * MAX_REPORT as u32 {
                         return Err(Error::Malformed);
                     }
-                    let same = found.report_id.is_none_or(|known| known == globals.report_id);
+                    let same = found
+                        .report_id
+                        .is_none_or(|known| known == globals.report_id);
                     if inside.is_some() && value & CONSTANT == 0 && bits > 0 && same {
                         found.collect(&globals, &locals, start, value & VARIABLE != 0);
                     }

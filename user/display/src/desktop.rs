@@ -259,7 +259,12 @@ pub fn volume_panel(width: i32) -> Rect {
 /// player says (ADR-0103).
 pub fn sound_panel(width: i32, media: bool) -> Rect {
     let top = volume_panel(width);
-    Rect::new(top.x, top.y, top.w, if media { top.h + MEDIA_HEIGHT } else { top.h })
+    Rect::new(
+        top.x,
+        top.y,
+        top.w,
+        if media { top.h + MEDIA_HEIGHT } else { top.h },
+    )
 }
 
 /// The media keys the panel's buttons press: Previous, Play/Pause, Next.
@@ -525,7 +530,9 @@ impl Desktop {
         }
         let media = self.now_playing.is_some();
         if self.volume_open && sound_panel(width, media).contains(x, y) {
-            return if let Some(which) = (0..3).find(|&i| media && media_button(width, i).contains(x, y)) {
+            return if let Some(which) =
+                (0..3).find(|&i| media && media_button(width, i).contains(x, y))
+            {
                 Hit::Media(MEDIA_KEYS[which])
             } else if volume_track_target(width).contains(x, y) {
                 Hit::VolumeLevel(volume_at(width, x))

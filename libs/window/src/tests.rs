@@ -645,7 +645,10 @@ fn volume_keys_go_to_the_desktop_whoever_has_the_focus() {
     m.open(APP, "A", "", 100, 100).unwrap();
     m.take_events(APP, 100);
     assert_eq!(m.key(proto::KEY_VOLUME_UP), KeyRoute::Volume(VolumeKey::Up));
-    assert_eq!(m.key(proto::KEY_VOLUME_DOWN), KeyRoute::Volume(VolumeKey::Down));
+    assert_eq!(
+        m.key(proto::KEY_VOLUME_DOWN),
+        KeyRoute::Volume(VolumeKey::Down)
+    );
     // The app never sees them, nor does a press count as its input.
     assert!(m.take_events(APP, 100).is_empty());
     assert_eq!(m.copy(APP, b"x"), Err(Status::NotAllowed));
@@ -676,7 +679,10 @@ fn media_keys_go_to_the_player_that_asked_or_was_looked_at_last() {
     assert_eq!(m.focus(), Focus::Window(other));
     assert_eq!(m.key(proto::KEY_NEXT), KeyRoute::Window(APP));
     let events = m.take_events(APP, 100);
-    assert_eq!((events[0].kind, events[0].key, events[0].window), (kind::KEY, proto::KEY_NEXT, player));
+    assert_eq!(
+        (events[0].kind, events[0].key, events[0].window),
+        (kind::KEY, proto::KEY_NEXT, player)
+    );
     // No input of the player's: no copy.
     assert_eq!(m.copy(APP, b"x"), Err(Status::NotAllowed));
     // A second player asks: it has them; looking at the first gives them back.
@@ -698,18 +704,31 @@ fn the_player_with_the_media_keys_says_what_it_plays() {
     let music = m.open(APP, "Music", "", 100, 100).unwrap();
     let other = m.open(OTHER, "Radio", "", 100, 100).unwrap();
     // Only a window that asked for the media keys may say.
-    assert_eq!(m.set_now_playing(APP, music, b"\x01song.wav"), Err(Status::NotAllowed));
+    assert_eq!(
+        m.set_now_playing(APP, music, b"\x01song.wav"),
+        Err(Status::NotAllowed)
+    );
     m.want_media_keys(APP, music).unwrap();
     assert_eq!(m.now_playing(), None);
     m.set_now_playing(APP, music, b"\x01song.wav").unwrap();
     let shown = m.now_playing().unwrap();
-    assert_eq!((shown.app, shown.state, shown.title), ("Music", PLAYING, "song.wav"));
+    assert_eq!(
+        (shown.app, shown.state, shown.title),
+        ("Music", PLAYING, "song.wav")
+    );
     // States and titles are checked.
     for bad in [&b""[..], b"\x03x", b"\x01", b"\x01two\nlines", b"\x01\xff"] {
-        assert_eq!(m.set_now_playing(APP, music, bad), Err(Status::BadRequest), "{bad:?}");
+        assert_eq!(
+            m.set_now_playing(APP, music, bad),
+            Err(Status::BadRequest),
+            "{bad:?}"
+        );
     }
     let long = [&[PAUSED][..], &[b'a'; proto::MAX_NOW_PLAYING + 1]].concat();
-    assert_eq!(m.set_now_playing(APP, music, &long), Err(Status::BadRequest));
+    assert_eq!(
+        m.set_now_playing(APP, music, &long),
+        Err(Status::BadRequest)
+    );
     m.set_now_playing(APP, music, &[STOPPED]).unwrap();
     assert_eq!(m.now_playing(), None);
     // Another player that asked takes over the panel; its window gone, the

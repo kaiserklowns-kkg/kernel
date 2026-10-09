@@ -1028,7 +1028,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("app: started app.oceans.viewer"),
     Expect::Contains("core: installed music.opk from the system image"),
     // Music (ADR-0094): `sound` is granted without asking, as a player end.
-    Expect::Contains("core: audit: started app.oceans.music 1.0.0 with window, files, sound"),
+    Expect::Contains("core: audit: started app.oceans.music 1.0.2 with window, files, sound"),
     Expect::Contains("core: ready, 7 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
@@ -3827,15 +3827,40 @@ fn report_cpus(port: u16) {
     }
     // QEMU prints "CPU#n" before each CPU's registers, and a line
     // "RIP=... RFL=... [flags] CPL=... HLT=..." for each.
-    let text = String::from_utf8_lossy(&text);
+    let text = String::from_utf8_lossy(&text).into_owned();
     let mut cpu = String::from("?");
+    let mut cpus = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.trim().strip_prefix("CPU#") {
             cpu = rest.chars().take_while(char::is_ascii_digit).collect();
+            cpus.push(cpu.clone());
         }
         if line.contains("RIP=") {
             println!("cpu {cpu}: {}", line.trim());
         }
+    }
+    // Each CPU's stack, as far as the kernel's code goes: the return
+    // addresses on it, newest first (a rough backtrace to resolve).
+    for cpu in cpus {
+        let _ = monitor.write_all(format!("cpu {cpu}\nx/96gx $rsp\n").as_bytes());
+        let mut text = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match monitor.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => text.extend_from_slice(&chunk[..n]),
+                Err(_) if !text.is_empty() => break,
+                Err(_) => {}
+            }
+        }
+        let text = String::from_utf8_lossy(&text);
+        let code: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.split_once(':').map(|(_, words)| words))
+            .flat_map(str::split_whitespace)
+            .filter(|word| word.starts_with("0xffffffff8"))
+            .collect();
+        println!("cpu {cpu} stack: {}", code.join(" "));
     }
 }
 
