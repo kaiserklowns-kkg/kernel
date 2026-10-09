@@ -486,6 +486,7 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut line = Vec::new();
+        let mut rejoin = super::Rejoin::default();
         while let Ok(buffer) = reader.fill_buf() {
             if buffer.is_empty() {
                 break;
@@ -496,7 +497,7 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect]) -> Result {
                 for &byte in buffer {
                     consumed += 1;
                     if byte == b'\n' {
-                        let _ = lines_tx.send(Ok(String::from_utf8_lossy(&line).into_owned()));
+                        let _ = lines_tx.send(Ok(rejoin.push(&String::from_utf8_lossy(&line))));
                         line.clear();
                     } else {
                         line.push(byte);

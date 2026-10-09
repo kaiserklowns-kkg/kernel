@@ -2934,6 +2934,56 @@ enum Console {
 }
 
 const SHELL_PROMPT: &[u8] = b"oceans> ";
+
+/// How a kernel log line begins.
+const LOG_MARKS: [&str; 4] = ["[INFO ] ", "[DEBUG] ", "[WARN ] ", "[ERROR] "];
+
+/// Puts back together a program's console line that a kernel log line cut
+/// in two. Both share the serial line, and a log line, written whole, may
+/// land inside a program's line (`... UEFI GOP[INFO ] ...`, then
+/// ` framebuffer, 32 bpp`): the log line is passed on alone, and the
+/// program's line once its rest has come.
+#[derive(Default)]
+pub(crate) struct Rejoin {
+    /// The start of the program's line, waiting for its rest.
+    open: String,
+}
+
+impl Rejoin {
+    /// The line to pass on for console line `raw`.
+    pub(crate) fn push(&mut self, raw: &str) -> String {
+        let is_log = |text: &str| LOG_MARKS.iter().any(|mark| text.starts_with(mark));
+        let line = if self.open.is_empty() || is_log(raw) {
+            raw.to_string()
+        } else {
+            core::mem::take(&mut self.open) + raw
+        };
+        // Whitespace before a log line's mark is a program indenting kept
+        // log lines (`diag crashes`), not a cut.
+        let cut = LOG_MARKS
+            .iter()
+            .filter_map(|mark| line.find(mark))
+            .min()
+            .filter(|&at| !line[..at].trim().is_empty());
+        let Some(at) = cut else {
+            return line;
+        };
+        let (before, log) = line.split_at(at);
+        // A bare prompt: what follows may be any program's output, not the
+        // rest of a typed line. Escape sequences (the firmware clearing the
+        // screen before the kernel's first line) start no line.
+        if before.as_bytes() != SHELL_PROMPT && !before.contains('\x1b') {
+            self.open.push_str(before);
+        }
+        log.to_string()
+    }
+
+    /// What is left of a cut line when the console closes.
+    pub(crate) fn rest(&mut self) -> Option<String> {
+        Some(core::mem::take(&mut self.open)).filter(|open| !open.is_empty())
+    }
+}
+
 /// What `ui pair` prints before the code (ADR-0058).
 const PAIRING_CODE: &str = "ui: pairing code: ";
 const CONSENT_PROMPT: &[u8] = b"Allow? [y/N] ";
@@ -3011,12 +3061,13 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     thread::spawn(move || {
         // Bytes, not lines: the prompt has no line ending.
         let mut line = Vec::new();
+        let mut rejoin = Rejoin::default();
         for byte in BufReader::new(stdout)
             .bytes()
             .map_while(std::io::Result::ok)
         {
             if byte == b'\n' {
-                let text = String::from_utf8_lossy(&line).into_owned();
+                let text = rejoin.push(&String::from_utf8_lossy(&line));
                 line.clear();
                 if events_tx.send(Console::Line(text)).is_err() {
                     break;
@@ -3030,6 +3081,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                     break;
                 }
             }
+        }
+        if let Some(rest) = rejoin.rest() {
+            let _ = events_tx.send(Console::Line(rest));
         }
         // Said outright: `prompt_again` and `resume` may still hold the
         // channel open (QEMU exited before the script began, e.g. a panic).
@@ -4642,6 +4696,60 @@ mod tests {
         assert_eq!(image.pixels[0], 0xffe8_613c);
         assert_eq!(image.pixels[199], 0);
         assert_eq!(image.pixels[119 * 200 + 99], 0xffe8_613c);
+    }
+
+    #[test]
+    fn lines_cut_by_log_lines_are_put_back() {
+        let mut rejoin = Rejoin::default();
+        let mut push = |raw: &str| rejoin.push(raw);
+        // CI: lspci's line, cut by the bridge's log line.
+        assert_eq!(
+            push(
+                "  00:01.0 1234:1111 class 03.00.00  Display controller: UEFI GOP[INFO ] bridge: up"
+            ),
+            "[INFO ] bridge: up"
+        );
+        assert_eq!(
+            push(" framebuffer, 32 bpp"),
+            "  00:01.0 1234:1111 class 03.00.00  Display controller: UEFI GOP framebuffer, 32 bpp"
+        );
+        // A typed line cut twice, the second time by a line that follows.
+        assert_eq!(
+            push("oceans> e[DEBUG] process 145 destroyed"),
+            "[DEBUG] process 145 destroyed"
+        );
+        assert_eq!(
+            push("cho [INFO ] heartbeat: still beating"),
+            "[INFO ] heartbeat: still beating"
+        );
+        assert_eq!(push("[INFO ] another log line"), "[INFO ] another log line");
+        assert_eq!(push("typed on usb"), "oceans> echo typed on usb");
+        assert_eq!(push("typed on usb"), "typed on usb");
+        // After a bare prompt, the next line is its own.
+        assert_eq!(
+            push("oceans> [INFO ] core: started"),
+            "[INFO ] core: started"
+        );
+        assert_eq!(
+            push("hello: run 4 (counted in my storage)"),
+            "hello: run 4 (counted in my storage)"
+        );
+        assert_eq!(
+            push("[2J[01;01H[INFO ] kernel: Oceans"),
+            "[INFO ] kernel: Oceans"
+        );
+        assert_eq!(push("[INFO ] memory: ready"), "[INFO ] memory: ready");
+        assert_eq!(push("a program line"), "a program line");
+        // Kept log lines a program prints, indented, are not cut.
+        assert_eq!(
+            push("  [WARN ] random: entropy"),
+            "  [WARN ] random: entropy"
+        );
+        assert_eq!(push("[INFO ] diag: tick 1"), "[INFO ] diag: tick 1");
+        // A cut line whose rest never came is passed on at the end.
+        push("half a line[INFO ] x");
+        assert_eq!(rejoin.rest().as_deref(), Some("half a line"));
+        assert_eq!(rejoin.rest(), None);
     }
 
     #[test]
