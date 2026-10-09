@@ -603,6 +603,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app run app.example.notes\r\n",
     b"@bridge webapp",
     b"ui unpair\r\n",
+    // The bridge has closed the browser's access before it is checked.
+    b"@wait bridge: unpaired: the browser's capability is closed",
     b"@bridge unpaired",
     b"ui unpair\r\n",
     // USB (ADR-0032): QEMU's keyboard on its xHCI controller; a command
