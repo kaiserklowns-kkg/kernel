@@ -522,10 +522,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app start app.oceans.music tone.wav\r\n",
     b"@screen 342 225 2f7cf6 Music playing",
     b"@screen 342 225 d8d8de Music at the end of its list",
-    // The media keys (ADR-0102): Music asked for them; the keyboard's
-    // Play/Pause starts the song again, Stop stops it.
-    b"@monitor sendkey audioplay",
-    b"@monitor sendkey audiostop",
+    // The media keys (ADR-0102): Music asks for them. (QEMU's USB keyboard
+    // sends no media keys; the sound panel's buttons press them below.)
     // What plays, in the sound panel (ADR-0103): the speaker (1012,14)
     // opens it with Music's song under the volume, and Play (896,193,
     // blue) plays it again. The mouse is where Text Editor left it,
@@ -1016,8 +1014,6 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("hda: volume 80%"),
     // The media keys (ADR-0102), to the player that asked for them.
     Expect::Contains("display: media keys go to Music"),
-    Expect::Contains("display: media key Play/Pause to Music"),
-    Expect::Contains("display: media key Stop to Music"),
     // What plays (ADR-0103): pressed in the sound panel.
     Expect::Contains("desktop: Play/Pause for Music, from the sound panel"),
     Expect::Line("volume: 75%, muted"),

@@ -64,9 +64,10 @@ driver):
   - other consumer controls (browser keys, calculator, brightness);
   - consumer controls inside the pointer's interface (some mice);
   - "now playing" shown by the desktop;
-  - QEMU has no USB keyboard with consumer controls: the smoke test
-    reaches Music through QEMU's keyboard, and the descriptor reading is
-    covered by host tests of real descriptors' shapes.
+  - QEMU has no USB keyboard with consumer controls, and its USB
+    keyboard sends no media keys: the descriptor reading is covered by
+    host tests of real descriptors' shapes, and a real keyboard is still
+    to be tried.
 
 ## Alternatives considered
 
@@ -99,8 +100,10 @@ driver):
     held keys sent once, descriptors without known keys or cut short
     (`oceans-usb`); routing to the player that asked or was looked at last,
     and when windows close (`oceans-window`);
-  - smoke: Music asks for the media keys; Play/Pause and Stop pressed on
-    QEMU's keyboard reach it while it is in the background of the shell.
+  - smoke: Music asks for the media keys (`display: media keys go to
+    Music`); QEMU's USB keyboard sends no media keys, so the keys' way to
+    Music is exercised by the sound panel's buttons (ADR-0103), which press
+    them.
 - **Failure behaviour:**
   - **A descriptor that does not parse, or no known keys:** the interface
     is left alone.
