@@ -690,3 +690,39 @@ fn media_keys_go_to_the_player_that_asked_or_was_looked_at_last() {
     m.close(OTHER, other).unwrap();
     assert_eq!(m.key(proto::KEY_STOP), KeyRoute::Consumed);
 }
+
+#[test]
+fn the_player_with_the_media_keys_says_what_it_plays() {
+    use proto::playing::{PAUSED, PLAYING, STOPPED};
+    let mut m = manager();
+    let music = m.open(APP, "Music", "", 100, 100).unwrap();
+    let other = m.open(OTHER, "Radio", "", 100, 100).unwrap();
+    // Only a window that asked for the media keys may say.
+    assert_eq!(m.set_now_playing(APP, music, b"\x01song.wav"), Err(Status::NotAllowed));
+    m.want_media_keys(APP, music).unwrap();
+    assert_eq!(m.now_playing(), None);
+    m.set_now_playing(APP, music, b"\x01song.wav").unwrap();
+    let shown = m.now_playing().unwrap();
+    assert_eq!((shown.app, shown.state, shown.title), ("Music", PLAYING, "song.wav"));
+    // States and titles are checked.
+    for bad in [&b""[..], b"\x03x", b"\x01", b"\x01two\nlines", b"\x01\xff"] {
+        assert_eq!(m.set_now_playing(APP, music, bad), Err(Status::BadRequest), "{bad:?}");
+    }
+    let long = [&[PAUSED][..], &[b'a'; proto::MAX_NOW_PLAYING + 1]].concat();
+    assert_eq!(m.set_now_playing(APP, music, &long), Err(Status::BadRequest));
+    m.set_now_playing(APP, music, &[STOPPED]).unwrap();
+    assert_eq!(m.now_playing(), None);
+    // Another player that asked takes over the panel; its window gone, the
+    // first again.
+    m.set_now_playing(APP, music, b"\x02song.wav").unwrap();
+    m.want_media_keys(OTHER, other).unwrap();
+    m.set_now_playing(OTHER, other, b"\x01news").unwrap();
+    assert_eq!(m.now_playing().unwrap().title, "news");
+    m.close(OTHER, other).unwrap();
+    let shown = m.now_playing().unwrap();
+    assert_eq!((shown.state, shown.title), (PAUSED, "song.wav"));
+    // The desktop's buttons press the keys.
+    m.take_events(APP, 100);
+    assert_eq!(m.media_key(proto::KEY_PLAY_PAUSE), KeyRoute::Window(APP));
+    assert_eq!(kinds(&mut m, APP), [(kind::KEY, music)]);
+}

@@ -346,6 +346,11 @@ impl Service {
 
     /// Draws the desktop and the app windows, and shows what changed.
     fn draw(&mut self, canvas: &mut Canvas) {
+        // What plays (ADR-0103), for the sound panel.
+        self.desktop.now_playing = self
+            .windows
+            .now_playing()
+            .map(|n| (String::from(n.app), n.state, String::from(n.title)));
         let focus = self.windows.focus();
         self.desktop.terminal_focused = focus == Focus::Terminal;
         let views: Vec<WindowView<'_>> = self
@@ -396,7 +401,8 @@ impl Service {
                 let over = self.desktop.start_open
                     || y < desktop::MENU_HEIGHT
                     || y >= h - desktop::DOCK_RESERVE
-                    || (self.desktop.volume_open && desktop::volume_panel(w).contains(x, y));
+                    || (self.desktop.volume_open
+                        && desktop::sound_panel(w, self.desktop.now_playing.is_some()).contains(x, y));
                 // A second press of the main button soon after the first,
                 // where it was: a double click (ADR-0097). Timed when the
                 // input service read them, not when they are handled here
@@ -415,7 +421,7 @@ impl Service {
                 // A press away from the sound panel closes it.
                 if pressed
                     && self.desktop.volume_open
-                    && !desktop::volume_panel(w).contains(x, y)
+                    && !desktop::sound_panel(w, self.desktop.now_playing.is_some()).contains(x, y)
                     && !desktop::volume_button(w).contains(x, y)
                 {
                     self.desktop.volume_open = false;
@@ -580,6 +586,18 @@ impl Service {
             Hit::VolumeMute => {
                 if let Some((level, muted)) = self.desktop.volume {
                     self.set_volume(level, !muted);
+                }
+                true
+            }
+            // What plays (ADR-0103): its buttons press the media keys.
+            Hit::Media(byte) => {
+                if let oceans_window::KeyRoute::Window(owner) = self.windows.media_key(byte) {
+                    let app = self.owners.get(&owner).map_or("?", |o| o.app.as_str());
+                    let name = media_key_name(byte).unwrap_or("?");
+                    say(
+                        self.log,
+                        format_args!("desktop: {name} for {app}, from the sound panel"),
+                    );
                 }
                 true
             }

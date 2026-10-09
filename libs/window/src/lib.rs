@@ -221,6 +221,25 @@ pub enum KeyRoute {
     Volume(VolumeKey),
 }
 
+/// A window that asked for the media keys (ADR-0102), and what it said
+/// it plays (ADR-0103).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Player {
+    owner: u64,
+    id: u32,
+    state: u8,
+    title: String,
+}
+
+/// What the desktop shows of the player with the media keys (ADR-0103).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NowPlaying<'a> {
+    pub app: &'a str,
+    /// `proto::playing`.
+    pub state: u8,
+    pub title: &'a str,
+}
+
 /// The volume keys (ADR-0101).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VolumeKey {
@@ -285,7 +304,7 @@ pub struct Manager {
     paste: Option<u64>,
     /// The windows that asked for the media keys (ADR-0102), the one
     /// that gets them last.
-    media: Vec<(u64, u32)>,
+    media: Vec<Player>,
 }
 
 impl Manager {
@@ -387,7 +406,7 @@ impl Manager {
         if let Focus::Window(new) = focus {
             self.notify_focus(new, true);
             // The player the user looked at last has the media keys.
-            if let Some(at) = self.media.iter().position(|&(_, id)| id == new) {
+            if let Some(at) = self.media.iter().position(|p| p.id == new) {
                 let entry = self.media.remove(at);
                 self.media.push(entry);
             }
@@ -398,20 +417,55 @@ impl Manager {
     /// from now on.
     pub fn want_media_keys(&mut self, owner: u64, id: u32) -> Result<(), Status> {
         self.owned(owner, id)?;
-        self.media.retain(|&(o, _)| o != owner);
-        self.media.push((owner, id));
+        self.media.retain(|p| p.owner != owner);
+        self.media.push(Player {
+            owner,
+            id,
+            state: proto::playing::STOPPED,
+            title: String::new(),
+        });
         Ok(())
     }
 
     /// The app the media keys go to, if any asked.
     pub fn media_owner(&self) -> Option<u64> {
-        self.media.last().map(|&(owner, _)| owner)
+        self.media.last().map(|p| p.owner)
+    }
+
+    /// `NOW_PLAYING` (ADR-0103): what `owner`'s window `id` plays, if it
+    /// asked for the media keys.
+    pub fn set_now_playing(&mut self, owner: u64, id: u32, data: &[u8]) -> Result<(), Status> {
+        let (state, title) = proto::now_playing(data).ok_or(Status::BadRequest)?;
+        let player = self
+            .media
+            .iter_mut()
+            .find(|p| p.owner == owner && p.id == id)
+            .ok_or(Status::NotAllowed)?;
+        player.state = state;
+        player.title = String::from(title);
+        Ok(())
+    }
+
+    /// What the player with the media keys plays, once it has said
+    /// (ADR-0103): its app's name (as Core verified it), the state and the
+    /// title.
+    pub fn now_playing(&self) -> Option<NowPlaying<'_>> {
+        let player = self.media.last()?;
+        if player.title.is_empty() {
+            return None;
+        }
+        let frame = self.frames.iter().find(|f| f.id == player.id)?;
+        Some(NowPlaying {
+            app: &frame.app,
+            state: player.state,
+            title: &player.title,
+        })
     }
 
     /// A media key: to the window that asked last, as a key event, focused
     /// or not (no input of the app's: it allows no copy or open).
-    fn media_key(&mut self, byte: u8) -> KeyRoute {
-        let Some(&(owner, id)) = self.media.last() else {
+    pub fn media_key(&mut self, byte: u8) -> KeyRoute {
+        let Some((owner, id)) = self.media.last().map(|p| (p.owner, p.id)) else {
             return KeyRoute::Consumed;
         };
         self.queue(
@@ -482,7 +536,7 @@ impl Manager {
 
     fn remove(&mut self, index: usize) {
         let frame = self.frames.remove(index);
-        self.media.retain(|&(_, id)| id != frame.id);
+        self.media.retain(|p| p.id != frame.id);
         if self.drag.is_some_and(|(id, _, _)| id == frame.id) {
             self.drag = None;
         }

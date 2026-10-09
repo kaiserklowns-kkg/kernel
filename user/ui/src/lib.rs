@@ -114,6 +114,15 @@ impl<'s, 'f> Ui<'s, 'f> {
         }
     }
 
+    /// Says what this window plays (ADR-0103), for the desktop's sound
+    /// panel: `state` from `oceans_display_proto::proto::playing`, and a
+    /// title. Only after [`Ui::want_media_keys`]; say it when it changes.
+    pub fn now_playing(&self, state: u8, title: &str) {
+        if let Some(windows) = self.windows {
+            let _ = oceans_display_proto::now_playing(windows, self.window, state, title);
+        }
+    }
+
     /// The keyboard's media keys (Play/Pause, Stop, Previous, Next;
     /// ADR-0102) come to this window's keys from now on, whatever has the
     /// focus: for a player. Ask once.

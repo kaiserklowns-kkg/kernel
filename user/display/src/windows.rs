@@ -227,6 +227,15 @@ impl Service {
                     close_all(handles);
                     return self.resize(got.badge, data);
                 }
+                op::NOW_PLAYING => {
+                    close_all(handles);
+                    match window_of(data).map(|id| self.windows.set_now_playing(got.badge, id, &data[4..])) {
+                        // The sound panel shows it.
+                        Some(Ok(())) => (Status::Ok, true),
+                        Some(Err(status)) => (status, false),
+                        None => (Status::BadRequest, false),
+                    }
+                }
                 op::MEDIA_KEYS => {
                     close_all(handles);
                     match window_of(data).map(|id| self.windows.want_media_keys(got.badge, id)) {

@@ -93,6 +93,8 @@ struct Music {
     requested: Option<String>,
     /// Bytes of source frames, read from the file for one `PLAY`.
     source: Vec<u8>,
+    /// What it last told the desktop it plays (ADR-0103).
+    reported: Option<(u8, String)>,
 }
 
 fn time(ms: u64) -> String {
@@ -101,6 +103,34 @@ fn time(ms: u64) -> String {
 }
 
 impl Music {
+    /// Tells the desktop what plays (ADR-0103) when it changes: the song
+    /// playing, or the one selected; playing, paused or stopped.
+    fn report(&mut self, ui: &Ui<'_, '_>) {
+        use oceans_display_proto::proto::{MAX_NOW_PLAYING, playing};
+        let (state, index) = match &self.playing {
+            Some(p) if p.paused => (playing::PAUSED, Some(p.index)),
+            Some(p) => (playing::PLAYING, Some(p.index)),
+            None => (playing::STOPPED, self.selected),
+        };
+        let name = index.and_then(|i| self.songs.get(i)).map_or("", String::as_str);
+        // The name without its folder, cut to what the desktop takes.
+        let name = name.rsplit('/').next().unwrap_or(name);
+        let mut title = String::new();
+        for c in name.chars().filter(|c| !c.is_control()) {
+            if title.len() + c.len_utf8() > MAX_NOW_PLAYING {
+                break;
+            }
+            title.push(c);
+        }
+        let now = Some((state, title));
+        if now != self.reported {
+            if let Some((state, title)) = &now {
+                ui.now_playing(*state, title);
+            }
+            self.reported = now;
+        }
+    }
+
     /// The `.wav` files in Home and in its `Music` folder. (Home is listed
     /// through the handle Core gave: `.` names nothing.)
     fn scan(&mut self, home: &Node) {
@@ -336,6 +366,7 @@ fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
         }
     }
     music.tick();
+    music.report(ui);
     ui.background(colour::WINDOW);
     let whole = ui.area;
     if music.home.is_none() {
@@ -507,6 +538,7 @@ fn main(start: Start) -> i64 {
         scanned: false,
         requested: Some(String::from(directory.args().trim())).filter(|name| !name.is_empty()),
         source: Vec::new(),
+        reported: None,
     };
     let code = oceans_ui::run_ticking(
         &directory,

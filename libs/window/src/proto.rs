@@ -78,6 +78,11 @@ pub mod op {
     /// whatever has the focus, until another app asks for them; when the
     /// user focuses a window of an app that asked, they go to it again.
     pub const MEDIA_KEYS: u64 = 12;
+    /// data = `[window u32][state u8][title]`: what the player plays, for
+    /// the desktop to show (ADR-0103): [`super::playing`] state, and a
+    /// title of 1 to [`super::MAX_NOW_PLAYING`] bytes (none when stopped
+    /// and empty). Only for a window that asked for the media keys.
+    pub const NOW_PLAYING: u64 = 13;
 }
 
 /// The most text the clipboard holds, in bytes.
@@ -306,3 +311,26 @@ pub fn open_name(data: &[u8]) -> Option<&str> {
 
 /// Longest name `OPEN_FILE` takes, in bytes.
 pub const MAX_OPEN_NAME: usize = 200;
+
+/// What a player reports (`NOW_PLAYING`, ADR-0103).
+pub mod playing {
+    pub const STOPPED: u8 = 0;
+    pub const PLAYING: u8 = 1;
+    pub const PAUSED: u8 = 2;
+}
+
+/// Longest title a player reports, in bytes.
+pub const MAX_NOW_PLAYING: usize = 80;
+
+/// A `NOW_PLAYING` request's state and title, if acceptable: a known state,
+/// and a title of UTF-8 on one line, at most [`MAX_NOW_PLAYING`] bytes
+/// (empty only when stopped).
+pub fn now_playing(data: &[u8]) -> Option<(u8, &str)> {
+    let (&state, title) = data.split_first()?;
+    let title = core::str::from_utf8(title).ok()?;
+    let ok = state <= playing::PAUSED
+        && title.len() <= MAX_NOW_PLAYING
+        && !title.chars().any(char::is_control)
+        && (!title.trim().is_empty() || state == playing::STOPPED);
+    ok.then_some((state, title.trim()))
+}

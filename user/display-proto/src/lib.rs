@@ -341,3 +341,23 @@ pub fn want_media_keys(windows: Handle, id: u32) -> Result<(), WindowError> {
         status => Err(WindowError::Refused(status)),
     }
 }
+
+/// Says what window `id` plays (ADR-0103), for the desktop's sound panel:
+/// `state` from [`proto::playing`] and the title (at most
+/// [`proto::MAX_NOW_PLAYING`] bytes). Only after [`want_media_keys`].
+pub fn now_playing(windows: Handle, id: u32, state: u8, title: &str) -> Result<(), WindowError> {
+    let title = title.as_bytes();
+    let mut data = [0u8; 5 + proto::MAX_NOW_PLAYING];
+    if title.len() > proto::MAX_NOW_PLAYING {
+        return Err(WindowError::Refused(Status::BadRequest));
+    }
+    data[..4].copy_from_slice(&id.to_le_bytes());
+    data[4] = state;
+    data[5..5 + title.len()].copy_from_slice(title);
+    let got = oceans_rt::ipc_call_msg(windows, op::NOW_PLAYING, &data[..5 + title.len()], &[], &mut [], &mut [])
+        .map_err(WindowError::Ipc)?;
+    match Status::from_label(got.label) {
+        Status::Ok => Ok(()),
+        status => Err(WindowError::Refused(status)),
+    }
+}

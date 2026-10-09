@@ -168,6 +168,9 @@ pub struct Desktop {
     /// Until when (ms since boot) the level shows over the desktop, after a
     /// volume key (ADR-0101); 0: not shown.
     pub volume_shown_until: u64,
+    /// What the player with the media keys plays (ADR-0103): its app,
+    /// state (`proto::playing`) and title.
+    pub now_playing: Option<(String, u8, String)>,
 }
 
 /// An app window to draw.
@@ -206,6 +209,8 @@ pub enum Hit {
     /// The sound panel's slider, at that level.
     VolumeLevel(u8),
     VolumeMute,
+    /// A button of what plays (ADR-0103): the media key it presses.
+    Media(u8),
     /// Somewhere else in the sound panel.
     VolumePanel,
     Allow,
@@ -248,6 +253,34 @@ pub fn volume_button(width: i32) -> Rect {
 pub fn volume_panel(width: i32) -> Rect {
     let button = volume_button(width);
     Rect::new(button.x + button.w - 260, MENU_HEIGHT + 6, 260, 106)
+}
+
+/// The whole sound panel: the volume, and below it what plays when a
+/// player says (ADR-0103).
+pub fn sound_panel(width: i32, media: bool) -> Rect {
+    let top = volume_panel(width);
+    Rect::new(top.x, top.y, top.w, if media { top.h + MEDIA_HEIGHT } else { top.h })
+}
+
+/// The media keys the panel's buttons press: Previous, Play/Pause, Next.
+const MEDIA_KEYS: [u8; 3] = [
+    oceans_window::proto::KEY_PREVIOUS,
+    oceans_window::proto::KEY_PLAY_PAUSE,
+    oceans_window::proto::KEY_NEXT,
+];
+
+/// Height the panel grows by for what plays.
+const MEDIA_HEIGHT: i32 = 76;
+
+/// The panel's Previous, Play/Pause and Next buttons (0, 1, 2).
+pub fn media_button(width: i32, which: usize) -> Rect {
+    let top = volume_panel(width);
+    let y = top.y + top.h + 40;
+    match which {
+        0 => Rect::new(top.x + 16, y, 60, 26),
+        1 => Rect::new(top.x + 84, y, 92, 26),
+        _ => Rect::new(top.x + 184, y, 60, 26),
+    }
 }
 
 /// The panel's slider: its track, and the strip a click on it takes.
@@ -490,8 +523,11 @@ impl Desktop {
         if self.volume.is_some() && volume_button(width).contains(x, y) {
             return Hit::Volume;
         }
-        if self.volume_open && volume_panel(width).contains(x, y) {
-            return if volume_track_target(width).contains(x, y) {
+        let media = self.now_playing.is_some();
+        if self.volume_open && sound_panel(width, media).contains(x, y) {
+            return if let Some(which) = (0..3).find(|&i| media && media_button(width, i).contains(x, y)) {
+                Hit::Media(MEDIA_KEYS[which])
+            } else if volume_track_target(width).contains(x, y) {
                 Hit::VolumeLevel(volume_at(width, x))
             } else if volume_mute(width).contains(x, y) {
                 Hit::VolumeMute
@@ -675,9 +711,10 @@ impl Desktop {
     /// The sound panel (ADR-0100): the level, a slider and Mute.
     fn draw_volume_panel(&self, canvas: &mut Canvas, (level, muted): (u8, bool)) {
         let w = canvas.width;
+        let whole = sound_panel(w, self.now_playing.is_some());
+        canvas.shadow(whole, 12, 70);
+        canvas.round_fill(whole, 12, DIALOG_SURFACE);
         let panel = volume_panel(w);
-        canvas.shadow(panel, 12, 70);
-        canvas.round_fill(panel, 12, DIALOG_SURFACE);
         canvas.text(
             panel.x + 16,
             panel.y + 12,
@@ -706,6 +743,28 @@ impl Desktop {
         let ink = if muted { WHITE } else { TEXT };
         let lx = mute.x + (mute.w - canvas.measure(label, Font::Body)) / 2;
         canvas.text(lx, mute.y + 4, label, Font::Body, ink, mute);
+        // What plays (ADR-0103): the title, the app, and its buttons.
+        if let Some((app, state, title)) = &self.now_playing {
+            canvas.fill(
+                Rect::new(panel.x + 16, panel.y + panel.h, panel.w - 32, 1),
+                BUTTON_SECONDARY,
+            );
+            let row = Rect::new(panel.x + 16, panel.y + panel.h + 10, panel.w - 32, 22);
+            let app_x = row.x + row.w - canvas.measure(app, Font::Body);
+            canvas.text(app_x, row.y, app, Font::Body, MUTED, row);
+            let title_clip = Rect::new(row.x, row.y, app_x - row.x - 8, row.h);
+            canvas.text(row.x, row.y, title, Font::Strong, TEXT, title_clip);
+            let playing = *state == oceans_window::proto::playing::PLAYING;
+            let labels = ["Prev", if playing { "Pause" } else { "Play" }, "Next"];
+            for (which, label) in labels.iter().enumerate() {
+                let button = media_button(w, which);
+                let primary = which == 1;
+                canvas.round_fill(button, 7, if primary { ACCENT } else { BUTTON_SECONDARY });
+                let ink = if primary { WHITE } else { TEXT };
+                let lx = button.x + (button.w - canvas.measure(label, Font::Body)) / 2;
+                canvas.text(lx, button.y + 4, label, Font::Body, ink, button);
+            }
+        }
     }
 
     fn draw_dock(&self, canvas: &mut Canvas, windows: &[WindowView<'_>]) {

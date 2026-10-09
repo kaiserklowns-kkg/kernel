@@ -526,6 +526,21 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // Play/Pause starts the song again, Stop stops it.
     b"@monitor sendkey audioplay",
     b"@monitor sendkey audiostop",
+    // What plays, in the sound panel (ADR-0103): the speaker (1012,14)
+    // opens it with Music's song under the volume, and Play (896,193,
+    // blue) plays it again. The mouse is where Text Editor left it,
+    // 1014,400, and goes back there.
+    b"@monitor mouse_move -2 -386",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 856 184 2f7cf6 Music's song in the sound panel",
+    b"@monitor mouse_move -116 179",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move 116 -179",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move 2 386",
     b"app stop app.oceans.music\r\n",
     // Opening files (ADR-0099): Files, the tenth window (content from
     // 292,169), lists Home: notes.txt, picture.png, tone.wav,
@@ -1003,6 +1018,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("display: media keys go to Music"),
     Expect::Contains("display: media key Play/Pause to Music"),
     Expect::Contains("display: media key Stop to Music"),
+    // What plays (ADR-0103): pressed in the sound panel.
+    Expect::Contains("desktop: Play/Pause for Music, from the sound panel"),
     Expect::Line("volume: 75%, muted"),
     Expect::Line("volume: 70%"),
     Expect::Line("pasted edited in oceans"),
