@@ -36,6 +36,7 @@ use core::sync::atomic::{Ordering, compiler_fence};
 
 use oceans_rt::{Buffer, Directory, Handle, Start, prot};
 use oceans_usb::Speed;
+use oceans_usb::consumer;
 use oceans_usb::descriptor::{self, Bulk, Configuration, Device};
 use oceans_usb::hid::Keyboard;
 use oceans_usb::hub;
@@ -56,7 +57,7 @@ const PAGE: usize = 4096;
 const RING_TRBS: u16 = (PAGE / TRB_SIZE) as u16;
 /// Pages for the controller's own structures (4) and every device's
 /// ([`Pages`]: 10).
-const POOL_PAGES: usize = 4 + 10 * MAX_DEVICES;
+const POOL_PAGES: usize = 4 + 12 * MAX_DEVICES;
 const MAX_PORTS: usize = 32;
 const MAX_DEVICES: usize = 16;
 /// Interrupt reports kept queued per keyboard or pointer, and per hub.
@@ -261,10 +262,13 @@ struct Pages {
     /// A pointer's interrupt ring and its report buffers (ADR-0042).
     pointer: Page,
     pointer_reports: Page,
+    /// Media keys' interrupt ring and report buffers (ADR-0102).
+    media: Page,
+    media_reports: Page,
 }
 
 impl Pages {
-    fn all(&self) -> [Page; 10] {
+    fn all(&self) -> [Page; 12] {
         [
             self.output,
             self.input,
@@ -276,6 +280,8 @@ impl Pages {
             self.bulk_out,
             self.pointer,
             self.pointer_reports,
+            self.media,
+            self.media_reports,
         ]
     }
 }
@@ -367,6 +373,13 @@ impl ReportQueue {
 
 /// A pointer's interrupt endpoint, polled from the first `REPORTS` until
 /// the device goes.
+/// A media-keys interface's interrupt endpoint (ADR-0102).
+struct MediaRing {
+    interrupt: Interrupt,
+    packet: usize,
+    keys: consumer::Keys,
+}
+
 struct PointerRing {
     interrupt: Interrupt,
     /// Bytes per report transfer: the endpoint's packet size, at most
@@ -431,6 +444,9 @@ struct UsbDevice {
     /// A pointer interface (ADR-0042), if the device has one.
     pointer: Option<PointerInterface>,
     pointer_ring: Option<PointerRing>,
+    /// Media keys (HID consumer controls, ADR-0102), read here like the
+    /// keyboard's.
+    media: Option<MediaRing>,
     claim: Option<ClaimState>,
 }
 
@@ -1070,6 +1086,8 @@ impl Controller {
                     bulk_out: self.pool.page()?,
                     pointer: self.pool.page()?,
                     pointer_reports: self.pool.page()?,
+                    media: self.pool.page()?,
+                    media_reports: self.pool.page()?,
                 };
                 self.pages[free] = Some(pages);
                 pages
@@ -1106,6 +1124,7 @@ impl Controller {
             bulk: None,
             pointer: None,
             pointer_ring: None,
+            media: None,
             claim: None,
         });
         let result = self.enumerate(free, pages);
@@ -1289,6 +1308,16 @@ impl Controller {
         {
             self.configure_hub(index, endpoint, pages)?;
         }
+        // Media keys (ADR-0102): a keyboard's own interface for them, or a
+        // device of nothing else. A failure leaves the rest working.
+        if self.console.is_some()
+            && kind != Kind::Hub
+            && let Some((hid, layout)) =
+                self.find_media(index, full, pointer.map(|p| p.hid.interface.number))
+            && let Err(problem) = self.start_media(index, hid, layout)
+        {
+            say(self.log, format_args!("port {path}: media keys: {problem}"));
+        }
         Ok(())
     }
 
@@ -1425,6 +1454,38 @@ impl Controller {
         let Some(device) = self.devices[index].as_mut() else {
             return;
         };
+        // Media keys (ADR-0102): their bytes go where the keyboard's do.
+        if let Some(media) = device.media.as_mut()
+            && media.interrupt.dci == endpoint
+        {
+            let Some(at) = media.interrupt.ring.index_of(trb) else {
+                return;
+            };
+            let mut reports = pages.media_reports;
+            let offset = at * REPORT_STRIDE % PAGE;
+            let len = media.packet.saturating_sub(residue as usize);
+            let mut report = [0u8; REPORT_STRIDE];
+            report[..len].copy_from_slice(&reports.bytes()[offset..offset + len]);
+            queue_report(&mut media.interrupt.ring, reports, media.packet);
+            self.doorbells
+                .write32(4 * usize::from(slot), u32::from(media.interrupt.dci));
+            if code == completion::SUCCESS || code == completion::SHORT_PACKET {
+                let mut pressed = [0u8; 8];
+                let mut count = 0;
+                media.keys.report(&report[..len], |byte| {
+                    if count < pressed.len() {
+                        pressed[count] = byte;
+                        count += 1;
+                    }
+                });
+                if count > 0
+                    && let Some(console) = console
+                {
+                    let _ = oceans_rt::console_input(console, &pressed[..count]);
+                }
+            }
+            return;
+        }
         let (interrupt, mut reports, report_len) =
             match (&mut device.driver, &mut device.pointer_ring) {
                 (_, Some(ring)) if ring.interrupt.dci == endpoint => {
@@ -1558,6 +1619,81 @@ impl Controller {
             pointer::Error::Malformed => "malformed report descriptor",
             pointer::Error::NotAPointer => NOT_A_POINTER,
         })
+    }
+
+    /// The first HID interface of a configuration with media keys (HID
+    /// consumer controls, ADR-0102): not a boot keyboard or mouse, not the
+    /// pointer, with a Consumer Control collection this driver knows keys
+    /// of.
+    fn find_media(
+        &mut self,
+        index: usize,
+        configuration: &[u8],
+        pointer: Option<u8>,
+    ) -> Option<(descriptor::HidInterface, consumer::Layout)> {
+        let mut hids = [descriptor::HidInterface::default(); MAX_HID_INTERFACES];
+        let count = descriptor::find_hid_interfaces(configuration, &mut hids);
+        for hid in hids.into_iter().take(count) {
+            if hid.is_boot(descriptor::HID_PROTOCOL_KEYBOARD)
+                || hid.is_boot(descriptor::HID_PROTOCOL_MOUSE)
+                || hid.report_length == 0
+                || Some(hid.interface.number) == pointer
+            {
+                continue;
+            }
+            if self.configure_device(index).is_err() {
+                return None;
+            }
+            let length = usize::from(hid.report_length).min(MAX_REPORT_DESCRIPTOR);
+            let mut bytes = [0u8; MAX_REPORT_DESCRIPTOR];
+            let Ok(len) = self.control(
+                index,
+                Setup::hid_get_report_descriptor(hid.interface.number, length as u16),
+                Some(&mut bytes[..length]),
+            ) else {
+                continue;
+            };
+            if let Ok(layout) = consumer::Layout::parse(&bytes[..len]) {
+                return Some((hid, layout));
+            }
+        }
+        None
+    }
+
+    /// Reads a device's media keys from now on (ADR-0102).
+    fn start_media(
+        &mut self,
+        index: usize,
+        hid: descriptor::HidInterface,
+        layout: consumer::Layout,
+    ) -> Result<(), &'static str> {
+        let pages = self.pages[index].ok_or("no pages")?;
+        // Optional (HID 1.11 §7.2.4): some devices stall it.
+        let _ = self.control(index, Setup::hid_set_idle(hid.interface.number), None);
+        let packet = usize::from(hid.endpoint.packet_size()).min(REPORT_STRIDE);
+        let interrupt = self.configure_interrupt(
+            index,
+            hid.endpoint,
+            pages.media,
+            pages.media_reports,
+            packet,
+            QUEUED_REPORTS,
+        )?;
+        let device = self.devices[index].as_mut().ok_or("gone")?;
+        device.media = Some(MediaRing {
+            interrupt,
+            packet,
+            keys: consumer::Keys::new(layout),
+        });
+        let path = device.path();
+        say(
+            self.log,
+            format_args!(
+                "port {path}: interface {}: media keys",
+                hid.interface.number
+            ),
+        );
+        Ok(())
     }
 
     // ---- Class drivers (ADR-0034) ----------------------------------------

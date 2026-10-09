@@ -15,5 +15,6 @@ bench = false
 oceans-rt = { workspace = true, features = ["alloc"] }
 oceans-fs-proto.workspace = true
 oceans-ui.workspace = true
+oceans-abi.workspace = true
 oceans-audio-proto.workspace = true
 oceans-wav.workspace = true

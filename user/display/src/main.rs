@@ -31,6 +31,8 @@
 //!   panel with a slider and Mute; Core sets it and keeps it;
 //! - **the volume keys** (ADR-0101): the desktop's whoever has the focus;
 //!   a step of 5 or mute, the level shown over the desktop for a moment;
+//! - **the media keys** (ADR-0102): to the player that asked for them
+//!   (`MEDIA_KEYS`) or whose window the user looked at last;
 //! - notifications;
 //! - **permission dialogs**: when an app needs a decision, the desktop
 //!   asks, in the system's words, and sends the answer to Core
@@ -90,6 +92,18 @@ const TOAST_MS: u64 = 4000;
 const DOUBLE_CLICK_MS: u64 = 500;
 /// How long the level shows after a volume key (ADR-0101).
 const VOLUME_SHOWN_MS: u64 = 1500;
+
+/// A media key's name (ADR-0102), for the log.
+fn media_key_name(byte: u8) -> Option<&'static str> {
+    use oceans_window::proto::{KEY_NEXT, KEY_PLAY_PAUSE, KEY_PREVIOUS, KEY_STOP};
+    Some(match byte {
+        KEY_PLAY_PAUSE => "Play/Pause",
+        KEY_STOP => "Stop",
+        KEY_PREVIOUS => "Previous",
+        KEY_NEXT => "Next",
+        _ => return None,
+    })
+}
 
 fn say(log: Handle, args: core::fmt::Arguments<'_>) {
     let mut line = Buffer::<200>::new();
@@ -505,7 +519,13 @@ impl Service {
                 }
                 match self.windows.key(byte) {
                     KeyRoute::Terminal(byte) => terminal.push(byte),
-                    KeyRoute::Window(_) => {}
+                    KeyRoute::Window(owner) => {
+                        // A media key (ADR-0102), to the player that asked.
+                        if let Some(name) = media_key_name(byte) {
+                            let app = self.owners.get(&owner).map_or("?", |o| o.app.as_str());
+                            say(self.log, format_args!("display: media key {name} to {app}"));
+                        }
+                    }
                     KeyRoute::Consumed => dirty = true,
                     KeyRoute::Volume(key) => {
                         self.volume_key(key);

@@ -6,6 +6,8 @@
 //!   time bar goes there. A song that ends goes on to the next.
 //! - Started with a song's name (`app start app.oceans.music NAME`), it
 //!   plays that song.
+//! - The keyboard's media keys (Play/Pause, Stop, Previous, Next) work
+//!   whatever has the focus (ADR-0102).
 //! - A song is read a piece at a time (`oceans-wav` converts it to what
 //!   the audio service plays), never held whole.
 //!
@@ -26,6 +28,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use oceans_abi::display::{KEY_NEXT, KEY_PLAY_PAUSE, KEY_PREVIOUS, KEY_STOP};
 use oceans_audio_proto::{FRAME, Output};
 use oceans_fs_proto::{Kind, MAX_NAME, Node, Shared};
 use oceans_rt::{Directory, Handle, Start};
@@ -322,6 +325,8 @@ impl Music {
 
 fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
     if !music.scanned {
+        // The media keys come here from now on (ADR-0102).
+        ui.want_media_keys();
         music.rescan();
         if let Some(name) = music.requested.take() {
             match music.songs.iter().position(|song| *song == name) {
@@ -395,10 +400,27 @@ fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
         ("Stop", 228, 80),
         ("Next", 316, 80),
     ];
+    let mut action = None;
     for (text, x, w) in buttons {
-        if !ui.button_in(Rect::new(x, 88, w, 30), text, x == 124) {
-            continue;
+        if ui.button_in(Rect::new(x, 88, w, 30), text, x == 124) {
+            action = Some(text);
         }
+    }
+    // The media keys (ADR-0102), whatever has the focus: Music asked for
+    // them. Other keys are left to the widgets.
+    let mut others = Vec::new();
+    for key in core::mem::take(&mut ui.input.keys) {
+        match key {
+            KEY_PLAY_PAUSE => action = Some(main_label),
+            KEY_STOP => action = Some("Stop"),
+            KEY_PREVIOUS => action = Some("Previous"),
+            KEY_NEXT => action = Some("Next"),
+            other => others.push(other),
+        }
+    }
+    ui.input.keys = others;
+    if let Some(text) = action {
+        ui.changed = true;
         let current = music.playing.as_ref().map(|p| p.index);
         match text {
             "Pause" => music.pause(),

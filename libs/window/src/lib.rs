@@ -283,6 +283,9 @@ pub struct Manager {
     may_open: Option<u64>,
     /// The app the user pasted into, until it takes the text.
     paste: Option<u64>,
+    /// The windows that asked for the media keys (ADR-0102), the one
+    /// that gets them last.
+    media: Vec<(u64, u32)>,
 }
 
 impl Manager {
@@ -301,6 +304,7 @@ impl Manager {
             may_copy: None,
             may_open: None,
             paste: None,
+            media: Vec::new(),
         }
     }
 
@@ -382,7 +386,44 @@ impl Manager {
         self.focus_moved();
         if let Focus::Window(new) = focus {
             self.notify_focus(new, true);
+            // The player the user looked at last has the media keys.
+            if let Some(at) = self.media.iter().position(|&(_, id)| id == new) {
+                let entry = self.media.remove(at);
+                self.media.push(entry);
+            }
         }
+    }
+
+    /// `MEDIA_KEYS` (ADR-0102): the media keys go to `owner`'s window `id`
+    /// from now on.
+    pub fn want_media_keys(&mut self, owner: u64, id: u32) -> Result<(), Status> {
+        self.owned(owner, id)?;
+        self.media.retain(|&(o, _)| o != owner);
+        self.media.push((owner, id));
+        Ok(())
+    }
+
+    /// The app the media keys go to, if any asked.
+    pub fn media_owner(&self) -> Option<u64> {
+        self.media.last().map(|&(owner, _)| owner)
+    }
+
+    /// A media key: to the window that asked last, as a key event, focused
+    /// or not (no input of the app's: it allows no copy or open).
+    fn media_key(&mut self, byte: u8) -> KeyRoute {
+        let Some(&(owner, id)) = self.media.last() else {
+            return KeyRoute::Consumed;
+        };
+        self.queue(
+            owner,
+            Event {
+                window: id,
+                kind: kind::KEY,
+                key: byte,
+                ..Event::default()
+            },
+        );
+        KeyRoute::Window(owner)
     }
 
     /// Opens a window for `owner` (app `app`, as Core named it); it is
@@ -441,6 +482,7 @@ impl Manager {
 
     fn remove(&mut self, index: usize) {
         let frame = self.frames.remove(index);
+        self.media.retain(|&(_, id)| id != frame.id);
         if self.drag.is_some_and(|(id, _, _)| id == frame.id) {
             self.drag = None;
         }
@@ -537,6 +579,12 @@ impl Manager {
         }
         if let Some(key) = VolumeKey::of(byte) {
             return KeyRoute::Volume(key);
+        }
+        if matches!(
+            byte,
+            proto::KEY_PLAY_PAUSE | proto::KEY_STOP | proto::KEY_PREVIOUS | proto::KEY_NEXT
+        ) {
+            return self.media_key(byte);
         }
         let paste = byte == proto::CTRL_V || byte == proto::KEY_PASTE;
         match self.focus {

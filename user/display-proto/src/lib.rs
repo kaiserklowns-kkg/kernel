@@ -329,3 +329,15 @@ pub fn openers(
     }
     Ok(())
 }
+
+/// The media keys (Play/Pause, Stop, Previous, Next; ADR-0102) come to
+/// window `id` as key events from now on, whatever has the focus, until
+/// another app asks for them. For players.
+pub fn want_media_keys(windows: Handle, id: u32) -> Result<(), WindowError> {
+    let got = oceans_rt::ipc_call_msg(windows, op::MEDIA_KEYS, &id.to_le_bytes(), &[], &mut [], &mut [])
+        .map_err(WindowError::Ipc)?;
+    match Status::from_label(got.label) {
+        Status::Ok => Ok(()),
+        status => Err(WindowError::Refused(status)),
+    }
+}

@@ -108,5 +108,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0099](0099-opening-files-in-apps.md) | Opening files in apps: kinds declared in the manifest, opened through the desktop after the user's click | Accepted |
 | [0100](0100-system-volume.md) | The system volume: applied by the driver, kept by Core, set from the menu bar | Accepted |
 | [0101](0101-volume-keys.md) | The volume keys: PS/2 and USB, the desktop's whoever has the focus | Accepted |
+| [0102](0102-media-keys.md) | Media keys: HID consumer controls, and keys for the player | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

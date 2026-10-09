@@ -227,6 +227,18 @@ impl Service {
                     close_all(handles);
                     return self.resize(got.badge, data);
                 }
+                op::MEDIA_KEYS => {
+                    close_all(handles);
+                    match window_of(data).map(|id| self.windows.want_media_keys(got.badge, id)) {
+                        Some(Ok(())) => {
+                            let app = self.owners.get(&got.badge).map_or("?", |o| o.app.as_str());
+                            say(self.log, format_args!("display: media keys go to {app}"));
+                            (Status::Ok, false)
+                        }
+                        Some(Err(status)) => (status, false),
+                        None => (Status::BadRequest, false),
+                    }
+                }
                 op::OPEN_FILE => {
                     close_all(handles);
                     self.open_file(got.badge, data)

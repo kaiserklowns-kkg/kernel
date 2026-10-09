@@ -73,6 +73,11 @@ pub mod op {
     /// data = `name` → `ID\0NAME\0` for each app that opens it, the one
     /// `OPEN_FILE` would choose first (ADR-0099).
     pub const OPENERS: u64 = 11;
+    /// data = `[window u32]`: the media keys (Play/Pause, Stop, Previous,
+    /// Next; ADR-0102) come to this window as `KEY` events from now on,
+    /// whatever has the focus, until another app asks for them; when the
+    /// user focuses a window of an app that asked, they go to it again.
+    pub const MEDIA_KEYS: u64 = 12;
 }
 
 /// The most text the clipboard holds, in bytes.
@@ -162,6 +167,12 @@ pub const KEY_PASTE: u8 = 0x8b;
 pub const KEY_MUTE: u8 = 0x8c;
 pub const KEY_VOLUME_DOWN: u8 = 0x8d;
 pub const KEY_VOLUME_UP: u8 = 0x8e;
+/// The media keys (`oceans_abi::display::KEY_PLAY_PAUSE` … `KEY_NEXT`,
+/// ADR-0102): to the app that asked for them (`MEDIA_KEYS`).
+pub const KEY_PLAY_PAUSE: u8 = 0xa0;
+pub const KEY_STOP: u8 = 0xa1;
+pub const KEY_PREVIOUS: u8 = 0xa2;
+pub const KEY_NEXT: u8 = 0xa3;
 
 /// Event kinds.
 pub mod kind {

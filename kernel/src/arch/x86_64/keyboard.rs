@@ -10,7 +10,9 @@
 //! keys send `KEY_SHIFTED` added, and Ctrl+Shift+C, X and V send
 //! `KEY_COPY`, `KEY_CUT` and `KEY_PASTE` (ADR-0095). The volume keys
 //! (`0xe0 0x20`, `0x2e`, `0x30`) send `KEY_MUTE`, `KEY_VOLUME_DOWN` and
-//! `KEY_VOLUME_UP` (ADR-0101).
+//! `KEY_VOLUME_UP` (ADR-0101); the media keys (`0xe0 0x22`, `0x24`, `0x10`,
+//! `0x19`) `KEY_PLAY_PAUSE`, `KEY_STOP`, `KEY_PREVIOUS` and `KEY_NEXT`
+//! (ADR-0102).
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -174,6 +176,11 @@ fn translate(code: u8) -> Option<u8> {
             0x20 => return Some(d::KEY_MUTE),
             0x2e => return Some(d::KEY_VOLUME_DOWN),
             0x30 => return Some(d::KEY_VOLUME_UP),
+            // The media keys (ADR-0102).
+            0x22 => return Some(d::KEY_PLAY_PAUSE),
+            0x24 => return Some(d::KEY_STOP),
+            0x10 => return Some(d::KEY_PREVIOUS),
+            0x19 => return Some(d::KEY_NEXT),
             _ => {}
         }
         // Shift selects as it moves (ADR-0095); Shift+Delete is Delete.

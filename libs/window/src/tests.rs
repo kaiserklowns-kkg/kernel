@@ -661,3 +661,32 @@ fn volume_keys_step_by_five_and_unmute() {
     assert_eq!(VolumeKey::Mute.apply((40, true)), (40, false));
     assert_eq!(VolumeKey::of(b'a'), None);
 }
+
+#[test]
+fn media_keys_go_to_the_player_that_asked_or_was_looked_at_last() {
+    let mut m = manager();
+    // Nobody asked: they go nowhere.
+    assert_eq!(m.key(proto::KEY_PLAY_PAUSE), KeyRoute::Consumed);
+    let player = m.open(APP, "Music", "", 100, 100).unwrap();
+    let other = m.open(OTHER, "Editor", "", 100, 100).unwrap();
+    assert_eq!(m.want_media_keys(OTHER, player), Err(Status::NotFound));
+    m.want_media_keys(APP, player).unwrap();
+    m.take_events(APP, 100);
+    // The editor has the focus; the player gets the key, as a key event.
+    assert_eq!(m.focus(), Focus::Window(other));
+    assert_eq!(m.key(proto::KEY_NEXT), KeyRoute::Window(APP));
+    let events = m.take_events(APP, 100);
+    assert_eq!((events[0].kind, events[0].key, events[0].window), (kind::KEY, proto::KEY_NEXT, player));
+    // No input of the player's: no copy.
+    assert_eq!(m.copy(APP, b"x"), Err(Status::NotAllowed));
+    // A second player asks: it has them; looking at the first gives them back.
+    m.want_media_keys(OTHER, other).unwrap();
+    assert_eq!(m.media_owner(), Some(OTHER));
+    m.set_focus(Focus::Window(player));
+    assert_eq!(m.media_owner(), Some(APP));
+    // A player gone: to the one before, then nowhere.
+    m.close_owner(APP);
+    assert_eq!(m.media_owner(), Some(OTHER));
+    m.close(OTHER, other).unwrap();
+    assert_eq!(m.key(proto::KEY_STOP), KeyRoute::Consumed);
+}

@@ -80,6 +80,8 @@ pub struct Ui<'s, 'f> {
     pub copied: Option<String>,
     /// The window end, for opening files (ADR-0099); `None` off a window.
     pub windows: Option<oceans_rt::Handle>,
+    /// The window drawn into (its id), with `windows`.
+    pub window: u32,
 }
 
 /// The most a text field holds, in bytes.
@@ -108,6 +110,16 @@ impl<'s, 'f> Ui<'s, 'f> {
             changed: false,
             copied: None,
             windows: None,
+            window: 0,
+        }
+    }
+
+    /// The keyboard's media keys (Play/Pause, Stop, Previous, Next;
+    /// ADR-0102) come to this window's keys from now on, whatever has the
+    /// focus: for a player. Ask once.
+    pub fn want_media_keys(&self) {
+        if let Some(windows) = self.windows {
+            let _ = oceans_display_proto::want_media_keys(windows, self.window);
         }
     }
 
@@ -514,6 +526,7 @@ fn run_window<S>(
                 Rect::new(0, 0, w as i32, h as i32),
             );
             ui.windows = Some(windows);
+            ui.window = window.id;
             frame(&mut ui, state);
             let changed = ui.changed;
             let copied = ui.copied.take();

@@ -522,6 +522,10 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app start app.oceans.music tone.wav\r\n",
     b"@screen 342 225 2f7cf6 Music playing",
     b"@screen 342 225 d8d8de Music at the end of its list",
+    // The media keys (ADR-0102): Music asked for them; the keyboard's
+    // Play/Pause starts the song again, Stop stops it.
+    b"@monitor sendkey audioplay",
+    b"@monitor sendkey audiostop",
     b"app stop app.oceans.music\r\n",
     // Opening files (ADR-0099): Files, the tenth window (content from
     // 292,169), lists Home: notes.txt, picture.png, tone.wav,
@@ -995,6 +999,10 @@ const SHELL_EXPECT: &[Expect] = &[
     // The volume keys (ADR-0101): a step up, unmuted.
     Expect::Contains("core: volume 80%"),
     Expect::Contains("hda: volume 80%"),
+    // The media keys (ADR-0102), to the player that asked for them.
+    Expect::Contains("display: media keys go to Music"),
+    Expect::Contains("display: media key Play/Pause to Music"),
+    Expect::Contains("display: media key Stop to Music"),
     Expect::Line("volume: 75%, muted"),
     Expect::Line("volume: 70%"),
     Expect::Line("pasted edited in oceans"),

@@ -318,6 +318,13 @@ pub mod display {
     pub const KEY_MUTE: u8 = 0x8c;
     pub const KEY_VOLUME_DOWN: u8 = 0x8d;
     pub const KEY_VOLUME_UP: u8 = 0x8e;
+    /// The media keys (ADR-0102): Play/Pause, Stop, Previous and Next
+    /// track. The desktop gives them to the app that asked for them last
+    /// (a player), whoever has the focus.
+    pub const KEY_PLAY_PAUSE: u8 = 0xa0;
+    pub const KEY_STOP: u8 = 0xa1;
+    pub const KEY_PREVIOUS: u8 = 0xa2;
+    pub const KEY_NEXT: u8 = 0xa3;
     /// Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A as keyboards send them.
     pub const CTRL_A: u8 = 0x01;
     pub const CTRL_C: u8 = 0x03;

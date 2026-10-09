@@ -15,6 +15,7 @@
 
 #![no_std]
 
+pub mod consumer;
 pub mod descriptor;
 pub mod hid;
 pub mod hub;

@@ -39,26 +39,26 @@ mod usage {
 }
 
 /// Item types and main item tags (§6.2.2.4–6).
-const MAIN: u8 = 0;
-const GLOBAL: u8 = 1;
-const LOCAL: u8 = 2;
-const INPUT: u8 = 0x8;
-const COLLECTION: u8 = 0xa;
-const END_COLLECTION: u8 = 0xc;
+pub(crate) const MAIN: u8 = 0;
+pub(crate) const GLOBAL: u8 = 1;
+pub(crate) const LOCAL: u8 = 2;
+pub(crate) const INPUT: u8 = 0x8;
+pub(crate) const COLLECTION: u8 = 0xa;
+pub(crate) const END_COLLECTION: u8 = 0xc;
 /// Input item flags.
-const CONSTANT: u32 = 1 << 0;
-const VARIABLE: u32 = 1 << 1;
+pub(crate) const CONSTANT: u32 = 1 << 0;
+pub(crate) const VARIABLE: u32 = 1 << 1;
 const RELATIVE: u32 = 1 << 2;
-const APPLICATION: u32 = 1;
-const LONG_ITEM: u8 = 0xfe;
+pub(crate) const APPLICATION: u32 = 1;
+pub(crate) const LONG_ITEM: u8 = 0xfe;
 
 /// Global state stack depth (`PUSH`); collection nesting.
-const MAX_PUSH: usize = 4;
-const MAX_DEPTH: usize = 16;
+pub(crate) const MAX_PUSH: usize = 4;
+pub(crate) const MAX_DEPTH: usize = 16;
 /// Usages a local state remembers (more are ignored).
-const MAX_USAGES: usize = 16;
+pub(crate) const MAX_USAGES: usize = 16;
 /// The largest field: 32 bits.
-const MAX_FIELD_BITS: u32 = 32;
+pub(crate) const MAX_FIELD_BITS: u32 = 32;
 
 /// Why a report descriptor was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,7 +85,7 @@ impl Field {
     /// The raw value: `bits` bits from `offset`, least significant first,
     /// sign-extended when the field's range is signed. `None` past the end
     /// of `data`.
-    fn read(&self, data: &[u8]) -> Option<i32> {
+    pub(crate) fn read(&self, data: &[u8]) -> Option<i32> {
         let bits = u32::from(self.bits);
         let end = self.offset.checked_add(bits)?;
         if end.div_ceil(8) as usize > data.len() || bits == 0 || bits > MAX_FIELD_BITS {
@@ -122,20 +122,20 @@ pub struct Layout {
 
 /// The parser's global state (§6.2.2.7).
 #[derive(Clone, Copy, Default)]
-struct Globals {
-    page: u32,
-    min: i32,
-    max_raw: u32,
-    max_size: u8,
-    size: u32,
-    count: u32,
-    report_id: u8,
+pub(crate) struct Globals {
+    pub(crate) page: u32,
+    pub(crate) min: i32,
+    pub(crate) max_raw: u32,
+    pub(crate) max_size: u8,
+    pub(crate) size: u32,
+    pub(crate) count: u32,
+    pub(crate) report_id: u8,
 }
 
 impl Globals {
     /// Logical maximum: signed when the minimum is negative, otherwise
     /// unsigned (devices write 255 as one byte `0xff`).
-    fn max(&self) -> i32 {
+    pub(crate) fn max(&self) -> i32 {
         if self.min < 0 {
             sign_extend(self.max_raw, self.max_size)
         } else {
@@ -145,18 +145,18 @@ impl Globals {
 }
 
 /// The parser's local state (§6.2.2.8): cleared after every main item.
-#[derive(Clone, Copy, Default)]
-struct Locals {
-    usages: [u32; MAX_USAGES],
-    count: usize,
-    range: Option<(u32, u32)>,
-    minimum: Option<u32>,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Locals {
+    pub(crate) usages: [u32; MAX_USAGES],
+    pub(crate) count: usize,
+    pub(crate) range: Option<(u32, u32)>,
+    pub(crate) minimum: Option<u32>,
 }
 
 impl Locals {
     /// The usage of field `index` of a main item: listed usages in order
     /// (the last repeats), else a usage range.
-    fn usage(&self, index: u32) -> Option<u32> {
+    pub(crate) fn usage(&self, index: u32) -> Option<u32> {
         if self.count > 0 {
             return Some(self.usages[(index as usize).min(self.count - 1)]);
         }
@@ -165,12 +165,12 @@ impl Locals {
     }
 
     /// With a 1–2 byte usage, the page comes from the global state.
-    fn full(page: u32, value: u32, size: usize) -> u32 {
+    pub(crate) fn full(page: u32, value: u32, size: usize) -> u32 {
         if size == 4 { value } else { page << 16 | value }
     }
 }
 
-fn sign_extend(value: u32, size: u8) -> i32 {
+pub(crate) fn sign_extend(value: u32, size: u8) -> i32 {
     match size {
         1 => value as u8 as i8 as i32,
         2 => value as u16 as i16 as i32,
