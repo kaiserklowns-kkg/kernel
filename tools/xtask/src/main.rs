@@ -2929,6 +2929,8 @@ enum Console {
     Line(String),
     /// The shell's prompt: it waits for the next command.
     Prompt,
+    /// QEMU closed its output: it exited.
+    Closed,
 }
 
 const SHELL_PROMPT: &[u8] = b"oceans> ";
@@ -3029,6 +3031,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                 }
             }
         }
+        // Said outright: `prompt_again` and `resume` may still hold the
+        // channel open (QEMU exited before the script began, e.g. a panic).
+        let _ = events_tx.send(Console::Closed);
     });
 
     let deadline = Instant::now() + SMOKE_TIMEOUT;
@@ -3222,7 +3227,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             }
             Ok(Console::Prompt) => prompt_waiting = true,
             // Reader finished: QEMU closed stdout, i.e. exited.
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(Console::Closed) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             // An overdue `@wait`: reported at the top of the loop.
             Err(mpsc::RecvTimeoutError::Timeout)
                 if waiting.is_some() && Instant::now() < deadline => {}
@@ -3264,7 +3269,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     }
     println!("UDP and TCP echo answered from the host through the guest's network stack");
     if !unmet.is_empty() {
-        return Err(format!("shell output missing: {unmet:?}"));
+        return Err(format!("shell output missing: {unmet:?} (QEMU {status})"));
     }
     match (online, status.code()) {
         (true, Some(QEMU_EXIT_SUCCESS)) => Ok(()),

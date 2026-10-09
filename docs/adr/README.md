@@ -110,5 +110,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0101](0101-volume-keys.md) | The volume keys: PS/2 and USB, the desktop's whoever has the focus | Accepted |
 | [0102](0102-media-keys.md) | Media keys: HID consumer controls, and keys for the player | Accepted |
 | [0103](0103-now-playing.md) | What plays, in the sound panel: the player's title and buttons | Accepted |
+| [0104](0104-kills-are-never-lost.md) | A kill is never lost: the scheduler looks again under its lock | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

@@ -574,6 +574,18 @@ fn schedule_to(target: Option<Arc<Thread>>, reason: Reason) {
         let mut scheduler = SCHEDULER.lock();
         let scheduler = &mut *scheduler;
         let cpu = &mut scheduler.cpus[me];
+        // Interrupted from another CPU since `block` or `sleep_ms` looked:
+        // `interrupt` found it neither blocked nor asleep, so it must not
+        // become either now, or nothing would ever wake it. (`interrupt`
+        // sets the flag before it takes this lock, so it shows here.)
+        if matches!(reason, Reason::Block | Reason::Sleep(_))
+            && cpu
+                .current
+                .as_ref()
+                .is_some_and(|current| current.interrupted.load(Ordering::Acquire))
+        {
+            return;
+        }
         if matches!(reason, Reason::Block) {
             assert!(!cpu.is_idle(), "an idle thread must never block");
             let current = cpu.current.as_ref().expect("scheduler running");

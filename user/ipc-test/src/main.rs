@@ -344,6 +344,24 @@ fn kill_steps(log: Handle, image: Handle) -> Result<(), i64> {
         63,
         process_kill(victim).is_ok() && process_wait(victim) == killed,
     )?;
+    let _ = close(victim);
+    // Killed at once, before it settles: the kill may come (on another
+    // CPU) just as it goes to sleep or to wait, and must not be lost.
+    for round in 0..16 {
+        let way = if round % 2 == 0 {
+            Victim::Sleep
+        } else {
+            Victim::NotificationWait
+        };
+        let victim_log = duplicate(log, rights::WRITE | rights::TRANSFER).map_err(|_| 64)?;
+        let victim =
+            process_spawn(image, 0, &[victim_log], ROLE_VICTIM + way as u64).map_err(|_| 64)?;
+        expect(
+            65,
+            process_kill(victim).is_ok() && process_wait(victim) == killed,
+        )?;
+        let _ = close(victim);
+    }
     Ok(())
 }
 
