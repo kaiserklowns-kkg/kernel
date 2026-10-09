@@ -76,6 +76,8 @@ const POINTER_QUEUE: usize = 8;
 const MAX_REPORT_DESCRIPTOR: usize = 1024;
 /// HID interfaces looked at per device.
 const MAX_HID_INTERFACES: usize = 4;
+/// Devices whose media keys are read at once (ADR-0102).
+const MAX_MEDIA: usize = 2;
 
 /// Notification bit: controller interrupt or polling tick.
 const IRQ: u64 = 1;
@@ -375,6 +377,8 @@ impl ReportQueue {
 /// the device goes.
 /// A media-keys interface's interrupt endpoint (ADR-0102).
 struct MediaRing {
+    /// The device (its index in `devices`).
+    device: usize,
     interrupt: Interrupt,
     packet: usize,
     keys: consumer::Keys,
@@ -444,9 +448,6 @@ struct UsbDevice {
     /// A pointer interface (ADR-0042), if the device has one.
     pointer: Option<PointerInterface>,
     pointer_ring: Option<PointerRing>,
-    /// Media keys (HID consumer controls, ADR-0102), read here like the
-    /// keyboard's.
-    media: Option<MediaRing>,
     claim: Option<ClaimState>,
 }
 
@@ -507,6 +508,9 @@ struct Controller {
     events: Consumer,
     pages: [Option<Pages>; MAX_DEVICES],
     devices: [Option<UsbDevice>; MAX_DEVICES],
+    /// Media keys being read (ADR-0102): few devices have them, so not a
+    /// slot per device (the controller lives on the stack).
+    media: [Option<MediaRing>; MAX_MEDIA],
     /// Root ports whose status changed while the driver was busy.
     pending_ports: u32,
     /// Per hub (device index): ports whose status changed.
@@ -699,6 +703,7 @@ impl Controller {
             events: Consumer::new(RING_TRBS),
             pages: [None; MAX_DEVICES],
             devices: [const { None }; MAX_DEVICES],
+            media: [const { None }; MAX_MEDIA],
             pending_ports: 0,
             pending_hubs: [0; MAX_DEVICES],
             notification,
@@ -1053,6 +1058,11 @@ impl Controller {
             self.detach(child, announce);
         }
         self.release(index, true);
+        for media in &mut self.media {
+            if media.as_ref().is_some_and(|m| m.device == index) {
+                *media = None;
+            }
+        }
         if let Some(device) = self.devices[index].take() {
             let _ = self.command(Trb::disable_slot(device.slot));
             self.dcbaa.write64(usize::from(device.slot) * 8, 0);
@@ -1124,7 +1134,6 @@ impl Controller {
             bulk: None,
             pointer: None,
             pointer_ring: None,
-            media: None,
             claim: None,
         });
         let result = self.enumerate(free, pages);
@@ -1451,12 +1460,12 @@ impl Controller {
             return;
         };
         let console = self.console;
-        let Some(device) = self.devices[index].as_mut() else {
-            return;
-        };
         // Media keys (ADR-0102): their bytes go where the keyboard's do.
-        if let Some(media) = device.media.as_mut()
-            && media.interrupt.dci == endpoint
+        if let Some(media) = self
+            .media
+            .iter_mut()
+            .flatten()
+            .find(|m| m.device == index && m.interrupt.dci == endpoint)
         {
             let Some(at) = media.interrupt.ring.index_of(trb) else {
                 return;
@@ -1486,6 +1495,9 @@ impl Controller {
             }
             return;
         }
+        let Some(device) = self.devices[index].as_mut() else {
+            return;
+        };
         let (interrupt, mut reports, report_len) =
             match (&mut device.driver, &mut device.pointer_ring) {
                 (_, Some(ring)) if ring.interrupt.dci == endpoint => {
@@ -1668,6 +1680,11 @@ impl Controller {
         layout: consumer::Layout,
     ) -> Result<(), &'static str> {
         let pages = self.pages[index].ok_or("no pages")?;
+        let free = self
+            .media
+            .iter()
+            .position(Option::is_none)
+            .ok_or("too many devices with media keys")?;
         // Optional (HID 1.11 §7.2.4): some devices stall it.
         let _ = self.control(index, Setup::hid_set_idle(hid.interface.number), None);
         let packet = usize::from(hid.endpoint.packet_size()).min(REPORT_STRIDE);
@@ -1679,13 +1696,13 @@ impl Controller {
             packet,
             QUEUED_REPORTS,
         )?;
-        let device = self.devices[index].as_mut().ok_or("gone")?;
-        device.media = Some(MediaRing {
+        self.media[free] = Some(MediaRing {
+            device: index,
             interrupt,
             packet,
             keys: consumer::Keys::new(layout),
         });
-        let path = device.path();
+        let path = self.devices[index].as_ref().ok_or("gone")?.path();
         say(
             self.log,
             format_args!(
