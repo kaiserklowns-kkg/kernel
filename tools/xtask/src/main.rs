@@ -603,7 +603,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"run disk out use:usbdisk -- info\r\n",
     // A stick formatted elsewhere: FAT (ADR-0036), read and written at
     // /usb (ADR-0037); the host checks the result, with fsck.fat if it can.
+    // Plugged in only once `disk` has found no stick: a stick plugged in
+    // while it starts is the one it reads.
+    b"@when disk: I/O error",
     b"@monitor device_add usb-storage,bus=usb.0,port=4,drive=fatstick,id=fatstick",
+    b"@wait fs (media): mounted a FAT16 volume",
     b"ls /usb\r\n",
     b"cat /usb/long-file-name.txt\r\n",
     b"cat /usb/docs/notes/deep.txt\r\n",
@@ -2878,6 +2882,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     // Used (and dropped) once typing may start, so the channel still
     // closes when QEMU exits.
     let mut prompt_again = Some(events_tx.clone());
+    // `@wait`: the next command once the console prints the line awaited
+    // (dropped with the last command, for the same reason).
+    let mut resume = Some(events_tx.clone());
     thread::spawn(move || {
         // Bytes, not lines: the prompt has no line ending.
         let mut line = Vec::new();
@@ -2911,9 +2918,16 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let mut commands = script.iter().peekable();
     // Monitor commands waiting for a console line (`@when`).
     let mut pending: Option<(String, Vec<&[u8]>)> = None;
+    // The console line `@wait` waits for, and the last lines seen (it may
+    // have come already).
+    let mut waiting: Option<String> = None;
+    let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut unmet: Vec<Expect> = expected.to_vec();
     let (mut udp_answered, mut tcp_answered) = (false, false);
     loop {
+        if commands.peek().is_none() {
+            resume = None;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         match events_rx.recv_timeout(remaining) {
             Ok(Console::Line(line)) => {
@@ -2927,6 +2941,19 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                     *settled |= line.contains(marker);
                 }
                 unmet.retain(|expect| !expect.matches(&line));
+                if waiting
+                    .as_ref()
+                    .is_some_and(|text| line.contains(text.as_str()))
+                {
+                    waiting = None;
+                    if let Some(resume) = &resume {
+                        let _ = resume.send(Console::Prompt);
+                    }
+                }
+                if recent.len() == RECENT_LINES {
+                    recent.pop_front();
+                }
+                recent.push_back(line.clone());
                 if pending
                     .as_ref()
                     .is_some_and(|(marker, _)| line.contains(marker.as_str()))
@@ -2951,7 +2978,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             // One command per prompt: typing while the guest (or QEMU, during
             // a disk flush) is busy overflows the 16-byte UART FIFO, because
             // QEMU's Windows stdio backend ignores backpressure.
-            Ok(Console::Prompt) if ready => {
+            Ok(Console::Prompt) if ready && waiting.is_none() => {
                 if let Some(command) = commands.next() {
                     // The last command ends the boot: the host's probes into
                     // the guest's echo service must be done by then.
@@ -2977,6 +3004,14 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                                 thread::sleep(DOUBLE_CLICK_GAP);
                             }
                             thread::sleep(MONITOR_SETTLE);
+                        } else if let Some(text) = command.strip_prefix(b"@wait ") {
+                            // `@wait TEXT`: the next step once the console
+                            // prints a line containing TEXT.
+                            let text = String::from_utf8_lossy(text).into_owned();
+                            if !recent.iter().any(|line| line.contains(text.as_str())) {
+                                waiting = Some(text);
+                                break;
+                            }
                         } else if let Some(probe) = command.strip_prefix(b"@screen ") {
                             if let Err(error) = expect_pixel(monitor_port, probe) {
                                 let _ = child.kill();
@@ -3578,6 +3613,8 @@ const MONITOR_EVENT_GAP: Duration = Duration::from_millis(300);
 /// guest in a report of its own, and the second press comes well within
 /// the desktop's 500 ms.
 const DOUBLE_CLICK_GAP: Duration = Duration::from_millis(100);
+/// Console lines kept for `@wait`, which may come after its line.
+const RECENT_LINES: usize = 64;
 
 /// Presses `text` (lowercase letters, digits, space, CR) on the guest's
 /// USB keyboard through QEMU's monitor (`sendkey`).
