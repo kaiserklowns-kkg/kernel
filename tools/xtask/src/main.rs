@@ -3047,6 +3047,10 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     // The console line `@wait` waits for, and the last lines seen (it may
     // have come already).
     let mut waiting: Option<String> = None;
+    // `@usb echo TEXT`: TEXT, until the console prints a line starting
+    // with it (the echo ran, or the typed line was cut by a log line and
+    // its Enter taken); a prompt before then is not for the next command.
+    let mut usb_typed: Option<String> = None;
     // When the line `@wait` waits for is overdue.
     let mut wait_until = Instant::now();
     let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -3084,6 +3088,12 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                     *settled |= line.contains(marker);
                 }
                 unmet.retain(|expect| !expect.matches(&line));
+                if usb_typed
+                    .as_ref()
+                    .is_some_and(|text| line.starts_with(text.as_str()))
+                {
+                    usb_typed = None;
+                }
                 if waiting
                     .as_ref()
                     .is_some_and(|text| line.contains(text.as_str()))
@@ -3121,7 +3131,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             // One command per prompt: typing while the guest (or QEMU, during
             // a disk flush) is busy overflows the 16-byte UART FIFO, because
             // QEMU's Windows stdio backend ignores backpressure.
-            Ok(Console::Prompt) if ready && waiting.is_none() => {
+            Ok(Console::Prompt) if ready && waiting.is_none() && usb_typed.is_none() => {
                 if let Some(command) = commands.next() {
                     // The last command ends the boot: the host's probes into
                     // the guest's echo service must be done by then.
@@ -3186,10 +3196,16 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                             None => break,
                         }
                     }
-                    // `@usb TEXT`: pressed on the USB keyboard; its Enter
-                    // brings the next prompt.
+                    // `@usb echo TEXT`: pressed on the USB keyboard; its
+                    // Enter brings the next prompt, taken once the echo
+                    // printed TEXT (a log line may split the typed line).
                     if let Some(text) = command.strip_prefix(b"@usb ") {
                         press_usb_keys(monitor_port, text)?;
+                        let typed = String::from_utf8_lossy(text);
+                        let Some(echoed) = typed.trim().strip_prefix("echo ") else {
+                            return Err(format!("@usb types `echo TEXT`, not {typed:?}"));
+                        };
+                        usb_typed = Some(echoed.to_string());
                         continue;
                     }
                     if command.starts_with(b"@") {
