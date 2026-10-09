@@ -216,6 +216,44 @@ pub enum KeyRoute {
     /// [`Manager::terminal_paste`] into the console (ADR-0095).
     TerminalPaste,
 }
+    /// A volume key (ADR-0101), whoever has the focus: the desktop
+    /// changes the system volume.
+    Volume(VolumeKey),
+}
+
+/// The volume keys (ADR-0101).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeKey {
+    Mute,
+    Down,
+    Up,
+}
+
+impl VolumeKey {
+    /// The volume key a byte is, if it is one.
+    pub fn of(byte: u8) -> Option<Self> {
+        match byte {
+            proto::KEY_MUTE => Some(Self::Mute),
+            proto::KEY_VOLUME_DOWN => Some(Self::Down),
+            proto::KEY_VOLUME_UP => Some(Self::Up),
+            _ => None,
+        }
+    }
+
+    /// The volume (level 0 to 100, muted) after this key: Mute turns it
+    /// on or off; Down and Up move it by [`VOLUME_STEP`] and unmute, as
+    /// other systems do.
+    pub fn apply(self, (level, muted): (u8, bool)) -> (u8, bool) {
+        match self {
+            Self::Mute => (level, !muted),
+            Self::Down => (level.saturating_sub(VOLUME_STEP), false),
+            Self::Up => (level.saturating_add(VOLUME_STEP).min(100), false),
+        }
+    }
+}
+
+/// How far one press of Volume Up or Down moves the level.
+pub const VOLUME_STEP: u8 = 5;
 
 /// The window manager.
 pub struct Manager {
@@ -496,6 +534,9 @@ impl Manager {
         if byte == proto::KEY_NEXT_WINDOW {
             self.next_window();
             return KeyRoute::Consumed;
+        }
+        if let Some(key) = VolumeKey::of(byte) {
+            return KeyRoute::Volume(key);
         }
         let paste = byte == proto::CTRL_V || byte == proto::KEY_PASTE;
         match self.focus {

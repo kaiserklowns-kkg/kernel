@@ -29,6 +29,8 @@
 //!   kind (the system's own first) or the one the user chose;
 //! - **the system volume** (ADR-0100): a speaker in the menu bar opens a
 //!   panel with a slider and Mute; Core sets it and keeps it;
+//! - **the volume keys** (ADR-0101): the desktop's whoever has the focus;
+//!   a step of 5 or mute, the level shown over the desktop for a moment;
 //! - notifications;
 //! - **permission dialogs**: when an app needs a decision, the desktop
 //!   asks, in the system's words, and sends the answer to Core
@@ -65,7 +67,7 @@ use oceans_core_proto::{
 use oceans_input_proto::{Kind, Subscription};
 use oceans_package::Permission;
 use oceans_rt::{Buffer, Directory, Handle, Start, prot, rights};
-use oceans_window::{Focus, KeyRoute, Manager};
+use oceans_window::{Focus, KeyRoute, Manager, VolumeKey};
 
 use canvas::Canvas;
 use desktop::{App, Desktop, Dialog, Hit, Question, Terminal, Toast, WindowView};
@@ -86,6 +88,8 @@ const APPS_EVERY_MS: u64 = 2000;
 const TOAST_MS: u64 = 4000;
 /// A second press within this long, and 4 pixels, is a double click.
 const DOUBLE_CLICK_MS: u64 = 500;
+/// How long the level shows after a volume key (ADR-0101).
+const VOLUME_SHOWN_MS: u64 = 1500;
 
 fn say(log: Handle, args: core::fmt::Arguments<'_>) {
     let mut line = Buffer::<200>::new();
@@ -305,6 +309,10 @@ fn main(start: Start) -> i64 {
                 service.desktop.toast = None;
                 dirty = true;
             }
+            if service.desktop.volume_shown_until != 0 && service.desktop.volume_shown_until <= now {
+                service.desktop.volume_shown_until = 0;
+                dirty = true;
+            }
         }
         service.signal_owners();
         if dirty {
@@ -446,6 +454,20 @@ impl Service {
         changed
     }
 
+    /// A volume key (ADR-0101): the level moves by a step, or mute turns
+    /// on or off, and the new level shows over the desktop for a moment.
+    fn volume_key(&mut self, key: VolumeKey) {
+        if self.desktop.volume.is_none() {
+            self.refresh_volume();
+        }
+        let Some(now) = self.desktop.volume else {
+            return;
+        };
+        let (level, muted) = key.apply(now);
+        self.set_volume(level, muted);
+        self.desktop.volume_shown_until = oceans_rt::clock_ms() + VOLUME_SHOWN_MS;
+    }
+
     /// Sets the system volume through Core, which keeps it (ADR-0100).
     fn set_volume(&mut self, level: u8, muted: bool) {
         let Some(core) = self.core else {
@@ -466,7 +488,8 @@ impl Service {
 
     /// Keys from the keyboard (`DISPLAY_KEYS`): to the focused window, or
     /// to the console for the Terminal. While a permission dialog asks,
-    /// they go nowhere: typing must not land anywhere unseen.
+    /// they go nowhere: typing must not land anywhere unseen. The volume
+    /// keys (ADR-0101) are the desktop's, always.
     fn keys(&mut self) -> bool {
         let mut keys = [0u8; 256];
         let mut dirty = false;
@@ -475,15 +498,19 @@ impl Service {
                 Ok(0) | Err(_) => return dirty,
                 Ok(count) => count,
             };
-            if self.desktop.dialog.is_some() {
-                continue;
-            }
             let mut terminal = Vec::new();
             for &byte in &keys[..count] {
+                if self.desktop.dialog.is_some() && VolumeKey::of(byte).is_none() {
+                    continue;
+                }
                 match self.windows.key(byte) {
                     KeyRoute::Terminal(byte) => terminal.push(byte),
                     KeyRoute::Window(_) => {}
                     KeyRoute::Consumed => dirty = true,
+                    KeyRoute::Volume(key) => {
+                        self.volume_key(key);
+                        dirty = true;
+                    }
                     // Ctrl+Shift+V (ADR-0095): one line, typed as if by
                     // the user, never Enter.
                     KeyRoute::TerminalPaste => {

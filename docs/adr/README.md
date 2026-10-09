@@ -107,5 +107,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0097](0097-resizing-windows.md) | Resizing and maximizing windows: edges, the zoom button, a double click; apps that ask | Accepted |
 | [0099](0099-opening-files-in-apps.md) | Opening files in apps: kinds declared in the manifest, opened through the desktop after the user's click | Accepted |
 | [0100](0100-system-volume.md) | The system volume: applied by the driver, kept by Core, set from the menu bar | Accepted |
+| [0101](0101-volume-keys.md) | The volume keys: PS/2 and USB, the desktop's whoever has the focus | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

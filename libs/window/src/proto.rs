@@ -157,6 +157,11 @@ pub const KEY_NEXT_WINDOW: u8 = 0x1e;
 /// V) does.
 pub const CTRL_V: u8 = 0x16;
 pub const KEY_PASTE: u8 = 0x8b;
+/// The volume keys (`oceans_abi::display::KEY_MUTE`, `KEY_VOLUME_DOWN`,
+/// `KEY_VOLUME_UP`, ADR-0101): the desktop's, never an app's.
+pub const KEY_MUTE: u8 = 0x8c;
+pub const KEY_VOLUME_DOWN: u8 = 0x8d;
+pub const KEY_VOLUME_UP: u8 = 0x8e;
 
 /// Event kinds.
 pub mod kind {

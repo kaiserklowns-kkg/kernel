@@ -165,6 +165,9 @@ pub struct Desktop {
     pub volume: Option<(u8, bool)>,
     /// The sound panel is open below the speaker.
     pub volume_open: bool,
+    /// Until when (ms since boot) the level shows over the desktop, after a
+    /// volume key (ADR-0101); 0: not shown.
+    pub volume_shown_until: u64,
 }
 
 /// An app window to draw.
@@ -560,6 +563,11 @@ impl Desktop {
         {
             self.draw_volume_panel(canvas, volume);
         }
+        if self.volume_shown_until > now_ms
+            && let Some(volume) = self.volume
+        {
+            draw_volume_shown(canvas, volume);
+        }
 
         // A notification, at the top right.
         if let Some(toast) = self.toast.as_ref().filter(|t| t.until_ms > now_ms) {
@@ -939,6 +947,26 @@ fn apps_icon(canvas: &mut Canvas, r: Rect) {
         for col in 1..4 {
             canvas.circle(r.x + col * step, r.y + row * step, 3, WHITE);
         }
+    }
+}
+
+/// Where the level shows after a volume key (ADR-0101): above the dock, in
+/// the middle.
+pub fn volume_shown(width: i32, height: i32) -> Rect {
+    Rect::new((width - 260) / 2, height - DOCK_RESERVE - 64, 260, 48)
+}
+
+/// The level over the desktop (ADR-0101): a speaker and a bar.
+fn draw_volume_shown(canvas: &mut Canvas, (level, muted): (u8, bool)) {
+    let r = volume_shown(canvas.width, canvas.height);
+    canvas.shadow(r, 12, 70);
+    canvas.round_fill(r, 14, DIALOG_SURFACE);
+    speaker(canvas, Rect::new(r.x + 8, r.y + 12, 28, 24), level, muted);
+    let track = Rect::new(r.x + 48, r.y + 21, r.w - 64, 6);
+    canvas.round_fill(track, 3, BUTTON_SECONDARY);
+    if !muted {
+        let filled = track.w * i32::from(level) / 100;
+        canvas.round_fill(Rect::new(track.x, track.y, filled, track.h), 3, ACCENT);
     }
 }
 

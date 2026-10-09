@@ -312,6 +312,12 @@ pub mod display {
     pub const KEY_COPY: u8 = 0x89;
     pub const KEY_CUT: u8 = 0x8a;
     pub const KEY_PASTE: u8 = 0x8b;
+    /// The volume keys (ADR-0101): Mute, Volume Down and Volume Up, as
+    /// keyboards send them (and laptops for their Fn keys). The desktop
+    /// takes them; no app or the Terminal sees them.
+    pub const KEY_MUTE: u8 = 0x8c;
+    pub const KEY_VOLUME_DOWN: u8 = 0x8d;
+    pub const KEY_VOLUME_UP: u8 = 0x8e;
     /// Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A as keyboards send them.
     pub const CTRL_A: u8 = 0x01;
     pub const CTRL_C: u8 = 0x03;

@@ -571,6 +571,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
+    // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
+    // Down goes back to 75%, Mute mutes again.
+    b"@monitor sendkey volumeup",
+    b"@monitor sendkey volumedown",
+    b"@monitor sendkey audiomute",
     b"volume\r\n",
     // Kept by Core: the next boot starts at 70%.
     b"volume 70\r\n",
@@ -987,6 +992,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: volume 40%"),
     Expect::Contains("core: volume 75%"),
     Expect::Contains("core: volume 75%, muted"),
+    // The volume keys (ADR-0101): a step up, unmuted.
+    Expect::Contains("core: volume 80%"),
+    Expect::Contains("hda: volume 80%"),
     Expect::Line("volume: 75%, muted"),
     Expect::Line("volume: 70%"),
     Expect::Line("pasted edited in oceans"),

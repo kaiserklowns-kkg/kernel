@@ -637,3 +637,27 @@ fn names_to_open_stay_in_home() {
     }
     assert!(proto::open_name(&[b'a'; proto::MAX_OPEN_NAME + 1]).is_none());
 }
+
+#[test]
+fn volume_keys_go_to_the_desktop_whoever_has_the_focus() {
+    let mut m = manager();
+    assert_eq!(m.key(proto::KEY_MUTE), KeyRoute::Volume(VolumeKey::Mute));
+    m.open(APP, "A", "", 100, 100).unwrap();
+    m.take_events(APP, 100);
+    assert_eq!(m.key(proto::KEY_VOLUME_UP), KeyRoute::Volume(VolumeKey::Up));
+    assert_eq!(m.key(proto::KEY_VOLUME_DOWN), KeyRoute::Volume(VolumeKey::Down));
+    // The app never sees them, nor does a press count as its input.
+    assert!(m.take_events(APP, 100).is_empty());
+    assert_eq!(m.copy(APP, b"x"), Err(Status::NotAllowed));
+}
+
+#[test]
+fn volume_keys_step_by_five_and_unmute() {
+    assert_eq!(VolumeKey::Up.apply((70, false)), (75, false));
+    assert_eq!(VolumeKey::Up.apply((98, true)), (100, false));
+    assert_eq!(VolumeKey::Down.apply((3, false)), (0, false));
+    assert_eq!(VolumeKey::Down.apply((40, true)), (35, false));
+    assert_eq!(VolumeKey::Mute.apply((40, false)), (40, true));
+    assert_eq!(VolumeKey::Mute.apply((40, true)), (40, false));
+    assert_eq!(VolumeKey::of(b'a'), None);
+}

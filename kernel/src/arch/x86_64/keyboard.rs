@@ -8,7 +8,9 @@
 //! other keys without an ASCII meaning (function keys) are ignored. Ctrl+Tab
 //! sends the desktop's "next window" byte (ADR-0059). With Shift the moving
 //! keys send `KEY_SHIFTED` added, and Ctrl+Shift+C, X and V send
-//! `KEY_COPY`, `KEY_CUT` and `KEY_PASTE` (ADR-0095).
+//! `KEY_COPY`, `KEY_CUT` and `KEY_PASTE` (ADR-0095). The volume keys
+//! (`0xe0 0x20`, `0x2e`, `0x30`) send `KEY_MUTE`, `KEY_VOLUME_DOWN` and
+//! `KEY_VOLUME_UP` (ADR-0101).
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -167,6 +169,13 @@ fn translate(code: u8) -> Option<u8> {
     }
     if extended {
         use oceans_abi::display as d;
+        // The volume keys (ADR-0101), on keyboards and laptops' Fn keys.
+        match key {
+            0x20 => return Some(d::KEY_MUTE),
+            0x2e => return Some(d::KEY_VOLUME_DOWN),
+            0x30 => return Some(d::KEY_VOLUME_UP),
+            _ => {}
+        }
         // Shift selects as it moves (ADR-0095); Shift+Delete is Delete.
         return navigation(key).map(|byte| {
             if state & SHIFT != 0 && byte != d::KEY_DELETE {

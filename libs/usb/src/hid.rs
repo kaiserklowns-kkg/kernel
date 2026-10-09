@@ -5,7 +5,8 @@
 //! Delete and the page keys, which send `oceans_abi::display::KEY_*`
 //! (ADR-0084), with Shift as a byte of their own (ADR-0095). Ctrl+Tab
 //! sends the desktop's "next window" byte (ADR-0059); Ctrl+Shift+C, X and
-//! V (and the Copy, Cut and Paste keys) the clipboard's (ADR-0095).
+//! V (and the Copy, Cut and Paste keys) the clipboard's (ADR-0095). The
+//! volume keys send the desktop's volume bytes (ADR-0101).
 
 const LEFT_CTRL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
@@ -34,6 +35,11 @@ const SHIFTED_MOVE: u8 = 0x10;
 const COPY: u8 = 0x89;
 const CUT: u8 = 0x8a;
 const PASTE: u8 = 0x8b;
+/// Mute, Volume Up and Volume Down (usages 0x7f, 0x80, 0x81):
+/// `display::KEY_MUTE`, `KEY_VOLUME_UP`, `KEY_VOLUME_DOWN` (ADR-0101).
+const MUTE: u8 = 0x8c;
+const VOLUME_DOWN: u8 = 0x8d;
+const VOLUME_UP: u8 = 0x8e;
 /// Keypad usages 0x54–0x63.
 const KEYPAD: &[u8; 0x10] = b"/*-+\r1234567890.";
 
@@ -103,6 +109,9 @@ impl Keyboard {
             0x7b => return Some(CUT),
             0x7c => return Some(COPY),
             0x7d => return Some(PASTE),
+            0x7f => return Some(MUTE),
+            0x80 => return Some(VOLUME_UP),
+            0x81 => return Some(VOLUME_DOWN),
             _ => 0,
         };
         if byte == 0 {
@@ -261,6 +270,24 @@ mod tests {
             ],
         );
         assert_eq!(out, [0x95, 0x92, 0x86, 0x89, 0x8a, 0x8b, 0x16, 0x8b]);
+    }
+
+    #[test]
+    fn the_volume_keys_send_their_bytes() {
+        let mut keyboard = Keyboard::new();
+        let out = feed(
+            &mut keyboard,
+            &[
+                keys(0, [0x7f, 0, 0, 0, 0, 0]),
+                keys(0, [0; 6]),
+                keys(0, [0x81, 0, 0, 0, 0, 0]),
+                // With Shift or Ctrl, the same.
+                keys(LEFT_SHIFT, [0x80, 0, 0, 0, 0, 0]),
+                keys(LEFT_CTRL, [0x80, 0x81, 0, 0, 0, 0]),
+            ],
+        );
+        // Mute, Down, Up; the held Up is not sent again, Down is.
+        assert_eq!(out, [0x8c, 0x8d, 0x8e, 0x8d]);
     }
 
     #[test]
