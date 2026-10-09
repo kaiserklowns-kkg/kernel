@@ -150,6 +150,12 @@ impl PortStatus {
         self.status & 2 != 0
     }
 
+    /// The connection changed since it was last acknowledged (`C_PORT_
+    /// CONNECTION`): a device left, came, or both.
+    pub fn connection_changed(&self) -> bool {
+        self.change & 1 != 0
+    }
+
     pub fn reset_done(&self) -> bool {
         self.change & (1 << 4) != 0
     }
@@ -245,6 +251,12 @@ mod tests {
     fn decodes_port_status() {
         let status = PortStatus::parse(&[0x03, 0x05, 0x11, 0x00]).unwrap();
         assert!(status.connected() && status.enabled() && status.reset_done());
+        assert!(status.connection_changed());
+        assert!(
+            !PortStatus::parse(&[0x03, 0x05, 0x10, 0x00])
+                .unwrap()
+                .connection_changed()
+        );
         assert_eq!(status.speed(false), Speed::High);
         let low = PortStatus::parse(&[0x03, 0x03, 0, 0]).unwrap();
         assert_eq!(low.speed(false), Speed::Low);

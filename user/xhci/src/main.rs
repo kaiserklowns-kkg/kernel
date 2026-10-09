@@ -921,14 +921,21 @@ impl Controller {
         // Acknowledge every change reported so far.
         self.set_portsc(number, port::write_value(status, status & port::CHANGES));
         let connected = status & port::CONNECTED != 0;
-        match (connected, self.child_of(None, number)) {
-            (true, None) => {
-                if let Err(problem) = self.attach_root(number) {
-                    say(self.log, format_args!("port {number}: {problem}"));
-                }
-            }
-            (false, Some(index)) => self.detach(index, true),
-            _ => {}
+        let mut child = self.child_of(None, number);
+        // A device taken out and another (or the same) put in before this
+        // looked: the change is reported once, still connected. The old
+        // one goes first, or the new one would never be seen.
+        if let Some(index) = child
+            && (!connected || status & port::CONNECT_CHANGE != 0)
+        {
+            self.detach(index, true);
+            child = None;
+        }
+        if connected
+            && child.is_none()
+            && let Err(problem) = self.attach_root(number)
+        {
+            say(self.log, format_args!("port {number}: {problem}"));
         }
     }
 
@@ -976,13 +983,19 @@ impl Controller {
             for feature in status.changes(usb3) {
                 self.control(hub, hub::clear_port_feature(port, feature), None)?;
             }
-            match (status.connected(), self.child_of(Some((hub, port)), 0)) {
-                (true, None) => self.attach_on_hub(hub, port, usb3),
-                (false, Some(child)) => {
-                    self.detach(child, true);
-                    Ok(())
-                }
-                _ => Ok(()),
+            let mut child = self.child_of(Some((hub, port)), 0);
+            // Taken out and put in again before this looked: the old device
+            // goes first (as on root ports).
+            if let Some(index) = child
+                && (!status.connected() || status.connection_changed())
+            {
+                self.detach(index, true);
+                child = None;
+            }
+            if status.connected() && child.is_none() {
+                self.attach_on_hub(hub, port, usb3)
+            } else {
+                Ok(())
             }
         })();
         if let Err(problem) = result {
@@ -1542,6 +1555,12 @@ impl Controller {
             return;
         }
         if !ok {
+            if matches!(device.driver, Driver::Hub { .. }) {
+                say(
+                    self.log,
+                    format_args!("hub {index}: report failed, code {code}"),
+                );
+            }
             return;
         }
         match &mut device.driver {
@@ -1561,7 +1580,12 @@ impl Controller {
                 }
             }
             Driver::Hub { ports, .. } => {
-                self.pending_hubs[index] |= hub::changed_ports(&report[..len], *ports);
+                let changed = hub::changed_ports(&report[..len], *ports);
+                self.pending_hubs[index] |= changed;
+                say(
+                    self.log,
+                    format_args!("hub {index}: ports changed {changed:#x}"),
+                );
             }
             Driver::None => {}
         }
