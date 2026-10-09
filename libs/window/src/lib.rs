@@ -79,6 +79,12 @@ pub struct Frame {
     pub presented: bool,
     /// Hidden until restored from the taskbar (ADR-0076).
     pub minimized: bool,
+    /// The smallest content the app can lay out, once it said it can be
+    /// resized (ADR-0097); `None`: its size is fixed.
+    pub min: Option<(i32, i32)>,
+    /// Where it was before it was maximized (`x`, `y`, `width`,
+    /// `height`): the zoom button and a double click put it back.
+    pub restore: Option<(i32, i32, i32, i32)>,
 }
 
 impl Frame {
@@ -112,8 +118,8 @@ impl Frame {
         Rect::new(close.x + BUTTON_STEP, close.y, CLOSE_SIZE, CLOSE_SIZE)
     }
 
-    /// Right of the minimize button: resizing, not yet available (drawn
-    /// disabled, takes no clicks).
+    /// Right of the minimize button: maximizes and restores a window that
+    /// can be resized (ADR-0097); drawn disabled on one that cannot.
     pub fn zoom_button(&self) -> Rect {
         let minimize = self.minimize_button();
         Rect::new(minimize.x + BUTTON_STEP, minimize.y, CLOSE_SIZE, CLOSE_SIZE)
@@ -123,6 +129,69 @@ impl Frame {
     pub fn content(&self) -> Rect {
         Rect::new(self.x + 1, self.y + TITLE_HEIGHT, self.width, self.height)
     }
+
+    pub fn resizable(&self) -> bool {
+        self.min.is_some()
+    }
+
+    /// The edges (`edge::*`) a press at `x`, `y` would drag: within
+    /// [`GRIP`] outside the frame, or on its border; never the title bar.
+    pub fn edges_at(&self, x: i32, y: i32) -> u8 {
+        if !self.resizable() || self.minimized {
+            return 0;
+        }
+        let o = self.outer();
+        let (right, bottom) = (o.x + o.w, o.y + o.h);
+        if x < o.x - GRIP || x >= right + GRIP || y < o.y - GRIP || y >= bottom + GRIP {
+            return 0;
+        }
+        let mut edges = 0;
+        if x < o.x + 1 {
+            edges |= edge::LEFT;
+        } else if x >= right - 1 {
+            edges |= edge::RIGHT;
+        }
+        if y < o.y {
+            edges |= edge::TOP;
+        } else if y >= bottom - 1 {
+            edges |= edge::BOTTOM;
+        }
+        // Near a corner, both edges: the corner is easier to catch.
+        if edges & (edge::TOP | edge::BOTTOM) != 0 {
+            if x < o.x + CORNER {
+                edges |= edge::LEFT;
+            } else if x >= right - CORNER {
+                edges |= edge::RIGHT;
+            }
+        }
+        if edges & (edge::LEFT | edge::RIGHT) != 0 && y >= bottom - CORNER {
+            edges |= edge::BOTTOM;
+        }
+        edges
+    }
+}
+
+/// The edges a resize drags (bits).
+pub mod edge {
+    pub const LEFT: u8 = 1 << 0;
+    pub const RIGHT: u8 = 1 << 1;
+    pub const TOP: u8 = 1 << 2;
+    pub const BOTTOM: u8 = 1 << 3;
+}
+
+/// How far outside a resizable window's frame its edges can be caught.
+pub const GRIP: i32 = 5;
+/// How far along an edge from a corner a press takes the corner.
+const CORNER: i32 = 14;
+
+/// A resize under way: the window, its edges, where the press was and the
+/// frame (`x`, `y`, `width`, `height`) then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Resize {
+    id: u32,
+    edges: u8,
+    from: (i32, i32),
+    start: (i32, i32, i32, i32),
 }
 
 /// Who gets the keyboard.
@@ -161,6 +230,8 @@ pub struct Manager {
     next_id: u32,
     /// The window being dragged, and the grab point inside it.
     drag: Option<(u32, i32, i32)>,
+    /// The window being resized by an edge (ADR-0097).
+    resize: Option<Resize>,
     /// Content pixels allowed on all windows together.
     pixel_budget: usize,
     /// The clipboard's text (ADR-0095): the system's copy, kept when the
@@ -183,6 +254,7 @@ impl Manager {
             signals: BTreeSet::new(),
             next_id: 1,
             drag: None,
+            resize: None,
             pixel_budget,
             clipboard: None,
             may_copy: None,
@@ -318,6 +390,8 @@ impl Manager {
             height,
             presented: false,
             minimized: false,
+            min: None,
+            restore: None,
         });
         self.set_focus(Focus::Window(id));
         Ok(id)
@@ -327,6 +401,9 @@ impl Manager {
         let frame = self.frames.remove(index);
         if self.drag.is_some_and(|(id, _, _)| id == frame.id) {
             self.drag = None;
+        }
+        if self.resize.is_some_and(|r| r.id == frame.id) {
+            self.resize = None;
         }
         if self.focus == Focus::Window(frame.id) {
             self.focus = Focus::Terminal;
@@ -356,6 +433,9 @@ impl Manager {
         self.frames[index].minimized = true;
         if self.drag.is_some_and(|(dragged, _, _)| dragged == id) {
             self.drag = None;
+        }
+        if self.resize.is_some_and(|r| r.id == id) {
+            self.resize = None;
         }
         if self.focus == Focus::Window(id) {
             self.focus_below();
@@ -532,9 +612,195 @@ impl Manager {
             .rposition(|f| !f.minimized && f.outer().contains(x, y))
     }
 
+    /// The window whose edges a press at `x`, `y` would catch, and which:
+    /// the topmost window near the point, if the point is on its edge.
+    fn grip_at(&self, x: i32, y: i32) -> Option<(usize, u8)> {
+        let index = self.frames.iter().rposition(|f| {
+            let o = f.outer();
+            !f.minimized
+                && Rect::new(o.x - GRIP, o.y - GRIP, o.w + 2 * GRIP, o.h + 2 * GRIP).contains(x, y)
+        })?;
+        let edges = self.frames[index].edges_at(x, y);
+        (edges != 0).then_some((index, edges))
+    }
+
+    /// The largest content a window may have: the area, the protocol's
+    /// limit, and the pixels the other windows leave.
+    fn largest(&self, id: u32) -> (i32, i32) {
+        let others: usize = self
+            .frames
+            .iter()
+            .filter(|f| f.id != id)
+            .map(|f| (f.width * f.height) as usize)
+            .sum();
+        let width = (self.area.w - 2).min(i32::from(proto::MAX_WIDTH));
+        let height = (self.area.h - TITLE_HEIGHT - 1).min(i32::from(proto::MAX_HEIGHT));
+        let budget = self.pixel_budget.saturating_sub(others) as i32;
+        (width, height.min(budget / width.max(1)))
+    }
+
+    /// Follows the pointer with the edges being dragged; `true` if the
+    /// frame changed.
+    fn resize_to(&mut self, resize: Resize, x: i32, y: i32) -> bool {
+        let Some(index) = self.index(resize.id) else {
+            self.resize = None;
+            return false;
+        };
+        let (largest_w, largest_h) = self.largest(resize.id);
+        let frame = &self.frames[index];
+        let Some((min_w, min_h)) = frame.min else {
+            return false;
+        };
+        let (x0, y0, w0, h0) = resize.start;
+        let (dx, dy) = (x - resize.from.0, y - resize.from.1);
+        let mut w = w0;
+        let mut h = h0;
+        if resize.edges & edge::RIGHT != 0 {
+            w = w0 + dx;
+        } else if resize.edges & edge::LEFT != 0 {
+            w = w0 - dx;
+        }
+        if resize.edges & edge::BOTTOM != 0 {
+            h = h0 + dy;
+        } else if resize.edges & edge::TOP != 0 {
+            // The title bar stays below the area's top.
+            h = (h0 - dy).min(h0 + (y0 - self.area.y));
+        }
+        w = w.clamp(min_w, largest_w.max(min_w));
+        h = h.clamp(min_h, largest_h.max(min_h));
+        // What a left or top edge gives, the corner opposite keeps.
+        let nx = if resize.edges & edge::LEFT != 0 {
+            x0 + w0 - w
+        } else {
+            x0
+        };
+        let ny = if resize.edges & edge::TOP != 0 {
+            y0 + h0 - h
+        } else {
+            y0
+        };
+        let frame = &mut self.frames[index];
+        let changed = (frame.x, frame.y, frame.width, frame.height) != (nx, ny, w, h);
+        (frame.x, frame.y, frame.width, frame.height) = (nx, ny, w, h);
+        changed
+    }
+
+    /// A resize ended: the app is told its new size, if it changed.
+    fn resized(&mut self, resize: Resize) {
+        let Some(index) = self.index(resize.id) else {
+            return;
+        };
+        let frame = &mut self.frames[index];
+        if (frame.width, frame.height) != (resize.start.2, resize.start.3) {
+            frame.restore = None;
+            self.tell_size(index);
+        }
+    }
+
+    /// Queues a [`kind::RESIZE`] event with the window's size.
+    fn tell_size(&mut self, index: usize) {
+        let frame = &self.frames[index];
+        let (owner, id) = (frame.owner, frame.id);
+        let (width, height) = (frame.width as i16, frame.height as i16);
+        self.queue(
+            owner,
+            Event {
+                window: id,
+                kind: kind::RESIZE,
+                x: width,
+                y: height,
+                ..Event::default()
+            },
+        );
+    }
+
+    /// Maximizes a resizable window to the area (in its middle, if the
+    /// largest content is smaller), or puts it back where it was. `false`
+    /// if it cannot be resized.
+    pub fn zoom(&mut self, id: u32) -> bool {
+        let Some(index) = self.index(id).filter(|&i| self.frames[i].resizable()) else {
+            return false;
+        };
+        self.drag = None;
+        self.resize = None;
+        let (largest_w, largest_h) = self.largest(id);
+        let area = self.area;
+        let frame = &mut self.frames[index];
+        let (min_w, min_h) = frame.min.unwrap_or_default();
+        if let Some((x, y, w, h)) = frame.restore.take() {
+            (frame.x, frame.y, frame.width, frame.height) = (x, y, w, h);
+        } else {
+            frame.restore = Some((frame.x, frame.y, frame.width, frame.height));
+            let (w, h) = (largest_w.max(min_w), largest_h.max(min_h));
+            frame.width = w;
+            frame.height = h;
+            frame.x = area.x + (area.w - (w + 2)) / 2;
+            frame.y = area.y;
+        }
+        self.set_focus(Focus::Window(id));
+        // `set_focus` moved it to the top.
+        let top = self.frames.len() - 1;
+        self.tell_size(top);
+        true
+    }
+
+    /// A double click at `x`, `y`: on a resizable window's title bar (not
+    /// its buttons), it maximizes or restores the window. `true` if so.
+    pub fn double_click(&mut self, x: i32, y: i32) -> bool {
+        let Some(index) = self.at(x, y) else {
+            return false;
+        };
+        let frame = &self.frames[index];
+        let on_buttons = [
+            frame.close_button(),
+            frame.minimize_button(),
+            frame.zoom_button(),
+        ]
+        .iter()
+        .any(|b| b.contains(x, y));
+        if !frame.title_bar().contains(x, y) || on_buttons {
+            return false;
+        }
+        let id = frame.id;
+        self.zoom(id)
+    }
+
+    /// `RESIZABLE` from the app (ADR-0097): its window may be resized, down
+    /// to `min_width × min_height` (at least the protocol's minimum, at
+    /// most its size now).
+    pub fn set_resizable(
+        &mut self,
+        owner: u64,
+        id: u32,
+        min_width: u16,
+        min_height: u16,
+    ) -> Result<(), Status> {
+        let index = self.owned(owner, id)?;
+        let frame = &mut self.frames[index];
+        let (w, h) = (i32::from(min_width), i32::from(min_height));
+        if w < i32::from(proto::MIN_WIDTH)
+            || h < i32::from(proto::MIN_HEIGHT)
+            || w > frame.width
+            || h > frame.height
+        {
+            return Err(Status::BadRequest);
+        }
+        frame.min = Some((w, h));
+        Ok(())
+    }
+
+    /// The size a window has now, for `RESIZE` (the app's pixels follow).
+    pub fn size(&self, owner: u64, id: u32) -> Result<(u16, u16), Status> {
+        let frame = &self.frames[self.owned(owner, id)?];
+        Ok((frame.width as u16, frame.height as u16))
+    }
+
     /// The pointer moved to `x`, `y`; `true` if the screen changes (a
     /// window was dragged).
     pub fn pointer_moved(&mut self, x: i32, y: i32) -> bool {
+        if let Some(resize) = self.resize {
+            return self.resize_to(resize, x, y);
+        }
         if let Some((id, grab_x, grab_y)) = self.drag
             && let Some(index) = self.index(id)
         {
@@ -575,6 +841,28 @@ impl Manager {
         if !pressed && button == 1 && self.drag.take().is_some() {
             return true;
         }
+        if !pressed
+            && button == 1
+            && let Some(resize) = self.resize.take()
+        {
+            self.resized(resize);
+            return true;
+        }
+        if pressed
+            && button == 1
+            && let Some((index, edges)) = self.grip_at(x, y)
+        {
+            let frame = &self.frames[index];
+            let resize = Resize {
+                id: frame.id,
+                edges,
+                from: (x, y),
+                start: (frame.x, frame.y, frame.width, frame.height),
+            };
+            self.set_focus(Focus::Window(resize.id));
+            self.resize = Some(resize);
+            return true;
+        }
         let Some(index) = self.at(x, y) else {
             return false;
         };
@@ -583,10 +871,15 @@ impl Manager {
         let content = frame.content();
         let on_close = frame.close_button().contains(x, y);
         let on_minimize = frame.minimize_button().contains(x, y);
+        let on_zoom = frame.zoom_button().contains(x, y);
         let on_title = frame.title_bar().contains(x, y);
         let (grab_x, grab_y) = (x - frame.x, y - frame.y);
         if pressed && button == 1 && on_minimize {
             self.minimize(id);
+            return true;
+        }
+        if pressed && button == 1 && on_zoom && frame.resizable() {
+            self.zoom(id);
             return true;
         }
         if pressed {

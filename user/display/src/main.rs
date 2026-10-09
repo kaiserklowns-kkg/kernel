@@ -18,6 +18,9 @@
 //!   (`DISPLAY_KEYBOARD`) and goes to the focused window, or back to the
 //!   console (`console-input`) when the Terminal has the focus. A click
 //!   or Ctrl+Tab moves the focus;
+//! - **resizing** (ADR-0097): a window whose app said it can be resized
+//!   follows its edges and corners, and the zoom button or a double click
+//!   on its title bar maximizes and restores it;
 //! - **the clipboard** (ADR-0095): text an app copies while it has the
 //!   focus, pasted only where the user pastes (Ctrl+V in a window,
 //!   Ctrl+Shift+V there and in the Terminal, a line at a time);
@@ -76,6 +79,8 @@ const KEYS: u64 = 1 << 2;
 const TICK_MS: u64 = 100;
 const APPS_EVERY_MS: u64 = 2000;
 const TOAST_MS: u64 = 4000;
+/// A second press within this long, and 4 pixels, is a double click.
+const DOUBLE_CLICK_MS: u64 = 500;
 
 fn say(log: Handle, args: core::fmt::Arguments<'_>) {
     let mut line = Buffer::<200>::new();
@@ -103,6 +108,9 @@ struct Service {
     pixels: BTreeMap<u32, Pixels>,
     /// Asking init to switch off or restart (ADR-0085).
     power: Option<Handle>,
+    /// The last press of the main button: when and where (a double click
+    /// maximizes, ADR-0097).
+    last_press: Option<(u64, i32, i32)>,
 }
 
 fn main(start: Start) -> i64 {
@@ -193,6 +201,7 @@ fn main(start: Start) -> i64 {
             ..Desktop::default()
         },
         pending: Vec::new(),
+        last_press: None,
         text_capacity: 16 + info.cols as usize * info.rows as usize,
         console,
         windows: Manager::new(area, 2 * screen_pixels),
@@ -256,7 +265,7 @@ fn main(start: Start) -> i64 {
                     break;
                 }
                 for event in batch.events() {
-                    dirty |= service.pointer(event.kind, &canvas);
+                    dirty |= service.pointer(event.kind, event.time_ms, &canvas);
                 }
             }
         }
@@ -309,7 +318,10 @@ impl Service {
             .iter()
             .map(|frame| WindowView {
                 frame,
-                pixels: self.pixels.get(&frame.id).map(Pixels::pixels),
+                pixels: self
+                    .pixels
+                    .get(&frame.id)
+                    .map(|p| (p.pixels(), p.width, p.height)),
                 focused: focus == Focus::Window(frame.id),
             })
             .collect();
@@ -318,7 +330,7 @@ impl Service {
     }
 
     /// A pointer event; `true` if the screen must change.
-    fn pointer(&mut self, kind: Kind, canvas: &Canvas) -> bool {
+    fn pointer(&mut self, kind: Kind, time_ms: u64, canvas: &Canvas) -> bool {
         let (w, h) = (canvas.width, canvas.height);
         let (x, y) = self.desktop.pointer;
         match kind {
@@ -339,10 +351,28 @@ impl Service {
                 let over = self.desktop.start_open
                     || y < desktop::MENU_HEIGHT
                     || y >= h - desktop::DOCK_RESERVE;
+                // A second press of the main button soon after the first,
+                // where it was: a double click (ADR-0097). Timed when the
+                // input service read them, not when they are handled here
+                // (a slow frame between them must not part them).
+                let now = time_ms;
+                let double = button == 1
+                    && pressed
+                    && self.last_press.is_some_and(|(then, px, py)| {
+                        now.saturating_sub(then) <= DOUBLE_CLICK_MS
+                            && (px - x).abs() <= 4
+                            && (py - y).abs() <= 4
+                    });
+                if button == 1 && pressed {
+                    self.last_press = (!double).then_some((now, x, y));
+                }
                 if self.desktop.dialog.is_none()
                     && (!pressed || !over)
                     && self.windows.button(button, pressed, x, y)
                 {
+                    if double {
+                        self.windows.double_click(x, y);
+                    }
                     return true;
                 }
                 return button == 1 && pressed && self.click(x, y, w, h);

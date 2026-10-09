@@ -37,6 +37,8 @@ pub const ACCENT: Rgb = Rgb(0x2f_7c_f6);
 pub const SUCCESS: Rgb = Rgb(0x34_c7_59);
 pub const CLOSE: Rgb = Rgb(0xff_5f_57);
 pub const MINIMIZE: Rgb = Rgb(0xfe_bc_2e);
+/// The zoom button of a window that can be resized (ADR-0097).
+pub const ZOOM: Rgb = Rgb(0x28_c8_40);
 /// A window button that does nothing (yet), or any button of a window
 /// without the focus.
 pub const BUTTON_OFF: Rgb = Rgb(0xd1_d1_d6);
@@ -163,8 +165,9 @@ pub struct Desktop {
 /// An app window to draw.
 pub struct WindowView<'a> {
     pub frame: &'a Frame,
-    /// Its pixels, once the app has presented them.
-    pub pixels: Option<*const u32>,
+    /// Its pixels and their width and height, once the app has presented
+    /// them (a resized window's may still have the old size).
+    pub pixels: Option<(*const u32, usize, usize)>,
     pub focused: bool,
 }
 
@@ -901,14 +904,29 @@ fn draw_window(canvas: &mut Canvas, view: &WindowView<'_>, pointer: (i32, i32)) 
         &[
             (frame.close_button(), lit(CLOSE)),
             (frame.minimize_button(), lit(MINIMIZE)),
-            (frame.zoom_button(), None),
+            (
+                frame.zoom_button(),
+                frame.resizable().then_some(ZOOM).and_then(lit),
+            ),
         ],
         pointer,
     );
     let content = frame.content();
     match view.pixels {
-        Some(pixels) if frame.presented => {
-            canvas.blit(content, pixels, frame.width as usize);
+        Some((pixels, width, height)) if frame.presented => {
+            // Pixels of another size (a resize the app has not caught up
+            // with): as much as fits, the rest in the windows' colour.
+            let w = content.w.min(width as i32);
+            let h = content.h.min(height as i32);
+            canvas.blit(Rect::new(content.x, content.y, w, h), pixels, width);
+            canvas.fill(
+                Rect::new(content.x + w, content.y, content.w - w, content.h),
+                IDLE_TITLE,
+            );
+            canvas.fill(
+                Rect::new(content.x, content.y + h, w, content.h - h),
+                IDLE_TITLE,
+            );
         }
         _ => canvas.fill(content, WHITE),
     }

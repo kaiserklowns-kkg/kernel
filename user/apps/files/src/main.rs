@@ -26,6 +26,8 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 500;
+/// The smallest the window may be resized to (ADR-0097).
+const MIN_SIZE: (u16, u16) = (600, 320);
 /// Entries listed in one folder.
 const MAX_ENTRIES: usize = 300;
 /// How much of a file the preview shows.
@@ -422,5 +424,7 @@ fn main(start: Start) -> i64 {
         message: String::new(),
         stale: true,
     };
-    oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut files, frame)
+    oceans_ui::run_resizable(
+        &directory, "", WIDTH, HEIGHT, MIN_SIZE, None, &mut files, frame,
+    )
 }

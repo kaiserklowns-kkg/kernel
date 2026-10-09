@@ -452,7 +452,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@screen 720 310 d4e3fc Files' first entry in Home, selected",
-    b"@monitor device_del deskmouse",
+    // The mouse stays for Text Editor's window (ADR-0097), at 688,299.
     b"app stop app.oceans.files\r\n",
     // Activity Monitor (ADR-0083): its window (the sixth opened) shows the
     // memory card, white on the window's grey.
@@ -477,6 +477,26 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey end",
     b"@monitor sendkey ret",
     b"@monitor sendkey ctrl-v",
+    // Resizing (ADR-0097): the window is at 451,171 (content 760x520).
+    // Its zoom button (511,185) maximizes it to the area (1024x663 at
+    // 127,28): the page then covers 200,400, and 1150,175 is page, not
+    // title bar. A double click on the title bar puts it back; then its
+    // right edge, caught outside the frame at 1214,400, is dragged 200
+    // to the left: the page, laid out again, ends at 1012.
+    b"@monitor mouse_move -177 -114",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 200 400 ffffff Text Editor maximized, its page laid out again",
+    b"@screen 1150 175 ffffff Text Editor maximized, over its old title bar",
+    b"@monitor mouse_move 129 -145",
+    b"@doubleclick",
+    b"@screen 1150 175 e3e3e8 Text Editor restored, its title bar back",
+    b"@monitor mouse_move 574 360",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_move -200 0",
+    b"@monitor mouse_button 0",
+    b"@screen 1000 499 ffffff Text Editor narrower, its page laid out again",
+    b"@monitor device_del deskmouse",
     b"@monitor sendkey ctrl-s",
     b"app stop app.oceans.editor\r\n",
     b"cat /home/untitled.txt\r\n",
@@ -888,6 +908,10 @@ const SHELL_EXPECT: &[Expect] = &[
     // so the shell's prompt follows it on the same line.
     Expect::Contains("edited in oceansoceans> "),
     Expect::Contains("display: clipboard: pasted into the Terminal"),
+    // Resizing (ADR-0097): maximized, restored, narrowed by its edge.
+    Expect::Contains("display: Text Editor's window resized to 1024x663"),
+    Expect::Contains("display: Text Editor's window resized to 760x520"),
+    Expect::Contains("display: Text Editor's window resized to 560x520"),
     Expect::Line("pasted edited in oceans"),
     Expect::Contains("core: installed editor.opk from the system image"),
     Expect::Contains("core: installed viewer.opk from the system image"),
@@ -2945,6 +2969,14 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
                         if let Some(line) = command.strip_prefix(b"@monitor ") {
                             monitor_command(monitor_port, line)?;
                             thread::sleep(MONITOR_SETTLE);
+                        } else if command == b"@doubleclick" {
+                            // Two clicks of the mouse's main button, close
+                            // enough to be a double click (ADR-0097).
+                            for line in [&b"mouse_button 1"[..], b"mouse_button 0"].repeat(2) {
+                                monitor_command(monitor_port, line)?;
+                                thread::sleep(DOUBLE_CLICK_GAP);
+                            }
+                            thread::sleep(MONITOR_SETTLE);
                         } else if let Some(probe) = command.strip_prefix(b"@screen ") {
                             if let Err(error) = expect_pixel(monitor_port, probe) {
                                 let _ = child.kill();
@@ -3542,6 +3574,10 @@ const MONITOR_SETTLE: Duration = Duration::from_secs(2);
 /// Between input events given to the monitor (`@when`): long enough for
 /// the guest to poll each into a report of its own.
 const MONITOR_EVENT_GAP: Duration = Duration::from_millis(300);
+/// Between the presses and releases of `@doubleclick`: each reaches the
+/// guest in a report of its own, and the second press comes well within
+/// the desktop's 500 ms.
+const DOUBLE_CLICK_GAP: Duration = Duration::from_millis(100);
 
 /// Presses `text` (lowercase letters, digits, space, CR) on the guest's
 /// USB keyboard through QEMU's monitor (`sendkey`).

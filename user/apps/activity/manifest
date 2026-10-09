@@ -4,7 +4,7 @@
 # the boot image.
 id = app.oceans.activity
 name = Activity Monitor
-version = 1.0.0
+version = 1.0.1
 publisher = {{PUBLISHER}}
 description = What runs and how much memory it takes
 architecture = x86_64

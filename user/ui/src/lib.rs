@@ -406,6 +406,46 @@ pub fn run_ticking<S>(
     height: u16,
     tick_ms: Option<u64>,
     state: &mut S,
+    frame: impl FnMut(&mut Ui<'_, '_>, &mut S),
+) -> i64 {
+    run_window(directory, title, width, height, None, tick_ms, state, frame)
+}
+
+/// As [`run_ticking`], in a window the user may resize and maximize
+/// (ADR-0097), down to `min` (width, height). The frame is laid out over
+/// the whole window whatever its size: lay out from `ui.area`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_resizable<S>(
+    directory: &Directory,
+    title: &str,
+    width: u16,
+    height: u16,
+    min: (u16, u16),
+    tick_ms: Option<u64>,
+    state: &mut S,
+    frame: impl FnMut(&mut Ui<'_, '_>, &mut S),
+) -> i64 {
+    run_window(
+        directory,
+        title,
+        width,
+        height,
+        Some(min),
+        tick_ms,
+        state,
+        frame,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_window<S>(
+    directory: &Directory,
+    title: &str,
+    width: u16,
+    height: u16,
+    min: Option<(u16, u16)>,
+    tick_ms: Option<u64>,
+    state: &mut S,
     mut frame: impl FnMut(&mut Ui<'_, '_>, &mut S),
 ) -> i64 {
     const EVENTS: u64 = 1;
@@ -419,6 +459,10 @@ pub fn run_ticking<S>(
     let Ok(mut window) = Window::open(windows, notification, EVENTS, width, height, title) else {
         return EXIT_NO_WINDOW;
     };
+    if let Some((min_width, min_height)) = min {
+        // Without it the window keeps its size: the app still works.
+        let _ = window.set_resizable(min_width, min_height);
+    }
     let Some(mut typesetter) = Typesetter::new() else {
         return EXIT_BAD_START;
     };
@@ -479,6 +523,11 @@ pub fn run_ticking<S>(
                     }
                     kind::BUTTON if event.button == 1 => input.held = false,
                     kind::KEY => input.keys.push(event.key),
+                    // New pixels at the new size; the frame after this
+                    // batch draws into them.
+                    kind::RESIZE => {
+                        let _ = window.resize();
+                    }
                     kind::PASTE => {
                         input.paste =
                             oceans_display_proto::paste(windows, |text: &str| String::from(text))

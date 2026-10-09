@@ -89,6 +89,67 @@ impl Window {
         unsafe { core::slice::from_raw_parts_mut(self.pixels, self.width * self.height) }
     }
 
+    /// Lets the user resize and maximize the window (ADR-0097), down to
+    /// `min_width × min_height`. The app then takes [`kind::RESIZE`]
+    /// events with [`Window::resize`].
+    pub fn set_resizable(&self, min_width: u16, min_height: u16) -> Result<(), WindowError> {
+        let mut data = [0u8; 8];
+        data[..4].copy_from_slice(&self.id.to_le_bytes());
+        data[4..6].copy_from_slice(&min_width.to_le_bytes());
+        data[6..].copy_from_slice(&min_height.to_le_bytes());
+        let got =
+            oceans_rt::ipc_call_msg(self.windows, op::RESIZABLE, &data, &[], &mut [], &mut [])
+                .map_err(WindowError::Ipc)?;
+        match Status::from_label(got.label) {
+            Status::Ok => Ok(()),
+            status => Err(WindowError::Refused(status)),
+        }
+    }
+
+    /// After a [`kind::RESIZE`] event: pixels at the window's new size, in
+    /// place of the old ones (`width` and `height` follow). Draw and
+    /// present them.
+    pub fn resize(&mut self) -> Result<(), WindowError> {
+        let mut reply = [0u8; 4];
+        let mut handles = [Handle(0); 1];
+        let got = oceans_rt::ipc_call_msg(
+            self.windows,
+            op::RESIZE,
+            &self.id.to_le_bytes(),
+            &[],
+            &mut reply,
+            &mut handles,
+        )
+        .map_err(WindowError::Ipc)?;
+        let status = Status::from_label(got.label);
+        if status != Status::Ok || got.handles_len != 1 || got.data_len < 4 {
+            for &handle in &handles[..got.handles_len] {
+                let _ = oceans_rt::close(handle);
+            }
+            return Err(WindowError::Refused(if status == Status::Ok {
+                Status::BadRequest
+            } else {
+                status
+            }));
+        }
+        let width = u16::from_le_bytes([reply[0], reply[1]]);
+        let height = u16::from_le_bytes([reply[2], reply[3]]);
+        let memory = handles[0];
+        let size = oceans_rt::memory_size(memory).unwrap_or(0) as usize;
+        let mapped = if size >= proto::pixel_bytes(width, height) {
+            oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
+        } else {
+            Err(oceans_rt::Error::InvalidArgument)
+        };
+        let _ = oceans_rt::close(memory);
+        let address = mapped.map_err(WindowError::Ipc)?;
+        let _ = oceans_rt::memory_unmap(self.pixels.cast());
+        self.pixels = address.cast();
+        self.width = usize::from(width);
+        self.height = usize::from(height);
+        Ok(())
+    }
+
     /// Shows what was drawn.
     pub fn present(&self) -> Result<(), WindowError> {
         self.simple(op::PRESENT)

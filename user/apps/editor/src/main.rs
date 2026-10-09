@@ -34,6 +34,8 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 520;
+/// The smallest the window may be resized to (ADR-0097).
+const MIN_SIZE: (u16, u16) = (480, 300);
 /// The largest file it opens, and what a page may grow to.
 const LIMIT: usize = 256 * 1024;
 const LINE: i32 = 22;
@@ -408,5 +410,7 @@ fn main(start: Start) -> i64 {
         started: false,
         dragging: false,
     };
-    oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut app, frame)
+    oceans_ui::run_resizable(
+        &directory, "", WIDTH, HEIGHT, MIN_SIZE, None, &mut app, frame,
+    )
 }

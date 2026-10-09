@@ -22,6 +22,11 @@
 //!   when it likes: when the user pastes into its window (Ctrl+V, Ctrl+
 //!   Shift+V), a [`kind::PASTE`] event comes, and `PASTE` then hands over
 //!   the text, once.
+//! - **Resizing** (ADR-0097): an app that can lay itself out at other
+//!   sizes says so (`RESIZABLE`). The user may then drag the window's
+//!   edges, or maximize it; when a resize ends, a [`kind::RESIZE`] event
+//!   comes, and `RESIZE` hands over pixels of the new size. Until the app
+//!   presents them, the old pixels are shown.
 
 /// Operations (request labels).
 pub mod op {
@@ -50,6 +55,14 @@ pub mod op {
     /// handles = `[memory]` (readable) holding the text. `NotFound` when
     /// no paste waits for the caller (each is taken once).
     pub const PASTE: u64 = 7;
+    /// data = `[window u32][min width u16][min height u16]`: the window can
+    /// be resized, down to that size (from [`super::MIN_WIDTH`] ×
+    /// [`super::MIN_HEIGHT`] up to its size now).
+    pub const RESIZABLE: u64 = 8;
+    /// After a [`super::kind::RESIZE`] event: data = `[window u32]` →
+    /// data = `[width u16][height u16]`, handles = `[pixels]`: new pixels
+    /// at the window's size now, which replace the old ones.
+    pub const RESIZE: u64 = 9;
 }
 
 /// The most text the clipboard holds, in bytes.
@@ -150,6 +163,9 @@ pub mod kind {
     pub const CLOSE: u8 = 5;
     /// The user pasted into the window (ADR-0095): `PASTE` takes the text.
     pub const PASTE: u8 = 6;
+    /// The user resized the window (ADR-0097): `x` and `y` are its new
+    /// width and height; `RESIZE` takes pixels of that size.
+    pub const RESIZE: u8 = 7;
 }
 
 /// Something that happened to a window.
@@ -191,7 +207,7 @@ impl Event {
             x: i16::from_le_bytes([bytes[8], bytes[9]]),
             y: i16::from_le_bytes([bytes[10], bytes[11]]),
         };
-        (kind::KEY..=kind::PASTE)
+        (kind::KEY..=kind::RESIZE)
             .contains(&event.kind)
             .then_some(event)
     }

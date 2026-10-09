@@ -38,7 +38,7 @@ fn events_round_trip_and_unknown_kinds_are_refused() {
     let mut bad = event.encode();
     bad[4] = 0;
     assert_eq!(Event::decode(&bad), None);
-    bad[4] = 7;
+    bad[4] = 8;
     assert_eq!(Event::decode(&bad), None);
 }
 
@@ -445,4 +445,153 @@ fn the_terminal_pastes_one_line_with_ctrl_shift_v_only() {
         m.terminal_paste(),
         Some((std::string::String::from("one line"), false))
     );
+}
+
+fn resizes(manager: &mut Manager, owner: u64) -> Vec<(u32, i16, i16)> {
+    manager
+        .take_events(owner, 100)
+        .iter()
+        .filter(|e| e.kind == kind::RESIZE)
+        .map(|e| (e.window, e.x, e.y))
+        .collect()
+}
+
+#[test]
+fn only_windows_their_apps_call_resizable_can_be_resized() {
+    let mut m = manager();
+    let id = m.open(APP, "A", "", 400, 300).unwrap();
+    let o = m.frames()[0].outer();
+    // Fixed: no edges, the zoom button does nothing.
+    assert_eq!(m.frames()[0].edges_at(o.x + o.w + 2, o.y + 100), 0);
+    assert!(!m.zoom(id));
+    // Bounds on the smallest size: the protocol's, and the size now.
+    assert_eq!(m.set_resizable(OTHER, id, 200, 100), Err(Status::NotFound));
+    assert_eq!(m.set_resizable(APP, id, 63, 100), Err(Status::BadRequest));
+    assert_eq!(m.set_resizable(APP, id, 401, 100), Err(Status::BadRequest));
+    assert_eq!(m.set_resizable(APP, id, 200, 100), Ok(()));
+    let f = &m.frames()[0];
+    // Outside the right edge, on the bottom border, at a corner; not
+    // inside, not on the title bar's top edge from inside.
+    assert_eq!(f.edges_at(o.x + o.w + 2, o.y + 100), edge::RIGHT);
+    assert_eq!(f.edges_at(o.x + 100, o.y + o.h - 1), edge::BOTTOM);
+    assert_eq!(
+        f.edges_at(o.x + o.w + 1, o.y + o.h + 1),
+        edge::RIGHT | edge::BOTTOM
+    );
+    assert_eq!(f.edges_at(o.x - 3, o.y - 3), edge::LEFT | edge::TOP);
+    assert_eq!(f.edges_at(o.x + 100, o.y + 100), 0);
+    assert_eq!(f.edges_at(o.x + 100, o.y + 5), 0);
+    assert_eq!(f.edges_at(o.x + o.w + GRIP, o.y + 100), 0);
+}
+
+#[test]
+fn dragging_an_edge_or_a_corner_resizes_within_bounds() {
+    let mut m = manager();
+    let id = m.open(APP, "A", "", 400, 300).unwrap();
+    m.set_resizable(APP, id, 200, 100).unwrap();
+    m.take_events(APP, 100);
+    let o = m.frames()[0].outer();
+    // The bottom right corner, 100 right and 50 down.
+    let (x, y) = (o.x + o.w + 1, o.y + o.h + 1);
+    assert!(m.button(1, true, x, y));
+    assert!(m.pointer_moved(x + 100, y + 50));
+    let f = &m.frames()[0];
+    assert_eq!((f.x, f.y, f.width, f.height), (o.x, o.y, 500, 350));
+    // The app hears of it once, when the button comes up.
+    assert!(resizes(&mut m, APP).is_empty());
+    assert!(m.button(1, false, x + 100, y + 50));
+    assert_eq!(resizes(&mut m, APP), [(id, 500, 350)]);
+    // The left edge: the right edge stays; never under the smallest size.
+    let o = m.frames()[0].outer();
+    let right = o.x + o.w;
+    m.button(1, true, o.x - 2, o.y + 100);
+    m.pointer_moved(o.x + 1000, o.y + 100);
+    m.button(1, false, o.x + 1000, o.y + 100);
+    let f = &m.frames()[0];
+    assert_eq!((f.width, f.outer().x + f.outer().w), (200, right));
+    // Never larger than the area (972 wide: 970 of content).
+    let o = f.outer();
+    m.button(1, true, o.x + o.w, o.y + 100);
+    m.pointer_moved(o.x + 5000, o.y + 100);
+    m.button(1, false, o.x + 5000, o.y + 100);
+    assert_eq!(m.frames()[0].width, 970);
+    assert_eq!(resizes(&mut m, APP).len(), 2);
+    // A press and release without a move: no event.
+    let o = m.frames()[0].outer();
+    m.button(1, true, o.x + 50, o.y + o.h);
+    m.button(1, false, o.x + 50, o.y + o.h);
+    assert!(resizes(&mut m, APP).is_empty());
+}
+
+#[test]
+fn the_top_edge_keeps_the_title_bar_in_the_area() {
+    let mut m = manager();
+    let id = m.open(APP, "A", "", 400, 300).unwrap();
+    m.set_resizable(APP, id, 200, 100).unwrap();
+    let o = m.frames()[0].outer();
+    let bottom = o.y + o.h;
+    m.button(1, true, o.x + 100, o.y - 2);
+    m.pointer_moved(o.x + 100, -500);
+    m.button(1, false, o.x + 100, -500);
+    let f = &m.frames()[0];
+    assert_eq!((f.y, f.outer().y + f.outer().h), (AREA.y, bottom));
+}
+
+#[test]
+fn zoom_and_a_double_click_maximize_and_restore() {
+    let mut m = manager();
+    let id = m.open(APP, "A", "", 400, 300).unwrap();
+    m.set_resizable(APP, id, 200, 100).unwrap();
+    m.take_events(APP, 100);
+    let before = m.frames()[0].clone();
+    // The zoom button: the whole area (972 x 732 with the frame).
+    let zoom = before.zoom_button();
+    assert!(m.button(1, true, zoom.x + 5, zoom.y + 5));
+    let f = m.frames()[0].clone();
+    assert_eq!((f.x, f.y, f.width, f.height), (AREA.x, AREA.y, 970, 703));
+    assert_eq!(f.restore, Some((before.x, before.y, 400, 300)));
+    assert_eq!(resizes(&mut m, APP), [(id, 970, 703)]);
+    // A double click on the title bar puts it back.
+    let title = f.title_bar();
+    assert!(m.double_click(title.x + 200, title.y + 10));
+    let f = &m.frames()[0];
+    assert_eq!(
+        (f.x, f.y, f.width, f.height),
+        (before.x, before.y, 400, 300)
+    );
+    assert_eq!(f.restore, None);
+    assert_eq!(resizes(&mut m, APP), [(id, 400, 300)]);
+    // Not on the buttons, not inside, not on a fixed window.
+    let f = m.frames()[0].clone();
+    let close = f.close_button();
+    assert!(!m.double_click(close.x + 5, close.y + 5));
+    assert!(!m.double_click(f.content().x + 5, f.content().y + 5));
+    let fixed = m.open(OTHER, "B", "", 100, 100).unwrap();
+    let title = m.frames()[1].title_bar();
+    assert!(!m.double_click(title.x + 80, title.y + 10));
+    assert_eq!(m.frames()[1].id, fixed);
+    // A double click also ends the drag its first press began.
+    let title = m.frames()[0].title_bar();
+    m.button(1, true, title.x + 200, title.y + 10);
+    assert!(m.double_click(title.x + 200, title.y + 10));
+    assert!(!m.pointer_moved(title.x + 300, title.y + 100));
+}
+
+#[test]
+fn other_windows_pixels_bound_the_largest_size() {
+    let budget = 970 * 703 + 500 * 400;
+    let mut m = Manager::new(AREA, budget);
+    m.open(OTHER, "B", "", 900, 400).unwrap();
+    let id = m.open(APP, "A", "", 400, 300).unwrap();
+    m.set_resizable(APP, id, 200, 100).unwrap();
+    assert!(m.zoom(id));
+    let f = m.frames().last().unwrap();
+    assert_eq!(f.width, 970);
+    assert!(
+        (f.width * f.height) as usize + 900 * 400 <= budget,
+        "{}",
+        f.height
+    );
+    assert_eq!(m.size(APP, id), Ok((970, f.height as u16)));
+    assert_eq!(m.size(OTHER, id), Err(Status::NotFound));
 }

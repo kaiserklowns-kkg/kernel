@@ -31,6 +31,8 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 560;
+/// The smallest the window may be resized to (ADR-0097).
+const MIN_SIZE: (u16, u16) = (480, 320);
 const TOOLBAR: i32 = 52;
 const STATUS: i32 = 28;
 /// The keyboard's owners: the name field and the picture.
@@ -394,5 +396,7 @@ fn main(start: Start) -> i64 {
         message: String::new(),
         started: false,
     };
-    oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut app, frame)
+    oceans_ui::run_resizable(
+        &directory, "", WIDTH, HEIGHT, MIN_SIZE, None, &mut app, frame,
+    )
 }

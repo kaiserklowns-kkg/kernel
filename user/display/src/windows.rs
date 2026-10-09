@@ -16,6 +16,10 @@ use oceans_window::proto::{
 
 use super::{Service, prot, rights, say};
 
+/// What new pixels show until the app draws: the toolkit's window colour
+/// (ADR-0078).
+pub const WINDOW_COLOUR: u32 = 0x00_f6_f6_f8;
+
 /// An app with windows: its name as Core verified it, and the
 /// notification its events are signalled on.
 pub struct Owner {
@@ -32,6 +36,9 @@ pub struct Owner {
 pub struct Pixels {
     memory: Handle,
     address: *mut u8,
+    /// Their size, which a window being resized may no longer have.
+    pub width: usize,
+    pub height: usize,
 }
 
 impl Pixels {
@@ -42,6 +49,46 @@ impl Pixels {
     fn release(self) {
         let _ = oceans_rt::memory_unmap(self.address);
         let _ = oceans_rt::close(self.memory);
+    }
+}
+
+/// Pixel memory for a `width × height` window: mapped here to be read,
+/// and an end for the app to draw through. `fill` paints it first.
+fn share_pixels(width: u16, height: u16, fill: Option<u32>) -> Option<(Pixels, Handle)> {
+    let size = pixel_bytes(width, height);
+    let memory = oceans_rt::memory_create(size as u64).ok()?;
+    if let Some(colour) = fill
+        && let Ok(address) = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
+    {
+        // SAFETY: mapped, and `size` bytes large: `size / 4` pixels.
+        unsafe { core::slice::from_raw_parts_mut(address.cast::<u32>(), size / 4) }.fill(colour);
+        let _ = oceans_rt::memory_unmap(address);
+    }
+    let mapped = oceans_rt::memory_map(memory, 0, prot::READ);
+    let theirs = oceans_rt::duplicate(
+        memory,
+        rights::READ | rights::WRITE | rights::MAP | rights::TRANSFER,
+    );
+    match (mapped, theirs) {
+        (Ok(address), Ok(theirs)) => Some((
+            Pixels {
+                memory,
+                address,
+                width: usize::from(width),
+                height: usize::from(height),
+            },
+            theirs,
+        )),
+        (mapped, theirs) => {
+            if let Ok(address) = mapped {
+                let _ = oceans_rt::memory_unmap(address);
+            }
+            if let Ok(theirs) = theirs {
+                let _ = oceans_rt::close(theirs);
+            }
+            let _ = oceans_rt::close(memory);
+            None
+        }
     }
 }
 
@@ -154,6 +201,26 @@ impl Service {
                     self.notify(got.badge, data)
                 }
                 op::COPY => (self.copy(got.badge, data, handles), false),
+                op::RESIZABLE => {
+                    close_all(handles);
+                    let parsed = window_of(data).zip(data.get(4..8));
+                    match parsed {
+                        Some((id, size)) => {
+                            let w = u16::from_le_bytes([size[0], size[1]]);
+                            let h = u16::from_le_bytes([size[2], size[3]]);
+                            match self.windows.set_resizable(got.badge, id, w, h) {
+                                // The zoom button lights up.
+                                Ok(()) => (Status::Ok, true),
+                                Err(status) => (status, false),
+                            }
+                        }
+                        None => (Status::BadRequest, false),
+                    }
+                }
+                op::RESIZE => {
+                    close_all(handles);
+                    return self.resize(got.badge, data);
+                }
                 op::PASTE => {
                     close_all(handles);
                     self.paste(got.badge);
@@ -233,28 +300,7 @@ impl Service {
             Ok(id) => id,
             Err(status) => return refuse(status),
         };
-        let size = pixel_bytes(request.width, request.height) as u64;
-        let shared = oceans_rt::memory_create(size).ok().and_then(|memory| {
-            let mapped = oceans_rt::memory_map(memory, 0, prot::READ);
-            let theirs = oceans_rt::duplicate(
-                memory,
-                rights::READ | rights::WRITE | rights::MAP | rights::TRANSFER,
-            );
-            match (mapped, theirs) {
-                (Ok(address), Ok(theirs)) => Some((Pixels { memory, address }, theirs)),
-                (mapped, theirs) => {
-                    if let Ok(address) = mapped {
-                        let _ = oceans_rt::memory_unmap(address);
-                    }
-                    if let Ok(theirs) = theirs {
-                        let _ = oceans_rt::close(theirs);
-                    }
-                    let _ = oceans_rt::close(memory);
-                    None
-                }
-            }
-        });
-        let Some((pixels, theirs)) = shared else {
+        let Some((pixels, theirs)) = share_pixels(request.width, request.height, None) else {
             let _ = self.windows.close(badge, id);
             return refuse(Status::NoMemory);
         };
@@ -271,6 +317,43 @@ impl Service {
         {
             let _ = oceans_rt::close(old);
         }
+        true
+    }
+
+    /// `RESIZE` (ADR-0097): new pixels at the window's size now, painted in
+    /// the windows' colour until the app draws; the old ones go. `true`
+    /// if the screen must change.
+    fn resize(&mut self, badge: u64, data: &[u8]) -> bool {
+        let reply = |status: Status| {
+            let _ = oceans_rt::ipc_reply_msg(status as u64, &[], &[]);
+            false
+        };
+        let Some(id) = window_of(data) else {
+            return reply(Status::BadRequest);
+        };
+        let (width, height) = match self.windows.size(badge, id) {
+            Ok(size) => size,
+            Err(status) => return reply(status),
+        };
+        let Some((pixels, theirs)) = share_pixels(width, height, Some(WINDOW_COLOUR)) else {
+            return reply(Status::NoMemory);
+        };
+        let mut size = [0u8; 4];
+        size[..2].copy_from_slice(&width.to_le_bytes());
+        size[2..].copy_from_slice(&height.to_le_bytes());
+        if oceans_rt::ipc_reply_msg(Status::Ok as u64, &size, &[theirs]).is_err() {
+            let _ = oceans_rt::close(theirs);
+            pixels.release();
+            return false;
+        }
+        if let Some(old) = self.pixels.insert(id, pixels) {
+            old.release();
+        }
+        let app = self.owners.get(&badge).map_or("?", |o| o.app.as_str());
+        say(
+            self.log,
+            format_args!("display: {app}'s window resized to {width}x{height}"),
+        );
         true
     }
 

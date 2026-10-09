@@ -4,7 +4,7 @@
 # image.
 id = app.oceans.files
 name = Files
-version = 1.0.1
+version = 1.0.2
 publisher = {{PUBLISHER}}
 description = Your files: folders, a look inside, new folders and deleting
 architecture = x86_64

@@ -24,6 +24,8 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 640;
 const HEIGHT: u16 = 520;
+/// The smallest the window may be resized to (ADR-0097).
+const MIN_SIZE: (u16, u16) = (480, 380);
 const MAX_PROCESSES: usize = 256;
 
 struct Process {
@@ -202,11 +204,12 @@ fn main(start: Start) -> i64 {
     let mut activity = Activity {
         sysinfo: directory.find("sysinfo", "sysinfo"),
     };
-    oceans_ui::run_ticking(
+    oceans_ui::run_resizable(
         &directory,
         "",
         WIDTH,
         HEIGHT,
+        MIN_SIZE,
         Some(1000),
         &mut activity,
         frame,

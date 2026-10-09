@@ -104,5 +104,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0094](0094-music-and-sound-for-apps.md) | Music, and sound for apps: a player end that plays and cannot record | Accepted |
 | [0095](0095-clipboard.md) | The clipboard: copied while focused, pasted only where the user pastes | Accepted |
 | [0096](0096-settings-network-and-sound.md) | Settings: the network and the sound, through reader ends | Accepted |
+| [0097](0097-resizing-windows.md) | Resizing and maximizing windows: edges, the zoom button, a double click; apps that ask | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.
