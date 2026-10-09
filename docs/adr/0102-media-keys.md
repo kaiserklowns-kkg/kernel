@@ -63,7 +63,6 @@ driver):
 - **Not yet:**
   - other consumer controls (browser keys, calculator, brightness);
   - consumer controls inside the pointer's interface (some mice);
-  - "now playing" shown by the desktop;
   - QEMU has no USB keyboard with consumer controls, and its USB
     keyboard sends no media keys: the descriptor reading is covered by
     host tests of real descriptors' shapes, and a real keyboard is still

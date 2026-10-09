@@ -78,7 +78,8 @@ the folder), or the one selected when stopped.
     titles are checked; stopped with no title hides it; the player shown
     follows the keys, and windows closing; the buttons press its keys;
   - smoke: with Music playing, the speaker opens the panel with Music's
-    song and a Play button; Play reaches Music, as the desktop logs.
+    song and a Play button; Next reaches Music, as the desktop logs (Play
+    would play the song again, which the sound check counts).
 - **Failure behaviour:**
   - **A bad report:** refused (`BadRequest`, `NotAllowed`); the panel shows
     what it showed.
