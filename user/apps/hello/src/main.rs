@@ -92,8 +92,11 @@ fn count_run(storage: &Node) -> Result<u64, &'static str> {
             + 1;
         let mut line = oceans_rt::Buffer::<24>::new();
         let _ = writeln!(line, "{runs}");
-        file.truncate(0)
-            .and_then(|()| file.write_all(0, line.as_bytes()))
+        // Written over the old count, then cut to length: stopped midway
+        // (an app can be stopped at any moment), the file still holds a
+        // count, never nothing. The new count is never shorter.
+        file.write_all(0, line.as_bytes())
+            .and_then(|()| file.truncate(line.as_bytes().len() as u64))
             .and_then(|()| file.sync())
             .map_err(|e| e.message())?;
         Ok(runs)
