@@ -595,3 +595,45 @@ fn other_windows_pixels_bound_the_largest_size() {
     assert_eq!(m.size(APP, id), Ok((970, f.height as u16)));
     assert_eq!(m.size(OTHER, id), Err(Status::NotFound));
 }
+
+#[test]
+fn opening_a_file_follows_the_users_input_like_copying() {
+    let mut m = manager();
+    let a = m.open(APP, "A", "", 100, 100).unwrap();
+    assert_eq!(m.take_open(APP), Err(Status::NotAllowed));
+    m.key(b'\r');
+    assert_eq!(m.take_open(APP), Ok(()));
+    assert_eq!(m.take_open(APP), Err(Status::NotAllowed));
+    // A click allows one more; the other app none, focus moving ends it.
+    let content = m.frames()[0].content();
+    m.button(1, true, content.x + 5, content.y + 5);
+    m.open(OTHER, "B", "", 100, 100).unwrap();
+    m.set_focus(Focus::Window(a));
+    assert_eq!(m.take_open(APP), Err(Status::NotAllowed));
+    assert_eq!(m.take_open(OTHER), Err(Status::NotAllowed));
+    // Copying and opening are allowed apart.
+    m.key(b'x');
+    m.copy(APP, b"text").unwrap();
+    assert_eq!(m.take_open(APP), Ok(()));
+}
+
+#[test]
+fn names_to_open_stay_in_home() {
+    for good in ["notes.txt", "folder/picture.png", "ไทย.txt", "a b.md"] {
+        assert_eq!(proto::open_name(good.as_bytes()), Some(good), "{good}");
+    }
+    for bad in [
+        &b""[..],
+        b"/etc/passwd",
+        b"../keep/x",
+        b"a/../b",
+        b"a//b",
+        b"./a",
+        b"a/",
+        b"line\nbreak",
+        &[0xff],
+    ] {
+        assert_eq!(proto::open_name(bad), None, "{bad:?}");
+    }
+    assert!(proto::open_name(&[b'a'; proto::MAX_OPEN_NAME + 1]).is_none());
+}

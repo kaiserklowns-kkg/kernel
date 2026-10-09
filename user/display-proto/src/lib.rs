@@ -276,3 +276,56 @@ pub fn paste<T>(windows: Handle, take: impl FnOnce(&str) -> T) -> Result<T, Wind
     let _ = oceans_rt::memory_unmap(address);
     result
 }
+
+/// Opens the file `name` (in Home: `folder/file.txt`) in the app with id
+/// `app`, or in the one that opens its kind first (ADR-0099). Only in
+/// answer to the user's key or click (`Refused(NotAllowed)` otherwise);
+/// `Refused(NotFound)` when no app (or not that one) opens it.
+pub fn open_file(windows: Handle, app: Option<&str>, name: &str) -> Result<(), WindowError> {
+    let app = app.unwrap_or("");
+    let mut data = [0u8; 1 + 64 + proto::MAX_OPEN_NAME];
+    if app.len() > 64 || name.len() > proto::MAX_OPEN_NAME {
+        return Err(WindowError::Refused(Status::BadRequest));
+    }
+    data[0] = app.len() as u8;
+    data[1..1 + app.len()].copy_from_slice(app.as_bytes());
+    let end = 1 + app.len() + name.len();
+    data[1 + app.len()..end].copy_from_slice(name.as_bytes());
+    let got = oceans_rt::ipc_call_msg(windows, op::OPEN_FILE, &data[..end], &[], &mut [], &mut [])
+        .map_err(WindowError::Ipc)?;
+    match Status::from_label(got.label) {
+        Status::Ok => Ok(()),
+        status => Err(WindowError::Refused(status)),
+    }
+}
+
+/// The apps that open files like `name` (ADR-0099): `each(id, name)` for
+/// each, the one [`open_file`] would choose first.
+pub fn openers(
+    windows: Handle,
+    name: &str,
+    mut each: impl FnMut(&str, &str),
+) -> Result<(), WindowError> {
+    let mut reply = [0u8; 256];
+    let got = oceans_rt::ipc_call_msg(
+        windows,
+        op::OPENERS,
+        name.as_bytes(),
+        &[],
+        &mut reply,
+        &mut [],
+    )
+    .map_err(WindowError::Ipc)?;
+    match Status::from_label(got.label) {
+        Status::Ok => {}
+        status => return Err(WindowError::Refused(status)),
+    }
+    let text = core::str::from_utf8(&reply[..got.data_len.min(reply.len())]).unwrap_or("");
+    let mut parts = text.split('\0');
+    while let (Some(id), Some(app)) = (parts.next(), parts.next()) {
+        if !id.is_empty() {
+            each(id, app);
+        }
+    }
+    Ok(())
+}

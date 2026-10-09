@@ -4,7 +4,7 @@
 # image.
 id = app.oceans.editor
 name = Text Editor
-version = 1.0.2
+version = 1.0.3
 publisher = {{PUBLISHER}}
 description = Plain text files: open, change and save them
 architecture = x86_64
@@ -12,4 +12,6 @@ api = 1
 entry = editor
 permission = window
 permission = files: open and save your text files
+# The files it opens from Files (ADR-0099): plain text.
+opens = txt md log csv json toml ini conf cfg rs go sh
 source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/editor

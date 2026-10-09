@@ -207,6 +207,9 @@ pub mod field {
     /// `native`, or `wasm` for a WebAssembly program run by the Go host
     /// (ADR-0052).
     pub const RUNTIME: u8 = 10;
+    /// The kinds of file it opens, as extensions separated by spaces (ADR-0099);
+    /// empty for none.
+    pub const OPENS: u8 = 11;
 }
 
 /// Who made a `DECIDE` decision (kept in the audit log).

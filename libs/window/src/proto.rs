@@ -63,6 +63,16 @@ pub mod op {
     /// data = `[width u16][height u16]`, handles = `[pixels]`: new pixels
     /// at the window's size now, which replace the old ones.
     pub const RESIZE: u64 = 9;
+    /// data = `[app id length u8][app id][name]`: opens the file `name`
+    /// (in Home, as `folder/file.txt`) in the app with that id, or in the
+    /// first app that opens its kind when the id is empty (ADR-0099). Once
+    /// for each key or click the user gave the caller's focused window
+    /// (`NotAllowed` otherwise); `NotFound` when no app (or not that one)
+    /// opens it.
+    pub const OPEN_FILE: u64 = 10;
+    /// data = `name` → `ID\0NAME\0` for each app that opens it, the one
+    /// `OPEN_FILE` would choose first (ADR-0099).
+    pub const OPENERS: u64 = 11;
 }
 
 /// The most text the clipboard holds, in bytes.
@@ -263,3 +273,20 @@ impl<'a> OpenRequest<'a> {
 pub fn pixel_bytes(width: u16, height: u16) -> usize {
     usize::from(width) * usize::from(height) * 4
 }
+
+/// A file name `OPEN_FILE` accepts (ADR-0099): a path inside Home, of
+/// 1 to [`MAX_OPEN_NAME`] bytes, its parts separated by `/`, none empty,
+/// `.` or `..`, with no control characters.
+pub fn open_name(data: &[u8]) -> Option<&str> {
+    let name = core::str::from_utf8(data).ok()?;
+    let ok = !name.is_empty()
+        && name.len() <= MAX_OPEN_NAME
+        && !name.chars().any(char::is_control)
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    ok.then_some(name)
+}
+
+/// Longest name `OPEN_FILE` takes, in bytes.
+pub const MAX_OPEN_NAME: usize = 200;

@@ -5,6 +5,8 @@
 //! - A file's name (in Home; `folder/name.txt` for one in a folder), Open
 //!   and Save; New for an empty page. Ctrl+S saves too; a page never named
 //!   is saved as `untitled.txt`.
+//! - Started with a name (`app start app.oceans.editor NAME`, or a file
+//!   opened from Files, ADR-0099), it opens that file.
 //! - The arrows, Home, End, Page Up and Down move; Delete and Backspace
 //!   delete; a click puts the cursor.
 //! - Shift with a moving key, a drag or Ctrl+A selects; Ctrl+C, Ctrl+X
@@ -199,6 +201,10 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
     if !app.started {
         app.started = true;
         *ui.focus = Some(PAGE);
+        // Started with a file's name (opened from Files, ADR-0099): it.
+        if !app.name.is_empty() {
+            app.open();
+        }
     }
     ui.background(colour::WINDOW);
     let whole = ui.area;
@@ -402,7 +408,7 @@ fn main(start: Start) -> i64 {
     let mut app = TextEditor {
         home: directory.find("use", "files").map(Node),
         editor: Editor::new(LIMIT),
-        name: String::new(),
+        name: String::from(directory.args().trim()),
         top: 0,
         left: 0,
         message: String::new(),

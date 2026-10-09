@@ -24,6 +24,9 @@
 //! - **the clipboard** (ADR-0095): text an app copies while it has the
 //!   focus, pasted only where the user pastes (Ctrl+V in a window,
 //!   Ctrl+Shift+V there and in the Terminal, a line at a time);
+//! - **opening files** (ADR-0099): an app asks, after the user's key or
+//!   click, to open a file of Home; it starts in the app that opens its
+//!   kind (the system's own first) or the one the user chose;
 //! - notifications;
 //! - **permission dialogs**: when an app needs a decision, the desktop
 //!   asks, in the system's words, and sends the answer to Core
@@ -111,6 +114,9 @@ struct Service {
     /// The last press of the main button: when and where (a double click
     /// maximizes, ADR-0097).
     last_press: Option<(u64, i32, i32)>,
+    /// What the app being asked about is started with once the user has
+    /// answered (a file to open, ADR-0099).
+    pending_args: String,
 }
 
 fn main(start: Start) -> i64 {
@@ -202,6 +208,7 @@ fn main(start: Start) -> i64 {
         },
         pending: Vec::new(),
         last_press: None,
+        pending_args: String::new(),
         text_capacity: 16 + info.cols as usize * info.rows as usize,
         console,
         windows: Manager::new(area, 2 * screen_pixels),
@@ -450,7 +457,7 @@ impl Service {
             Hit::StartApp(index) => {
                 self.desktop.start_open = false;
                 let id = self.desktop.apps[index].id.clone();
-                self.launch(&id);
+                self.launch(&id, "");
                 true
             }
             Hit::Restart | Hit::ShutDown => {
@@ -531,14 +538,16 @@ impl Service {
     }
 
     /// Starts an app in the background; asks first if it needs decisions.
-    fn launch(&mut self, id: &str) {
+    /// Starts app `id`, with `args` (a file to open, ADR-0099).
+    fn launch(&mut self, id: &str, args: &str) {
         let Some(core) = self.core else {
             return self.toast("This desktop cannot start apps".to_string(), true);
         };
-        let mut data = Vec::with_capacity(2 + id.len());
+        let mut data = Vec::with_capacity(2 + id.len() + args.len());
         data.push(run_flags::DETACH);
         data.push(id.len() as u8);
         data.extend_from_slice(id.as_bytes());
+        data.extend_from_slice(args.as_bytes());
         let mut reply = [0u8; 64];
         match core.call(op::RUN, &data, &[], &mut reply) {
             Ok(_) => {
@@ -547,7 +556,11 @@ impl Service {
                 self.toast(alloc::format!("Started {name}"), false);
                 self.refresh_apps();
             }
-            Err((CoreError::Status(Status::NeedsConsent), _)) => self.ask(core, id),
+            Err((CoreError::Status(Status::NeedsConsent), _)) => {
+                // Asked first; started with the same arguments after.
+                self.pending_args = String::from(args);
+                self.ask(core, id)
+            }
             Err((error, _)) => {
                 say(self.log, format_args!("desktop: {id}: {}", error.message()));
                 self.toast(
@@ -589,7 +602,8 @@ impl Service {
         let Some((permission, reason)) = self.pending.pop() else {
             self.desktop.dialog = None;
             // Every question answered: start it with what was allowed.
-            return self.launch(id);
+            let args = core::mem::take(&mut self.pending_args);
+            return self.launch(id, &args);
         };
         let Some(&catalog) = Permission::ALL.get(usize::from(permission)) else {
             return self.next_question(core, id);

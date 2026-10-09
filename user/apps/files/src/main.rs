@@ -1,8 +1,10 @@
 //! Files: the user's files (`/home`), an app that comes with the system
 //! (ADR-0080, ADR-0082), on the app toolkit.
 //!
-//! - Folders and files, folders first; a click selects, a second click on
-//!   the selection opens it (a folder) or shows it (a text file).
+//! - Folders and files, folders first; a click selects (and shows the
+//!   start of a text file), a second click opens it: into a folder, or a
+//!   file in the app that opens its kind. Open does that too; Open with…
+//!   lists the apps that open it, to choose one (ADR-0099).
 //! - Back goes up a folder; the path shows where you are.
 //! - New folder; Delete, after a confirmation (a folder with what is in
 //!   it).
@@ -52,6 +54,9 @@ struct Files {
     confirm_delete: bool,
     message: String,
     stale: bool,
+    /// The apps that open the selected file, while the user chooses one
+    /// (Open with…, ADR-0099).
+    choosing: Option<Vec<(String, String)>>,
 }
 
 /// `/home/a/b` as the toolkit's path, from the folders.
@@ -150,8 +155,9 @@ impl Files {
         self.entries = entries;
     }
 
-    /// Opens entry `index`: into a folder, or a file's preview.
-    fn open(&mut self, index: usize) {
+    /// Opens entry `index`: into a folder, or a file in the app that opens
+    /// its kind (ADR-0099).
+    fn open(&mut self, ui: &Ui<'_, '_>, index: usize, app: Option<&str>) {
         let Some(entry) = self.entries.get(index) else {
             return;
         };
@@ -160,6 +166,27 @@ impl Files {
             self.stale = true;
             return;
         }
+        let name = self.home_name(&entry.name);
+        self.message = match ui.open_file(app, &name) {
+            Ok(()) => alloc::format!("Opening {}…", entry.name),
+            Err(why) => String::from(why),
+        };
+    }
+
+    /// `name` in the folder shown, as Home names it (`folder/name`).
+    fn home_name(&self, name: &str) -> String {
+        if self.path.is_empty() {
+            String::from(name)
+        } else {
+            alloc::format!("{}/{name}", joined(&self.path))
+        }
+    }
+
+    /// Shows the start of file `index` (a text file) beside the list.
+    fn show(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index).filter(|e| !e.folder) else {
+            return;
+        };
         let name = entry.name.clone();
         self.preview = Some(match self.read_start(&name) {
             Some(bytes) => match core::str::from_utf8(&bytes) {
@@ -331,14 +358,16 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
         .collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     if let Some(index) = ui.list(&names, files.selected) {
+        files.message.clear();
+        files.choosing = None;
         if files.selected == Some(index) {
-            files.open(index);
+            files.open(ui, index, None);
         } else {
             files.selected = Some(index);
             files.preview = None;
             files.confirm_delete = false;
+            files.show(index);
         }
-        files.message.clear();
     }
     if files.entries.is_empty() {
         ui.muted("This folder is empty.");
@@ -354,12 +383,12 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
         whole.h - top - 12,
     );
     ui.surface.round_fill(side, 10, colour::SURFACE);
-    match (
-        &files.preview,
-        files.selected.and_then(|i| files.entries.get(i)),
-    ) {
-        (Some(text), Some(entry)) => {
-            let clip = Rect::new(side.x + 14, side.y + 10, side.w - 28, side.h - 20);
+    let clip = Rect::new(side.x + 14, side.y + 10, side.w - 28, side.h - 20);
+    match files
+        .selected
+        .and_then(|i| files.entries.get(i).map(|e| (i, e)))
+    {
+        Some((_, entry)) if entry.folder => {
             ui.text_at(
                 clip.x,
                 clip.y,
@@ -368,7 +397,45 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                 colour::TEXT,
                 clip,
             );
+            let hint = "Click again to open the folder.";
+            ui.text_at(clip.x, clip.y + 28, hint, Style::Body, colour::MUTED, clip);
+        }
+        Some((index, entry)) => {
+            let name = entry.name.clone();
+            ui.text_at(clip.x, clip.y, &name, Style::Strong, colour::TEXT, clip);
+            // Open (in the app for its kind) and Open with… (ADR-0099).
             let mut y = clip.y + 28;
+            if ui.button_in(Rect::new(clip.x, y, 80, 30), "Open", true) {
+                files.choosing = None;
+                files.open(ui, index, None);
+            }
+            if ui.button_in(Rect::new(clip.x + 90, y, 120, 30), "Open with…", false) {
+                files.choosing = match files.choosing {
+                    Some(_) => None,
+                    None => Some(ui.openers(&files.home_name(&name))),
+                };
+            }
+            y += 40;
+            let mut chosen = None;
+            if let Some(apps) = &files.choosing {
+                if apps.is_empty() {
+                    let none = "No app opens this kind of file.";
+                    ui.text_at(clip.x, y, none, Style::Body, colour::MUTED, clip);
+                    y += 26;
+                }
+                for (id, app) in apps {
+                    if ui.button_in(Rect::new(clip.x, y, 240, 30), app, false) {
+                        chosen = Some(id.clone());
+                    }
+                    y += 36;
+                }
+                y += 4;
+            }
+            if let Some(id) = chosen {
+                files.choosing = None;
+                files.open(ui, index, Some(&id));
+            }
+            let text = files.preview.as_deref().unwrap_or("");
             for line in text.lines() {
                 if y + 18 > clip.y + clip.h {
                     break;
@@ -377,24 +444,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                 y += 20;
             }
         }
-        (None, Some(entry)) => {
-            let clip = Rect::new(side.x + 14, side.y + 10, side.w - 28, side.h - 20);
-            ui.text_at(
-                clip.x,
-                clip.y,
-                &entry.name,
-                Style::Strong,
-                colour::TEXT,
-                clip,
-            );
-            let hint = if entry.folder {
-                "Click again to open the folder."
-            } else {
-                "Click again to show the file."
-            };
-            ui.text_at(clip.x, clip.y + 28, hint, Style::Body, colour::MUTED, clip);
-        }
-        _ => {
+        None => {
             let clip = Rect::new(side.x + 14, side.y + 10, side.w - 28, side.h - 20);
             ui.text_at(
                 clip.x,
@@ -423,6 +473,7 @@ fn main(start: Start) -> i64 {
         confirm_delete: false,
         message: String::new(),
         stale: true,
+        choosing: None,
     };
     oceans_ui::run_resizable(
         &directory, "", WIDTH, HEIGHT, MIN_SIZE, None, &mut files, frame,

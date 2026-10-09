@@ -529,3 +529,65 @@ fn dated_trust_lines_expire() {
     assert_eq!(trust_entries(&bad).count(), 0);
     assert_eq!(trust_errors(&bad), 1);
 }
+
+const OPENER: &str = "\
+id = app.example.reader
+name = Reader
+version = 1.0.0
+publisher = Example
+architecture = x86_64
+api = 1
+entry = reader
+permission = window
+permission = files
+";
+
+#[test]
+fn apps_say_which_files_they_open() {
+    let manifest_text = format!("{OPENER}opens = txt md 7z\n");
+    let manifest = Manifest::parse(&manifest_text).unwrap();
+    assert_eq!(manifest.opens().collect::<Vec<_>>(), ["txt", "md", "7z"]);
+    for (name, opens) in [
+        ("notes.txt", true),
+        ("folder/README.MD", true),
+        ("a.tar.7z", true),
+        ("picture.png", false),
+        ("txt", false),
+        (".txt", false),
+        ("folder.txt/name", false),
+        ("trailing.", false),
+    ] {
+        assert_eq!(manifest.opens_file(name), opens, "{name}");
+    }
+    // Without the key: nothing.
+    let none = Manifest::parse(OPENER).unwrap();
+    assert_eq!(none.opens().count(), 0);
+    assert!(!none.opens_file("notes.txt"));
+    assert_eq!(extension("a/b.c/d.png"), Some("png"));
+}
+
+#[test]
+fn bad_opens_are_refused() {
+    let many: Vec<String> = (0..=MAX_OPENS).map(|i| format!("x{i}")).collect();
+    for kinds in [
+        "",
+        "TXT",
+        ".txt",
+        "t-x",
+        "txt txt",
+        "abcdefghijk",
+        &many.join(" "),
+    ] {
+        let text = format!("{OPENER}opens = {kinds}\n");
+        assert!(Manifest::parse(&text).is_err(), "{kinds}");
+    }
+    // Twice.
+    assert!(Manifest::parse(&format!("{OPENER}opens = txt\nopens = md\n")).is_err());
+    // Only an app with a window and the user's files opens files.
+    for drop in ["permission = window\n", "permission = files\n"] {
+        let text = format!("{}opens = txt\n", OPENER.replace(drop, ""));
+        assert!(Manifest::parse(&text).is_err(), "{drop}");
+    }
+    let service = format!("{OPENER}opens = txt\nkind = service\n");
+    assert!(Manifest::parse(&service).is_err());
+}

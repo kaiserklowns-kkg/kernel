@@ -4,7 +4,7 @@
 # image.
 id = app.oceans.viewer
 name = Image Viewer
-version = 1.0.2
+version = 1.0.3
 publisher = {{PUBLISHER}}
 description = PNG and BMP pictures: look at them, one after another
 architecture = x86_64
@@ -12,4 +12,6 @@ api = 1
 entry = viewer
 permission = window
 permission = files: open your pictures
+# The files it opens from Files (ADR-0099).
+opens = png bmp
 source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/viewer

@@ -7,11 +7,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use oceans_core_proto::{display_grant, op as core_op, parts};
+use oceans_core_proto::{display_grant, field, op as core_op, parts};
 use oceans_rt::{Handle, Received};
 use oceans_window::proto::{
     Event, MAX_CLIPBOARD, MAX_EVENTS, NOTIFY_INTERVAL_MS, OpenRequest, Status, notification_text,
-    op, pixel_bytes,
+    op, open_name, pixel_bytes,
 };
 
 use super::{Service, prot, rights, say};
@@ -19,6 +19,12 @@ use super::{Service, prot, rights, say};
 /// What new pixels show until the app draws: the toolkit's window colour
 /// (ADR-0078).
 pub const WINDOW_COLOUR: u32 = 0x00_f6_f6_f8;
+
+/// An `OPENERS` reply: what one inline message carries.
+const OPENERS_REPLY: usize = 256;
+/// The ids of the apps that come with the system: a file opens in one of
+/// them before any other (ADR-0099).
+const SYSTEM_APPS: &str = "app.oceans.";
 
 /// An app with windows: its name as Core verified it, and the
 /// notification its events are signalled on.
@@ -221,6 +227,27 @@ impl Service {
                     close_all(handles);
                     return self.resize(got.badge, data);
                 }
+                op::OPEN_FILE => {
+                    close_all(handles);
+                    self.open_file(got.badge, data)
+                }
+                op::OPENERS => {
+                    close_all(handles);
+                    let Some(name) = open_name(data) else {
+                        let _ = oceans_rt::ipc_reply_msg(Status::BadRequest as u64, &[], &[]);
+                        return false;
+                    };
+                    let mut reply = Vec::new();
+                    for (id, app) in self.openers(name) {
+                        let entry = alloc::format!("{id}\0{app}\0");
+                        if reply.len() + entry.len() > OPENERS_REPLY {
+                            break;
+                        }
+                        reply.extend_from_slice(entry.as_bytes());
+                    }
+                    let _ = oceans_rt::ipc_reply_msg(Status::Ok as u64, &reply, &[]);
+                    return false;
+                }
                 op::PASTE => {
                     close_all(handles);
                     self.paste(got.badge);
@@ -318,6 +345,74 @@ impl Service {
             let _ = oceans_rt::close(old);
         }
         true
+    }
+
+    /// The installed apps that open files like `name` (ADR-0099), as id and
+    /// name: the system's own first, then the others in Core's order. The
+    /// first is the one a file opens in unless the user chooses.
+    pub(crate) fn openers(&self, name: &str) -> Vec<(String, String)> {
+        let (Some(core), Some(kind)) = (self.core, oceans_package::extension(name)) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, String)> = Vec::new();
+        let mut reply = [0u8; 256];
+        for app in &self.desktop.apps {
+            let Ok(got) = core.about(core_op::INFO, &[field::OPENS], &app.id, &mut reply) else {
+                continue;
+            };
+            let kinds = core::str::from_utf8(&reply[..got.len]).unwrap_or("");
+            if kinds
+                .split_ascii_whitespace()
+                .any(|k| k.eq_ignore_ascii_case(kind))
+            {
+                found.push((app.id.clone(), app.name.clone()));
+            }
+        }
+        // Stable: the system's own apps keep Core's order among them.
+        found.sort_by_key(|(id, _)| !id.starts_with(SYSTEM_APPS));
+        found
+    }
+
+    /// `OPEN_FILE` (ADR-0099): the file in the app chosen, or the first
+    /// that opens it, started with its name; once per key or click the
+    /// user gave the caller.
+    fn open_file(&mut self, badge: u64, data: &[u8]) -> (Status, bool) {
+        let Some((&len, rest)) = data.split_first() else {
+            return (Status::BadRequest, false);
+        };
+        let len = usize::from(len);
+        let (Some(chosen), Some(name)) = (
+            rest.get(..len).and_then(|id| core::str::from_utf8(id).ok()),
+            rest.get(len..).and_then(open_name),
+        ) else {
+            return (Status::BadRequest, false);
+        };
+        if let Err(status) = self.windows.take_open(badge) {
+            return (status, false);
+        }
+        let openers = self.openers(name);
+        let app = if chosen.is_empty() {
+            openers.first()
+        } else {
+            openers.iter().find(|(id, _)| id == chosen)
+        };
+        let Some((id, _)) = app.cloned() else {
+            return (Status::NotFound, false);
+        };
+        let from = self.owners.get(&badge).map_or("?", |o| o.app.as_str());
+        say(
+            self.log,
+            format_args!(
+                "desktop: opening {name} with {id} ({}), for {from}",
+                if chosen.is_empty() {
+                    "the default"
+                } else {
+                    "chosen"
+                }
+            ),
+        );
+        self.launch(&id, name);
+        (Status::Ok, true)
     }
 
     /// `RESIZE` (ADR-0097): new pixels at the window's size now, painted in

@@ -496,7 +496,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move -200 0",
     b"@monitor mouse_button 0",
     b"@screen 1000 499 ffffff Text Editor narrower, its page laid out again",
-    b"@monitor device_del deskmouse",
+    // The mouse stays for opening a file from Files (ADR-0099), at 1014,400.
     b"@monitor sendkey ctrl-s",
     b"app stop app.oceans.editor\r\n",
     b"cat /home/untitled.txt\r\n",
@@ -523,6 +523,34 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 342 225 2f7cf6 Music playing",
     b"@screen 342 225 d8d8de Music at the end of its list",
     b"app stop app.oceans.music\r\n",
+    // Opening files (ADR-0099): Files, the tenth window (content from
+    // 292,169), lists Home: notes.txt, picture.png, tone.wav,
+    // untitled.txt. A click on picture.png (the second row, 404,283)
+    // selects it, a second opens it in the app for PNG pictures: Image
+    // Viewer, the eleventh window (content from 324,159), its picture
+    // orange at 640,451. Then Open with… (832,286) lists the apps that
+    // open it; the first, Image Viewer (802,326), opens it again in the
+    // twelfth window (content from 356,159).
+    b"app start app.oceans.files\r\n",
+    b"@screen 692 174 e9e9ee Files' toolbar, a tenth window",
+    b"@monitor mouse_move -610 -117",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 622 283 d4e3fc Files' picture.png, selected",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 640 451 e8613c picture.png opened from Files in Image Viewer",
+    b"app stop app.oceans.viewer\r\n",
+    b"@monitor mouse_move 428 3",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move -30 40",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 672 451 e8613c picture.png opened with Image Viewer, chosen",
+    b"app stop app.oceans.viewer\r\n",
+    b"app stop app.oceans.files\r\n",
+    b"@monitor device_del deskmouse",
     // Third-party apps built with the SDK (ADR-0062, ADR-0063): refused
     // until the developer's key is trusted at the console; then the Rust
     // app and the Go app install and run.
@@ -916,6 +944,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("display: Text Editor's window resized to 1024x663"),
     Expect::Contains("display: Text Editor's window resized to 760x520"),
     Expect::Contains("display: Text Editor's window resized to 560x520"),
+    // Opening files (ADR-0099): from Files, in the default app for PNG,
+    // then in the one chosen; started with the file's name.
+    Expect::Contains(
+        "desktop: opening picture.png with app.oceans.viewer (the default), for Files",
+    ),
+    Expect::Contains("desktop: opening picture.png with app.oceans.viewer (chosen), for Files"),
     Expect::Line("pasted edited in oceans"),
     Expect::Contains("core: installed editor.opk from the system image"),
     Expect::Contains("core: installed viewer.opk from the system image"),

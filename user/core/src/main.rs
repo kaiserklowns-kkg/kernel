@@ -154,6 +154,8 @@ struct App {
     service: bool,
     /// How its program runs (ADR-0052).
     runtime: Runtime,
+    /// The kinds of file it opens (ADR-0099), as the manifest lists them.
+    opens: String,
 }
 
 impl App {
@@ -174,6 +176,7 @@ impl App {
             previous,
             service: manifest.service,
             runtime: manifest.runtime,
+            opens: manifest.opens().collect::<Vec<_>>().join(" "),
         }
     }
 
@@ -1434,6 +1437,7 @@ impl Core {
                 (true, true) => "service, enabled (starts at boot)",
             }),
             field::RUNTIME => text.write_str(app.runtime.name()),
+            field::OPENS => text.write_str(&app.opens),
             _ => return Err(Status::BadRequest.into()),
         };
         Ok(())

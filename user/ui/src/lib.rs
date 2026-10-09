@@ -78,6 +78,8 @@ pub struct Ui<'s, 'f> {
     pub changed: bool,
     /// Text to put on the clipboard after this frame ([`Ui::copy`]).
     pub copied: Option<String>,
+    /// The window end, for opening files (ADR-0099); `None` off a window.
+    pub windows: Option<oceans_rt::Handle>,
 }
 
 /// The most a text field holds, in bytes.
@@ -105,7 +107,33 @@ impl<'s, 'f> Ui<'s, 'f> {
             focus,
             changed: false,
             copied: None,
+            windows: None,
         }
+    }
+
+    /// The apps that open files like `name` (ADR-0099), as id and name, the
+    /// one [`Ui::open_file`] would choose first.
+    pub fn openers(&self, name: &str) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        if let Some(windows) = self.windows {
+            let _ = oceans_display_proto::openers(windows, name, |id, app| {
+                found.push((String::from(id), String::from(app)));
+            });
+        }
+        found
+    }
+
+    /// Opens the file `name` of Home in the app `app`, or in the one that
+    /// opens its kind (ADR-0099). Call it for the user's click or key: the
+    /// system refuses an open the user did not ask for.
+    pub fn open_file(&self, app: Option<&str>, name: &str) -> Result<(), &'static str> {
+        let windows = self.windows.ok_or("This window cannot open files.")?;
+        oceans_display_proto::open_file(windows, app, name).map_err(|error| match error {
+            oceans_display_proto::WindowError::Refused(oceans_display_proto::Status::NotFound) => {
+                "No app opens this kind of file."
+            }
+            _ => "The file could not be opened.",
+        })
     }
 
     /// Puts `text` on the clipboard when the frame ends (ADR-0095). Call
@@ -485,6 +513,7 @@ fn run_window<S>(
                 focus,
                 Rect::new(0, 0, w as i32, h as i32),
             );
+            ui.windows = Some(windows);
             frame(&mut ui, state);
             let changed = ui.changed;
             let copied = ui.copied.take();

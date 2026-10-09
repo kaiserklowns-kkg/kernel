@@ -105,5 +105,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0095](0095-clipboard.md) | The clipboard: copied while focused, pasted only where the user pastes | Accepted |
 | [0096](0096-settings-network-and-sound.md) | Settings: the network and the sound, through reader ends | Accepted |
 | [0097](0097-resizing-windows.md) | Resizing and maximizing windows: edges, the zoom button, a double click; apps that ask | Accepted |
+| [0099](0099-opening-files-in-apps.md) | Opening files in apps: kinds declared in the manifest, opened through the desktop after the user's click | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

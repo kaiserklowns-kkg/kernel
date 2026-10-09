@@ -240,6 +240,9 @@ pub struct Manager {
     /// The app that may copy: the user gave its focused window a key or a
     /// click since its last copy.
     may_copy: Option<u64>,
+    /// The app that may open a file in another (ADR-0099), on the same
+    /// terms.
+    may_open: Option<u64>,
     /// The app the user pasted into, until it takes the text.
     paste: Option<u64>,
 }
@@ -258,6 +261,7 @@ impl Manager {
             pixel_budget,
             clipboard: None,
             may_copy: None,
+            may_open: None,
             paste: None,
         }
     }
@@ -461,6 +465,9 @@ impl Manager {
         if self.may_copy == Some(owner) {
             self.may_copy = None;
         }
+        if self.may_open == Some(owner) {
+            self.may_open = None;
+        }
         if self.paste == Some(owner) {
             self.paste = None;
         }
@@ -515,7 +522,7 @@ impl Manager {
                     );
                     return KeyRoute::Window(owner);
                 }
-                self.may_copy = Some(owner);
+                self.user_acted(owner);
                 self.queue(
                     owner,
                     Event {
@@ -533,7 +540,25 @@ impl Manager {
     /// The focus moved: what the user allowed the app that had it ends.
     fn focus_moved(&mut self) {
         self.may_copy = None;
+        self.may_open = None;
         self.paste = None;
+    }
+
+    /// The user gave `owner`'s focused window a key or a click: it may
+    /// copy, and open a file, once each.
+    fn user_acted(&mut self, owner: u64) {
+        self.may_copy = Some(owner);
+        self.may_open = Some(owner);
+    }
+
+    /// `OPEN_FILE` from the app behind `owner` (ADR-0099): allowed once
+    /// for each key or click the user gave its focused window.
+    pub fn take_open(&mut self, owner: u64) -> Result<(), Status> {
+        if self.focused_owner() != Some(owner) || self.may_open != Some(owner) {
+            return Err(Status::NotAllowed);
+        }
+        self.may_open = None;
+        Ok(())
     }
 
     /// The app whose window has the focus.
@@ -898,7 +923,7 @@ impl Manager {
             self.drag = Some((id, grab_x, grab_y));
         } else if content.contains(x, y) && self.focus == Focus::Window(id) {
             if pressed {
-                self.may_copy = Some(owner);
+                self.user_acted(owner);
             }
             self.queue(
                 owner,

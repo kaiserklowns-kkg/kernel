@@ -263,6 +263,9 @@ pub struct Manifest<'a> {
     pub runtime: Runtime,
     /// Where the source is, if published.
     pub source: Option<&'a str>,
+    /// The kinds of file it opens (ADR-0099): `opens = txt md`, file name
+    /// extensions, lowercase; see [`Manifest::opens`].
+    opens: Option<&'a str>,
     requests: [Option<Request<'a>>; MAX_PERMISSIONS],
 }
 
@@ -317,6 +320,7 @@ impl<'a> Manifest<'a> {
             "runtime",
         ];
         let mut source = None;
+        let mut opens = None;
         let mut requests = [None; MAX_PERMISSIONS];
         let mut count = 0;
         for (index, line) in text.lines().enumerate() {
@@ -354,6 +358,12 @@ impl<'a> Manifest<'a> {
             }
             if key == "source" {
                 if source.replace(value).is_some() {
+                    return Err(ManifestError::DuplicateKey(number));
+                }
+                continue;
+            }
+            if key == "opens" {
+                if opens.replace(value).is_some() {
                     return Err(ManifestError::DuplicateKey(number));
                 }
                 continue;
@@ -442,6 +452,9 @@ impl<'a> Manifest<'a> {
         if let Some(&(_, problem)) = checks.iter().find(|(ok, _)| !ok) {
             return Err(ManifestError::BadText(problem));
         }
+        if let Some(kinds) = opens {
+            check_opens(kinds, service, runtime, &requests)?;
+        }
         Ok(Self {
             id,
             name,
@@ -455,8 +468,20 @@ impl<'a> Manifest<'a> {
             service,
             runtime,
             source,
+            opens,
             requests,
         })
+    }
+
+    /// The extensions of the files it opens, in manifest order (ADR-0099).
+    pub fn opens(&self) -> impl Iterator<Item = &'a str> + 'a {
+        self.opens.unwrap_or("").split_ascii_whitespace()
+    }
+
+    /// Whether it opens files named `name` (by their extension, in any
+    /// case).
+    pub fn opens_file(&self, name: &str) -> bool {
+        extension(name).is_some_and(|ext| self.opens().any(|kind| kind.eq_ignore_ascii_case(ext)))
     }
 
     /// The permissions asked for, in manifest order.
@@ -467,6 +492,55 @@ impl<'a> Manifest<'a> {
     pub fn asks_for(&self, permission: Permission) -> bool {
         self.requests().any(|r| r.permission == permission)
     }
+}
+
+/// Kinds of file an app may say it opens.
+pub const MAX_OPENS: usize = 16;
+
+/// A file name's extension: what follows its last `.`, if that is not its
+/// first character (`.profile` has none).
+pub fn extension(name: &str) -> Option<&str> {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    match base.rfind('.') {
+        Some(0) | None => None,
+        Some(dot) => Some(&base[dot + 1..]).filter(|ext| !ext.is_empty()),
+    }
+}
+
+/// `opens` (ADR-0099): up to [`MAX_OPENS`] extensions of 1 to 10
+/// lowercase letters and digits, none twice. Only an app with a window
+/// and the user's files may open them: being opened gives it nothing it
+/// did not already have.
+fn check_opens(
+    kinds: &str,
+    service: bool,
+    runtime: Runtime,
+    requests: &[Option<Request<'_>>],
+) -> Result<(), ManifestError> {
+    let bad = ManifestError::BadText(
+        "opens is not a list of file extensions (lowercase letters and digits)",
+    );
+    let mut count = 0;
+    for (i, kind) in kinds.split_ascii_whitespace().enumerate() {
+        let ok = (1..=10).contains(&kind.len())
+            && kind
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        if !ok || kinds.split_ascii_whitespace().take(i).any(|k| k == kind) {
+            return Err(bad);
+        }
+        count += 1;
+    }
+    if count == 0 || count > MAX_OPENS {
+        return Err(bad);
+    }
+    let has = |p: Permission| requests.iter().flatten().any(|r| r.permission == p);
+    if service || runtime == Runtime::Web || !has(Permission::Window) || !has(Permission::Files) {
+        return Err(ManifestError::BadText(
+            "an app that opens files needs a window and the user's files",
+        ));
+    }
+    Ok(())
 }
 
 /// Printable text (no control characters), 1 to `max` bytes.
