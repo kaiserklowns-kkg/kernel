@@ -2962,9 +2962,9 @@ impl Rejoin {
         // log lines (`diag crashes`), not a cut.
         let cut = LOG_MARKS
             .iter()
-            .filter_map(|mark| line.find(mark))
-            .min()
-            .filter(|&at| !line[..at].trim().is_empty());
+            .flat_map(|mark| line.match_indices(mark).map(|(at, _)| at))
+            .filter(|&at| !line[..at].trim().is_empty())
+            .min();
         let Some(at) = cut else {
             return line;
         };
@@ -4746,6 +4746,15 @@ mod tests {
             "  [WARN ] random: entropy"
         );
         assert_eq!(push("[INFO ] diag: tick 1"), "[INFO ] diag: tick 1");
+        // A kept log line `diag` prints, indented, cut by a new one.
+        assert_eq!(
+            push("  [INFO ] init: asked to restart: stopping the sys[INFO ] bridge: serving"),
+            "[INFO ] bridge: serving"
+        );
+        assert_eq!(
+            push("tem"),
+            "  [INFO ] init: asked to restart: stopping the system"
+        );
         // A cut line whose rest never came is passed on at the end.
         push("half a line[INFO ] x");
         assert_eq!(rejoin.rest().as_deref(), Some("half a line"));
