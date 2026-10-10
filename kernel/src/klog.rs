@@ -72,6 +72,33 @@ pub fn emergency(level: Level, target: &str, args: fmt::Arguments<'_>) {
     });
 }
 
+/// How long a diagnostic line waits for the console, in CPU cycles
+/// (about 70 ms at 3 GHz): a line takes some 10 ms at 115200 baud.
+const DIAGNOSTIC_WAIT_CYCLES: u64 = 200_000_000;
+
+/// A diagnostic line (the diagnostic key, from interrupt context): it
+/// waits, a bounded time, for a line another CPU is writing, so the two
+/// do not mix letter by letter (the smoke saw "threbridge: serving").
+/// If the console stays taken (this CPU was interrupted while writing
+/// one), it is written anyway, as [`emergency`] does.
+pub fn diagnostic_line(level: Level, target: &str, args: fmt::Arguments<'_>) {
+    arch::without_interrupts(|| {
+        let start = arch::cycles();
+        let _guard = loop {
+            if let Some(guard) = CONSOLE.try_lock() {
+                break Some(guard);
+            }
+            if arch::cycles().wrapping_sub(start) > DIAGNOSTIC_WAIT_CYCLES {
+                break None;
+            }
+            core::hint::spin_loop();
+        };
+        // Never waiting for the display or the ring: the interrupted
+        // code may hold them.
+        emit(level, target, args, true);
+    });
+}
+
 fn emit(level: Level, target: &str, args: fmt::Arguments<'_>, emergency: bool) {
     let target = match target.strip_prefix("oceans_kernel") {
         Some("") => "kernel",
@@ -158,10 +185,11 @@ pub fn read(from: u64, out: &mut [u8]) -> (usize, u64) {
 }
 
 /// A diagnostic line from interrupt context (the diagnostic key,
-/// ADR-0089): through [`emergency`], so it never waits for the console.
+/// ADR-0089): through [`diagnostic_line`], which waits a bounded time for the
+/// console, never for ever.
 macro_rules! diagnostic {
     ($($arg:tt)+) => {
-        $crate::klog::emergency($crate::klog::Level::Info, "diag", format_args!($($arg)+))
+        $crate::klog::diagnostic_line($crate::klog::Level::Info, "diag", format_args!($($arg)+))
     };
 }
 
