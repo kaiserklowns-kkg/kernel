@@ -1,6 +1,6 @@
 # ADR-0056: UI architecture: a native desktop, and SvelteKit apps through a bridge
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0105: no on-device web view is planned; the device shows native apps)
 - Date: 2026-10-04
 - Depends on: ADR-0001 (language boundaries), ADR-0029 (framebuffer
   console), ADR-0042 (pointer input), ADR-0045 to ADR-0048 (Oceans Core,

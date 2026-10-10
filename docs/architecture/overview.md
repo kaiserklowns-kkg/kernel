@@ -68,7 +68,8 @@ Source map: `kernel/src/boot` is the only code that knows Limine;
 |---|---|---|
 | Kernel, HAL, drivers, Oceans Runtime | Rust | — / syscalls |
 | System services, AI Runtime | Go | Oceans System API (IPC), generated bindings |
-| Applications, Settings, Store, AI Center | SvelteKit + TypeScript (Bun) | Oceans APIs via a local service bridge |
+| The desktop and every app on the device (ADR-0105) | Rust (`oceans-draw`, `oceans-ui`), or Go windows | Oceans Core and the window protocol (IPC) |
+| The web experience, from a paired browser | SvelteKit + TypeScript (Bun) | Oceans APIs via the bridge |
 
 ## AI in the system (ADR-0007)
 

@@ -1,6 +1,6 @@
 # ADR-0001: Monorepo and language boundaries
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0105: what the device shows is native Rust; SvelteKit is the web experience only)
 - Date: 2026-10-03
 
 ## Context
