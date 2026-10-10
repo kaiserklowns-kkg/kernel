@@ -368,7 +368,10 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move 612 760",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 880 320 f2f2f7 the apps panel",
+    // The panel (from 360,296), its search field (ADR-0108) white from
+    // 482,312 to 894,342.
+    b"@screen 905 330 f2f2f7 the apps panel",
+    b"@screen 800 330 ffffff the apps panel's search field",
     b"@monitor mouse_move 129 -250",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
@@ -608,6 +611,20 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 672 451 e8613c picture.png opened with Image Viewer, chosen",
     b"app stop app.oceans.viewer\r\n",
     b"app stop app.oceans.files\r\n",
+    // Search (ADR-0108): Super alone opens the apps panel's search, which
+    // takes the keys. "calc" finds Calculator and Enter starts it; "pict"
+    // finds picture.png in Home and Enter opens it in Image Viewer.
+    b"@monitor sendkey meta_l",
+    b"@keys calc",
+    b"@monitor sendkey ret",
+    b"@wait desktop: started app.oceans.calculator",
+    b"app stop app.oceans.calculator\r\n",
+    b"@monitor sendkey meta_l",
+    b"@keys pict",
+    b"@monitor sendkey ret",
+    b"@wait desktop: opening picture.png with app.oceans.viewer, from search",
+    b"@wait desktop: started app.oceans.viewer",
+    b"app stop app.oceans.viewer\r\n",
     // The system volume (ADR-0100), after every sound this boot records:
     // set from the shell, then in the menu bar's sound panel. The speaker
     // is at 1012,14; its panel (766,34, 260 by 106) has the slider from
@@ -1045,6 +1062,9 @@ const SHELL_EXPECT: &[Expect] = &[
         "desktop: opening picture.png with app.oceans.viewer (the default), for Files",
     ),
     Expect::Contains("desktop: opening picture.png with app.oceans.viewer (chosen), for Files"),
+    // Search (ADR-0108): an app and a file of Home, found and opened.
+    Expect::Contains("desktop: opening app.oceans.calculator, from search"),
+    Expect::Contains("desktop: opening picture.png with app.oceans.viewer, from search"),
     // The system volume (ADR-0100): at full on a fresh disk; set from the
     // shell, the driver applies it and Core keeps it; the panel's slider
     // and Mute go the same way.

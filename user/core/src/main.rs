@@ -76,6 +76,11 @@ const WEB_APP: &str = "a web app: open it from Apps in the Oceans web experience
 const TRUST_FILE: &str = "trust.keys";
 /// The system volume the user set (ADR-0100), in `/system`.
 const VOLUME_FILE: &str = "volume";
+/// `FIND` (ADR-0108): the most entries of Home it looks at, how deep in
+/// folders, and the most names it gives.
+const FIND_VISIT: usize = 1000;
+const FIND_DEPTH: usize = 4;
+const FIND_RESULTS: usize = 8;
 /// Audit entries kept in memory for `AUDIT` (all go to the log file).
 const AUDIT_KEPT: usize = 64;
 /// Handles an app may get besides its directory: one per permission, a
@@ -597,6 +602,68 @@ impl Core {
         Ok((level, muted))
     }
 
+    /// `FIND` (ADR-0108): the files of Home whose names match `data`, best
+    /// first. The walk is bounded (depth and entries), skips hidden names,
+    /// and reads names only.
+    fn find(&self, data: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        let query = core::str::from_utf8(data).map_err(|_| Status::BadRequest)?;
+        if query.trim().is_empty() || query.len() > oceans_search::MAX_QUERY {
+            return Err(Status::BadRequest.into());
+        }
+        let (home, _) = self.root.open("home", 0).map_err(io)?;
+        let mut found: Vec<(oceans_search::Rank, String)> = Vec::new();
+        let mut visited = 0;
+        let mut pending = alloc::vec![(home, String::new(), 0)];
+        while let Some((dir, prefix, depth)) = pending.pop() {
+            let mut name = [0u8; oceans_fs_proto::MAX_NAME];
+            for index in 0.. {
+                if visited >= FIND_VISIT {
+                    break;
+                }
+                let Ok(Some((kind, len))) = dir.entry(index, &mut name) else {
+                    break;
+                };
+                visited += 1;
+                let Ok(text) = core::str::from_utf8(&name[..len]) else {
+                    continue;
+                };
+                if text.starts_with('.') {
+                    continue;
+                }
+                let path = alloc::format!("{prefix}{text}");
+                match kind {
+                    Kind::Directory if depth < FIND_DEPTH => {
+                        if let Ok((child, _)) = dir.open(text, 0) {
+                            pending.push((child, alloc::format!("{path}/"), depth + 1));
+                        }
+                    }
+                    Kind::File => {
+                        if let Some(rank) = oceans_search::rank(query, text) {
+                            found.push((rank, path));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            dir.close();
+        }
+        for (dir, _, _) in pending {
+            dir.close();
+        }
+        found.sort_unstable_by(|a, b| (a.0, a.1.len(), &a.1).cmp(&(b.0, b.1.len(), &b.1)));
+        for (_, path) in found.iter().take(FIND_RESULTS) {
+            let extra = usize::from(!reply.is_empty());
+            if reply.len() + extra + path.len() > MAX_DATA {
+                break;
+            }
+            if extra == 1 {
+                reply.push(b'\n');
+            }
+            reply.extend_from_slice(path.as_bytes());
+        }
+        Ok(())
+    }
+
     /// At boot: the volume the user left (ADR-0100), if one was kept.
     fn restore_volume(&mut self) {
         let Ok(bytes) = read_path(&self.system_dir, VOLUME_FILE) else {
@@ -1020,6 +1087,7 @@ impl Core {
                         }
                         _ => Err(Status::BadRequest.into()),
                     },
+                    op::FIND => self.find(data, reply),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;

@@ -194,6 +194,7 @@ dependencies = [
  "oceans-net-proto",
  "oceans-package",
  "oceans-rt",
+ "oceans-search",
 ]
 
 [[package]]
@@ -311,6 +312,7 @@ dependencies = [
  "oceans-input-proto",
  "oceans-package",
  "oceans-rt",
+ "oceans-search",
  "oceans-window",
 ]
 
@@ -868,6 +870,10 @@ dependencies = [
  "oceans-package",
  "oceans-rt",
 ]
+
+[[package]]
+name = "oceans-search"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-tls"

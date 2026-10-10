@@ -532,7 +532,26 @@ impl Service {
             };
             let mut terminal = Vec::new();
             for &byte in &keys[..count] {
+                // Super alone (ADR-0108): the launcher's search, the
+                // desktop's whoever has the focus.
+                if byte == oceans_window::proto::KEY_SEARCH {
+                    if self.desktop.dialog.is_none() {
+                        self.toggle_panel();
+                        dirty = true;
+                    }
+                    continue;
+                }
                 if self.desktop.dialog.is_some() && VolumeKey::of(byte).is_none() {
+                    continue;
+                }
+                // The apps panel open: typing searches, and no window or
+                // the Terminal gets the keys (the volume and media keys
+                // still work).
+                if self.desktop.start_open
+                    && VolumeKey::of(byte).is_none()
+                    && media_key_name(byte).is_none()
+                {
+                    dirty |= self.search_key(byte);
                     continue;
                 }
                 match self.windows.key(byte) {
@@ -615,7 +634,11 @@ impl Service {
             }
             Hit::VolumePanel => false,
             Hit::Start => {
-                self.desktop.start_open = !self.desktop.start_open;
+                self.toggle_panel();
+                true
+            }
+            Hit::Found(index) => {
+                self.open_found(index);
                 true
             }
             Hit::Outside => {
@@ -735,6 +758,111 @@ impl Service {
                     alloc::format!("{}: {}", self.name_of(id), error.message()),
                     true,
                 );
+            }
+        }
+    }
+
+    /// Opens the apps panel with an empty search, or closes it.
+    fn toggle_panel(&mut self) {
+        self.desktop.start_open = !self.desktop.start_open;
+        self.desktop.volume_open = false;
+        self.desktop.search.clear();
+        self.desktop.found.clear();
+        self.desktop.chosen = 0;
+        if self.desktop.start_open {
+            self.refresh_apps();
+        }
+    }
+
+    /// A key while the apps panel is open (ADR-0108): typed into the
+    /// search; the arrows choose a result, Enter opens it, Escape closes
+    /// the panel. `true` if the screen changes.
+    fn search_key(&mut self, byte: u8) -> bool {
+        use oceans_window::proto::{KEY_DOWN, KEY_UP};
+        let desktop = &mut self.desktop;
+        match byte {
+            0x1b => desktop.start_open = false,
+            b'\r' => self.open_found(self.desktop.chosen),
+            KEY_UP => desktop.chosen = desktop.chosen.saturating_sub(1),
+            KEY_DOWN => {
+                if desktop.chosen + 1 < desktop.found.len() {
+                    desktop.chosen += 1;
+                }
+            }
+            0x08 | 0x7f => {
+                desktop.search.pop();
+                self.refresh_search();
+            }
+            0x20..=0x7e if desktop.search.len() < oceans_search::MAX_QUERY => {
+                desktop.search.push(char::from(byte));
+                self.refresh_search();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The results for what is typed: the apps whose names match, then the
+    /// files of Home Core finds (from two letters on).
+    fn refresh_search(&mut self) {
+        use desktop::{Found, MAX_FOUND};
+        let query = self.desktop.search.clone();
+        let names = self.desktop.apps.iter().map(|a| a.name.as_str());
+        let mut found: Vec<Found> = oceans_search::best(&query, names, 4)
+            .into_iter()
+            .map(Found::App)
+            .collect();
+        if query.trim().len() >= 2
+            && let Some(core) = self.core
+        {
+            let mut reply = [0u8; 256];
+            if let Ok(got) = core.call(op::FIND, query.as_bytes(), &[], &mut reply) {
+                let text = core::str::from_utf8(&reply[..got.len]).unwrap_or("");
+                found.extend(
+                    text.split('\n')
+                        .filter(|path| !path.is_empty())
+                        .map(|path| Found::File(String::from(path))),
+                );
+            }
+        }
+        found.truncate(MAX_FOUND);
+        let (apps, files) = (
+            found.iter().filter(|f| matches!(f, Found::App(_))).count(),
+            found.iter().filter(|f| matches!(f, Found::File(_))).count(),
+        );
+        say(
+            self.log,
+            format_args!("desktop: search: {apps} apps, {files} files"),
+        );
+        self.desktop.found = found;
+        self.desktop.chosen = 0;
+    }
+
+    /// Opens search result `index` (ADR-0108): an app starts; a file opens
+    /// in the app that opens its kind (ADR-0099). The panel closes.
+    fn open_found(&mut self, index: usize) {
+        use desktop::Found;
+        let Some(found) = self.desktop.found.get(index).cloned() else {
+            return;
+        };
+        self.desktop.start_open = false;
+        match found {
+            Found::App(app) => {
+                let Some(id) = self.desktop.apps.get(app).map(|a| a.id.clone()) else {
+                    return;
+                };
+                say(self.log, format_args!("desktop: opening {id}, from search"));
+                self.launch(&id, "");
+            }
+            Found::File(path) => {
+                let Some((id, _)) = self.openers(&path).into_iter().next() else {
+                    return self.toast(String::from("No app opens this kind of file."), true);
+                };
+                say(
+                    self.log,
+                    format_args!("desktop: opening {path} with {id}, from search"),
+                );
+                self.launch(&id, &path);
             }
         }
     }

@@ -54,6 +54,8 @@ pub const TILE_RIGHT: u8 = 0xa5;
 pub const TILE_UP: u8 = 0xa6;
 pub const TILE_DOWN: u8 = 0xa7;
 pub const FULL_SCREEN: u8 = 0xa8;
+/// Super pressed and let go alone: `display::KEY_SEARCH` (ADR-0108).
+pub const SEARCH: u8 = 0xa9;
 
 /// What a key pressed with Super sends: arranging windows; other keys
 /// with Super send nothing.
@@ -75,6 +77,9 @@ pub const REPORT_SIZE: usize = 8;
 pub struct Keyboard {
     pressed: [u8; 6],
     caps: bool,
+    /// Super is held, and whether another key was pressed meanwhile.
+    super_held: bool,
+    super_used: bool,
 }
 
 impl Keyboard {
@@ -82,6 +87,8 @@ impl Keyboard {
         Self {
             pressed: [0; 6],
             caps: false,
+            super_held: false,
+            super_used: false,
         }
     }
 
@@ -99,6 +106,18 @@ impl Keyboard {
         let shift = modifiers & (LEFT_SHIFT | RIGHT_SHIFT) != 0;
         let ctrl = modifiers & (LEFT_CTRL | RIGHT_CTRL) != 0;
         let super_key = modifiers & (LEFT_GUI | RIGHT_GUI) != 0;
+        if super_key && !self.super_held {
+            self.super_used = false;
+        }
+        if super_key && keys.iter().any(|&k| k != 0 && !self.pressed.contains(&k)) {
+            self.super_used = true;
+        }
+        // Super let go with no key pressed meanwhile: the launcher's search
+        // (ADR-0108).
+        if !super_key && self.super_held && !self.super_used {
+            emit(SEARCH);
+        }
+        self.super_held = super_key;
         for &key in keys {
             if key == 0 || self.pressed.contains(&key) {
                 continue;
@@ -237,6 +256,29 @@ mod tests {
             ],
         );
         assert_eq!(out, [BACK_TAB, BACK_TAB, NEXT_WINDOW]);
+    }
+
+    #[test]
+    fn super_alone_is_search() {
+        let mut keyboard = Keyboard::new();
+        let out = feed(
+            &mut keyboard,
+            &[
+                // Alone (held over several reports): search, once.
+                keys(LEFT_GUI, [0; 6]),
+                keys(LEFT_GUI, [0; 6]),
+                keys(0, [0; 6]),
+                // With an arrow: no search when it is let go.
+                keys(RIGHT_GUI, [0; 6]),
+                keys(RIGHT_GUI, [0x50, 0, 0, 0, 0, 0]),
+                keys(RIGHT_GUI, [0; 6]),
+                keys(0, [0; 6]),
+                // Alone again.
+                keys(LEFT_GUI, [0; 6]),
+                keys(0, [0; 6]),
+            ],
+        );
+        assert_eq!(out, [SEARCH, TILE_LEFT, SEARCH]);
     }
 
     #[test]

@@ -19,6 +19,7 @@ oceans-rt = { path = "rt" }
 oceans-fs-proto = { path = "fs-proto" }
 oceans-core-proto = { path = "core-proto" }
 oceans-package = { path = "../libs/package" }
+oceans-search = { path = "../libs/search" }
 oceans-block-proto = { path = "block-proto" }
 oceans-virtio = { path = "virtio" }
 oceans-net-proto = { path = "net-proto" }

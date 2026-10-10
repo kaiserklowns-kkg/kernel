@@ -34,6 +34,8 @@ pub const BLACK: Rgb = Rgb(0x00_00_00);
 pub const TEXT: Rgb = Rgb(0x1d_1d_1f);
 pub const MUTED: Rgb = Rgb(0x6e_6e_73);
 pub const ACCENT: Rgb = Rgb(0x2f_7c_f6);
+/// The search result Enter opens (ADR-0108).
+pub const CHOSEN: Rgb = Rgb(0xd4_e3_fc);
 pub const SUCCESS: Rgb = Rgb(0x34_c7_59);
 pub const CLOSE: Rgb = Rgb(0xff_5f_57);
 pub const MINIMIZE: Rgb = Rgb(0xfe_bc_2e);
@@ -176,7 +178,25 @@ pub struct Desktop {
     /// A window with the focus covers the screen (ADR-0107): no menu bar
     /// or dock.
     pub full_screen: bool,
+    /// What is typed into the apps panel's search (ADR-0108); empty: the
+    /// tiles show.
+    pub search: String,
+    /// What it found, best first, and the one Enter opens.
+    pub found: Vec<Found>,
+    pub chosen: usize,
 }
+
+/// A search result (ADR-0108).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// An installed app, by its index in `apps`.
+    App(usize),
+    /// A file of Home, by its path there.
+    File(String),
+}
+
+/// Results shown at most, apps and files together.
+pub const MAX_FOUND: usize = 9;
 
 /// An app window to draw.
 pub struct WindowView<'a> {
@@ -196,6 +216,8 @@ pub enum Hit {
     StartTerminal,
     /// An app's tile in the apps panel.
     StartApp(usize),
+    /// A search result in the apps panel (ADR-0108).
+    Found(usize),
     /// Restart and Shut Down, in the apps panel.
     Restart,
     ShutDown,
@@ -385,6 +407,23 @@ pub fn tile(width: i32, height: i32, index: usize) -> Rect {
     )
 }
 
+/// The apps panel's search field (ADR-0108), right of its title.
+pub fn search_field(width: i32, height: i32) -> Rect {
+    let panel = start_menu(width, height);
+    Rect::new(panel.x + 120, panel.y + 14, panel.w - 144, 34)
+}
+
+/// Search result `index`, a row across the panel where the tiles are.
+pub fn found_row(width: i32, height: i32, index: usize) -> Rect {
+    let panel = start_menu(width, height);
+    Rect::new(
+        panel.x + 16,
+        panel.y + 64 + index as i32 * 34,
+        panel.w - 32,
+        32,
+    )
+}
+
 /// Restart (0) and Shut Down (1), at the right of the apps panel's
 /// footer.
 pub fn power_button(width: i32, height: i32, index: i32) -> Rect {
@@ -559,6 +598,11 @@ impl Desktop {
                     if power_button(width, height, 1).contains(x, y) {
                         return Hit::ShutDown;
                     }
+                }
+                if !self.search.is_empty() {
+                    return (0..self.found.len())
+                        .find(|&i| found_row(width, height, i).contains(x, y))
+                        .map_or(Hit::Nothing, Hit::Found);
                 }
                 let shown = self.apps.len().min(MAX_TILES - 1);
                 return (0..shown)
@@ -843,6 +887,40 @@ impl Desktop {
         );
         canvas.round_fill(panel, 16, PANEL);
         canvas.text(panel.x + 24, panel.y + 22, "Apps", Font::Title, TEXT, panel);
+        // The search field (ADR-0108): what is typed goes in while the
+        // panel is open.
+        let field = search_field(w, h);
+        canvas.round_fill(field, 10, ACCENT);
+        let inner = inset(field, 2);
+        canvas.round_fill(inner, 8, WHITE);
+        let clip = Rect::new(inner.x + 10, inner.y, inner.w - 20, inner.h);
+        let end = if self.search.is_empty() {
+            canvas.text(
+                inner.x + 12,
+                inner.y + 7,
+                "Search apps and files",
+                Font::Body,
+                MUTED,
+                clip,
+            );
+            inner.x + 12
+        } else {
+            canvas.text(
+                inner.x + 12,
+                inner.y + 7,
+                &self.search,
+                Font::Body,
+                TEXT,
+                clip,
+            )
+        };
+        canvas.fill(
+            Rect::new(end.min(clip.x + clip.w - 2), inner.y + 7, 2, 18),
+            ACCENT,
+        );
+        if !self.search.is_empty() {
+            return self.draw_found(canvas);
+        }
         let pointer = self.pointer;
         let tile_frame = |canvas: &mut Canvas, index: usize| {
             let t = tile(w, h, index);
@@ -900,6 +978,54 @@ impl Desktop {
                 canvas.text(tx, button.y + 6, label, Font::Body, TEXT, button);
             }
         }
+    }
+
+    /// The search's results (ADR-0108): one row each, apps then files, the
+    /// one Enter opens highlighted.
+    fn draw_found(&self, canvas: &mut Canvas) {
+        let (w, h) = (canvas.width, canvas.height);
+        let panel = start_menu(w, h);
+        let pointer = self.pointer;
+        for (i, found) in self.found.iter().enumerate() {
+            let row = found_row(w, h, i);
+            if i == self.chosen {
+                canvas.round_fill(row, 8, CHOSEN);
+            } else if row.contains(pointer.0, pointer.1) && self.dialog.is_none() {
+                canvas.tint(row, 8, BLACK, 14);
+            }
+            let icon = Rect::new(row.x + 8, row.y + 4, 24, 24);
+            let (name, kind) = match found {
+                Found::App(index) => {
+                    let name = self.apps.get(*index).map_or("?", |a| a.name.as_str());
+                    app_icon(canvas, icon, name);
+                    (String::from(name), String::from("App"))
+                }
+                Found::File(path) => {
+                    canvas.round_fill(icon, 5, WHITE);
+                    canvas.tint(Rect::new(icon.x, icon.y, icon.w, 6), 5, ACCENT, 120);
+                    let name = oceans_search::file_name(path);
+                    let folder = &path[..path.len() - name.len()];
+                    let kind = if folder.is_empty() {
+                        String::from("Home")
+                    } else {
+                        alloc::format!("Home/{}", folder.trim_end_matches('/'))
+                    };
+                    (String::from(name), kind)
+                }
+            };
+            let kind_w = canvas.measure(&kind, Font::Body);
+            let right = row.x + row.w - 12;
+            canvas.text(right - kind_w, row.y + 7, &kind, Font::Body, MUTED, row);
+            let clip = Rect::new(row.x + 40, row.y, right - kind_w - 16 - (row.x + 40), row.h);
+            canvas.text(row.x + 40, row.y + 7, &name, Font::Body, TEXT, clip);
+        }
+        let note = if self.found.is_empty() {
+            alloc::format!("Nothing matches \"{}\"", self.search)
+        } else {
+            String::from("Enter opens; the arrows choose; Esc closes")
+        };
+        let footer_y = panel.y + panel.h - 48;
+        canvas.text(panel.x + 24, footer_y + 16, &note, Font::Body, MUTED, panel);
     }
 
     fn draw_dialog(&self, canvas: &mut Canvas, dialog: &Dialog) {

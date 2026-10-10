@@ -33,6 +33,8 @@ const CAPS: u8 = 1 << 2;
 const EXTENDED: u8 = 1 << 3;
 /// The Windows (Super) key, left or right (`0xe0 0x5b`, `0xe0 0x5c`).
 const SUPER: u8 = 1 << 4;
+/// Another key was pressed while Super was held.
+const SUPER_USED: u8 = 1 << 5;
 
 static STATE: AtomicU8 = AtomicU8::new(0);
 
@@ -156,6 +158,20 @@ fn translate(code: u8) -> Option<u8> {
         0x5b | 0x5c if extended => SUPER,
         _ => 0,
     };
+    // Super let go with no key pressed meanwhile: the launcher's search
+    // (ADR-0108). A held Super repeats its make code: still alone.
+    if modifier == SUPER {
+        let alone = released && state & SUPER != 0 && state & SUPER_USED == 0;
+        let state = if released {
+            state & !(SUPER | SUPER_USED)
+        } else if state & SUPER == 0 {
+            (state | SUPER) & !SUPER_USED
+        } else {
+            state
+        };
+        STATE.store(state, Ordering::Relaxed);
+        return alone.then_some(oceans_abi::display::KEY_SEARCH);
+    }
     if modifier != 0 {
         let state = if released {
             state & !modifier
@@ -176,6 +192,8 @@ fn translate(code: u8) -> Option<u8> {
     // Super with the arrows, and Super+F: arranging windows (ADR-0107).
     if state & SUPER != 0 {
         use oceans_abi::display as d;
+        // Super is not alone any more: no search when it is let go.
+        STATE.store(state | SUPER_USED, Ordering::Relaxed);
         return match (extended, key) {
             (true, 0x4b) => Some(d::KEY_TILE_LEFT),
             (true, 0x4d) => Some(d::KEY_TILE_RIGHT),

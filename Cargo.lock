@@ -674,6 +674,10 @@ name = "oceans-scheduler"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-search"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-tls"
 version = "0.1.0"
 dependencies = [

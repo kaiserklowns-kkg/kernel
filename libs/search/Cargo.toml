@@ -1,0 +1,9 @@
+[package]
+name = "oceans-search"
+description = "Matching and ranking names for Oceans' search (apps and files): what the desktop's launcher and Oceans Core share (ADR-0108)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

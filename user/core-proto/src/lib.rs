@@ -106,6 +106,11 @@ pub mod op {
     /// data = `[level u8][muted u8]`: sets the system volume, kept across
     /// reboots (ADR-0100) → it as set. `NotFound` without a sound device.
     pub const SET_VOLUME: u64 = 23;
+    /// data = `[query]` (UTF-8, up to `oceans_search::MAX_QUERY` bytes) →
+    /// the files of Home whose names match it, best first, as paths
+    /// relative to Home joined by `\n`, as many as fit (ADR-0108). Names
+    /// only: nothing of what they hold.
+    pub const FIND: u64 = 24;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -155,7 +160,8 @@ pub mod access {
             | op::PENDING
             | op::TRUSTED
             | op::WEB_BUNDLE
-            | op::VOLUME => QUERY,
+            | op::VOLUME
+            | op::FIND => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE

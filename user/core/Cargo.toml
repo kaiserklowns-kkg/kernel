@@ -18,5 +18,6 @@ oceans-audio-proto.workspace = true
 oceans-net-proto.workspace = true
 oceans-core-proto.workspace = true
 oceans-package.workspace = true
+oceans-search.workspace = true
 # The packages the system image brings (ADR-0080).
 oceans-archive.workspace = true

@@ -114,5 +114,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0105](0105-ui-direction.md) | The direction of the UI: native on the device, the web from afar; Big Sur polished; accessibility now | Accepted |
 | [0106](0106-keyboard-focus-and-roles.md) | The keyboard reaches every widget: Tab and Shift+Tab, roles and names, a focus ring | Accepted |
 | [0107](0107-arranging-windows.md) | Arranging windows: halves and quarters by dragging, Super shortcuts, full screen; windows up to 4K | Accepted |
+| [0108](0108-search-and-launcher.md) | Search in the launcher: Super alone, apps and the files of Home (Core's `FIND`), Enter opens | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

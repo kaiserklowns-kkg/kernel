@@ -337,6 +337,9 @@ pub mod display {
     pub const KEY_TILE_UP: u8 = 0xa6;
     pub const KEY_TILE_DOWN: u8 = 0xa7;
     pub const KEY_FULL_SCREEN: u8 = 0xa8;
+    /// Super pressed and let go alone (ADR-0108): the desktop opens the
+    /// launcher's search, or closes it. No app sees it.
+    pub const KEY_SEARCH: u8 = 0xa9;
     /// Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A as keyboards send them.
     pub const CTRL_A: u8 = 0x01;
     pub const CTRL_C: u8 = 0x03;

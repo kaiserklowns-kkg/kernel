@@ -190,6 +190,14 @@ pub const KEY_TILE_RIGHT: u8 = 0xa5;
 pub const KEY_TILE_UP: u8 = 0xa6;
 pub const KEY_TILE_DOWN: u8 = 0xa7;
 pub const KEY_FULL_SCREEN: u8 = 0xa8;
+/// Super pressed and let go alone (`oceans_abi::display::KEY_SEARCH`,
+/// ADR-0108): the desktop's launcher search. The desktop's, never an
+/// app's.
+pub const KEY_SEARCH: u8 = 0xa9;
+/// Up and Down (`oceans_abi::display::KEY_UP`, `KEY_DOWN`): the search
+/// results they choose between while the launcher is open.
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
 
 /// Event kinds.
 pub mod kind {
