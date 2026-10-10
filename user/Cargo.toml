@@ -13,6 +13,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oceans-abi = { path = "../libs/abi" }
+oceans-access = { path = "../libs/access" }
 oceans-heap = { path = "../libs/heap" }
 oceans-rt = { path = "rt" }
 oceans-fs-proto = { path = "fs-proto" }

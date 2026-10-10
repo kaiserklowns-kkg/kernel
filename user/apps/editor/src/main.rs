@@ -30,7 +30,7 @@ use oceans_abi::display::{is_copy, is_cut};
 use oceans_edit::Editor;
 use oceans_fs_proto::{Kind, Node, flags};
 use oceans_rt::{Directory, Start};
-use oceans_ui::{Rect, Style, Ui, colour};
+use oceans_ui::{Rect, Role, Style, Ui, colour};
 
 oceans_rt::entry!(main);
 
@@ -281,6 +281,9 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
             ui.changed = true;
         }
     }
+
+    // Tab reaches the page too (ADR-0106).
+    ui.focusable(PAGE, Role::Area, "Page", page);
 
     // Keys, when the page has the keyboard; and the clipboard (ADR-0095).
     if *ui.focus == Some(PAGE) && ui.input.focused {

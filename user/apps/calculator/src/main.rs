@@ -139,8 +139,15 @@ impl Calculator {
 
 fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
     ui.background(colour::WINDOW);
-    // Typed keys first.
+    // Typed keys first. A button with the keyboard's focus (Tab, ADR-0106)
+    // is pressed by Enter and Space: they are left for it.
+    let button_focused = ui.focus.is_some();
+    let mut left = alloc::vec::Vec::new();
     for key in core::mem::take(&mut ui.input.keys) {
+        if button_focused && (key == b'\r' || key == b' ') {
+            left.push(key);
+            continue;
+        }
         let name = match key {
             b'0'..=b'9' | b'.' | b'+' | b'-' | b'*' | b'/' | b'%' => {
                 Some(core::str::from_utf8(core::slice::from_ref(&key)).unwrap_or(""))
@@ -155,6 +162,7 @@ fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
             ui.changed = true;
         }
     }
+    ui.input.keys = left;
     // The display.
     let (w, _) = (ui.area.w, ui.area.h);
     let screen = Rect::new(12, 12, w - 24, 72);

@@ -25,7 +25,7 @@ use oceans_abi::display::{KEY_DOWN, KEY_LEFT, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_RI
 use oceans_fs_proto::{Kind, MAX_NAME, Node};
 use oceans_image::{Format, Image};
 use oceans_rt::{Directory, Start};
-use oceans_ui::{Rect, Style, Ui, colour};
+use oceans_ui::{Rect, Role, Style, Ui, colour};
 
 oceans_rt::entry!(main);
 
@@ -296,6 +296,8 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
         ui.changed = true;
         *ui.focus = Some(PICTURE);
     }
+    // Tab reaches the picture too (ADR-0106).
+    ui.focusable(PICTURE, Role::Area, "Picture", area);
     if *ui.focus == Some(PICTURE) && ui.input.focused {
         for key in core::mem::take(&mut ui.input.keys) {
             ui.changed = true;

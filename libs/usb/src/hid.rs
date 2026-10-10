@@ -5,7 +5,8 @@
 //! Delete and the page keys, which send `oceans_abi::display::KEY_*`
 //! (ADR-0084), with Shift as a byte of their own (ADR-0095). Ctrl+Tab
 //! sends the desktop's "next window" byte (ADR-0059); Ctrl+Shift+C, X and
-//! V (and the Copy, Cut and Paste keys) the clipboard's (ADR-0095). The
+//! V (and the Copy, Cut and Paste keys) the clipboard's (ADR-0095); Shift+Tab
+//! the focus's "back" byte (ADR-0106). The
 //! volume keys send the desktop's volume bytes (ADR-0101).
 
 const LEFT_CTRL: u8 = 1 << 0;
@@ -23,6 +24,8 @@ const NORMAL: &[u8; 0x35] = b"abcdefghijklmnopqrstuvwxyz1234567890\r\x1b\x7f\t -
 const SHIFTED: &[u8; 0x35] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()\r\x1b\x7f\t _+{}|\0:\"~<>?";
 /// What Ctrl+Tab sends: `oceans_abi::display::KEY_NEXT_WINDOW` (ADR-0059).
 pub const NEXT_WINDOW: u8 = 0x1e;
+/// What Shift+Tab sends: `oceans_abi::display::KEY_BACK_TAB` (ADR-0106).
+pub const BACK_TAB: u8 = 0x8f;
 /// The moving and editing keys, as `oceans_abi::display::KEY_*`
 /// (ADR-0084), by usage: Home 0x4a, Page Up 0x4b, Delete 0x4c, End 0x4d,
 /// Page Down 0x4e, Right 0x4f, Left 0x50, Down 0x51, Up 0x52.
@@ -131,6 +134,9 @@ impl Keyboard {
         if ctrl && byte == b'\t' {
             return Some(NEXT_WINDOW);
         }
+        if shift && byte == b'\t' {
+            return Some(BACK_TAB);
+        }
         Some(byte)
     }
 }
@@ -188,6 +194,22 @@ mod tests {
             ],
         );
         assert_eq!(out, [b'\t', NEXT_WINDOW, NEXT_WINDOW]);
+    }
+
+    #[test]
+    fn shift_tab_is_back_tab() {
+        let mut keyboard = Keyboard::new();
+        let out = feed(
+            &mut keyboard,
+            &[
+                keys(LEFT_SHIFT, [0x2b, 0, 0, 0, 0, 0]),
+                keys(0, [0; 6]),
+                keys(RIGHT_SHIFT, [0x2b, 0, 0, 0, 0, 0]),
+                keys(0, [0; 6]),
+                keys(LEFT_CTRL | LEFT_SHIFT, [0x2b, 0, 0, 0, 0, 0]),
+            ],
+        );
+        assert_eq!(out, [BACK_TAB, BACK_TAB, NEXT_WINDOW]);
     }
 
     #[test]

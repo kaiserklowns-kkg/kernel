@@ -450,6 +450,15 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@screen 756 385 d8d8de Settings' Network: four rows",
+    // The keyboard reaches the widgets (ADR-0106): Tab gives the sidebar
+    // the focus, Shift+Tab goes back (round to the last widget) and Tab
+    // forward again; Down then chooses Sound, the third item (its row from
+    // 364,279, in the accent).
+    b"@monitor sendkey tab",
+    b"@monitor sendkey shift-tab",
+    b"@monitor sendkey tab",
+    b"@monitor sendkey down",
+    b"@screen 500 295 2f7cf6 Settings' Sound, chosen with the keyboard",
     b"app stop app.oceans.settings\r\n",
     // Files (ADR-0082): the user's files; its window (the fifth opened,
     // its content from 388,219) shows its toolbar, and Home is listed

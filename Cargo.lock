@@ -498,6 +498,13 @@ name = "oceans-abi"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-access"
+version = "0.1.0"
+dependencies = [
+ "oceans-abi",
+]
+
+[[package]]
 name = "oceans-acpi"
 version = "0.1.0"
 

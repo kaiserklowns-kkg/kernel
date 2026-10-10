@@ -8,7 +8,8 @@
 //! other keys without an ASCII meaning (function keys) are ignored. Ctrl+Tab
 //! sends the desktop's "next window" byte (ADR-0059). With Shift the moving
 //! keys send `KEY_SHIFTED` added, and Ctrl+Shift+C, X and V send
-//! `KEY_COPY`, `KEY_CUT` and `KEY_PASTE` (ADR-0095). The volume keys
+//! `KEY_COPY`, `KEY_CUT` and `KEY_PASTE` (ADR-0095), and Shift+Tab
+//! `KEY_BACK_TAB` (ADR-0106). The volume keys
 //! (`0xe0 0x20`, `0x2e`, `0x30`) send `KEY_MUTE`, `KEY_VOLUME_DOWN` and
 //! `KEY_VOLUME_UP` (ADR-0101); the media keys (`0xe0 0x22`, `0x24`, `0x10`,
 //! `0x19`) `KEY_PLAY_PAUSE`, `KEY_STOP`, `KEY_PREVIOUS` and `KEY_NEXT`
@@ -217,6 +218,9 @@ fn translate(code: u8) -> Option<u8> {
     // Ctrl+Tab: the desktop's "next window" (ADR-0059).
     if state & CTRL != 0 && byte == b'\t' {
         byte = oceans_abi::display::KEY_NEXT_WINDOW;
+    } else if state & SHIFT != 0 && byte == b'\t' {
+        // Shift+Tab: the focus back to the previous widget (ADR-0106).
+        byte = oceans_abi::display::KEY_BACK_TAB;
     }
     Some(byte)
 }

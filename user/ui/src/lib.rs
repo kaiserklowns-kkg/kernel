@@ -14,6 +14,14 @@
 //! **The clipboard** (ADR-0095): what the user pastes arrives in
 //! [`Input::paste`]; text fields take it, and copy and cut all of their
 //! text. An app copies with [`Ui::copy`], in answer to the user's keys.
+//!
+//! **The keyboard reaches every widget** (ADR-0106): each one drawn is
+//! recorded with its [`Role`] and name in [`Ui::tree`]. Tab and Shift+Tab
+//! move the keyboard's focus through what can be used, in the order drawn;
+//! the focused widget shows a ring in the accent. Enter or Space presses
+//! a focused button; Up, Down, Home and End choose a focused list's row,
+//! and Enter opens it, as a second click would. An area the app draws and
+//! answers keys in itself joins with [`Ui::focusable`].
 
 #![no_std]
 
@@ -23,6 +31,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use oceans_abi::display::{is_copy, is_cut};
+pub use oceans_access::Role;
+use oceans_access::{Ids, Node, Tree, focus_move, list_key};
 use oceans_display_proto::{Event, Window, events, kind};
 pub use oceans_draw::{Rect, Rgb, Style, Surface, Typesetter};
 use oceans_rt::Directory;
@@ -82,6 +92,12 @@ pub struct Ui<'s, 'f> {
     pub windows: Option<oceans_rt::Handle>,
     /// The window drawn into (its id), with `windows`.
     pub window: u32,
+    /// What this frame drew, in order (ADR-0106).
+    pub tree: Tree,
+    ids: Ids,
+    /// Tab (`false`) and Shift+Tab (`true`) pressed since the last frame,
+    /// taken out of the keys: [`Ui::finish`] moves the focus.
+    moves: Vec<bool>,
 }
 
 /// The most a text field holds, in bytes.
@@ -100,6 +116,15 @@ impl<'s, 'f> Ui<'s, 'f> {
         area: Rect,
     ) -> Self {
         let y = area.y;
+        // Tab and Shift+Tab are the toolkit's, not a widget's or the app's.
+        let mut moves = Vec::new();
+        input.keys.retain(|&key| match focus_move(key) {
+            Some(back) => {
+                moves.push(back);
+                false
+            }
+            None => true,
+        });
         Self {
             surface,
             typesetter,
@@ -111,6 +136,73 @@ impl<'s, 'f> Ui<'s, 'f> {
             copied: None,
             windows: None,
             window: 0,
+            tree: Tree::default(),
+            ids: Ids::default(),
+            moves,
+        }
+    }
+
+    /// Ends the frame: Tab and Shift+Tab move the focus through what this
+    /// frame drew (ADR-0106). The window loop calls it after the frame.
+    pub fn finish(&mut self) {
+        if !self.input.focused {
+            self.moves.clear();
+            return;
+        }
+        for back in core::mem::take(&mut self.moves) {
+            if let Some(next) = self.tree.next_focus(*self.focus, back) {
+                *self.focus = Some(next);
+                self.changed = true;
+            }
+        }
+    }
+
+    /// Records a widget of this frame (ADR-0106).
+    fn node(&mut self, id: u32, role: Role, name: &str, r: Rect, focusable: bool) {
+        self.tree.push(Node {
+            id,
+            role,
+            name: String::from(name),
+            rect: (r.x, r.y, r.w, r.h),
+            focusable,
+        });
+    }
+
+    /// Records a widget the app does not name, and gives its id.
+    fn auto(&mut self, role: Role, name: &str, r: Rect, focusable: bool) -> u32 {
+        let id = self.ids.id(role, name);
+        self.node(id, role, name, r, focusable);
+        id
+    }
+
+    /// An area the app draws and answers keys in itself (a page, a
+    /// picture), with the app's own focus id: Tab reaches it, and it has
+    /// the keyboard while `*ui.focus == Some(id)`. The app shows that focus
+    /// itself (a cursor, a selection): no ring is drawn round it.
+    pub fn focusable(&mut self, id: u32, role: Role, name: &str, r: Rect) {
+        self.node(id, role, name, r, true);
+    }
+
+    /// Whether widget `id` has the keyboard.
+    pub fn has_focus(&self, id: u32) -> bool {
+        *self.focus == Some(id) && self.input.focused
+    }
+
+    /// The first of `keys` pressed for the focused widget `id`, taken.
+    fn take_key(&mut self, id: u32, keys: &[u8]) -> Option<u8> {
+        if !self.has_focus(id) {
+            return None;
+        }
+        let at = self.input.keys.iter().position(|key| keys.contains(key))?;
+        self.changed = true;
+        Some(self.input.keys.remove(at))
+    }
+
+    /// The ring that marks the keyboard's focus, just outside `r`.
+    fn focus_ring(&mut self, r: Rect) {
+        for grow in [2, 3] {
+            let ring = Rect::new(r.x - grow, r.y - grow, r.w + 2 * grow, r.h + 2 * grow);
+            self.surface.outline(ring, 8 + grow, colour::ACCENT, 255);
         }
     }
 
@@ -220,16 +312,19 @@ impl<'s, 'f> Ui<'s, 'f> {
 
     pub fn heading(&mut self, text: &str) {
         let r = self.next(28);
+        self.auto(Role::Heading, text, r, false);
         self.text_at(r.x, r.y + 2, text, Style::Title, colour::TEXT, r);
     }
 
     pub fn label(&mut self, text: &str) {
         let r = self.next(LINE_HEIGHT);
+        self.auto(Role::Label, text, r, false);
         self.text_at(r.x, r.y + 2, text, Style::Body, colour::TEXT, r);
     }
 
     pub fn muted(&mut self, text: &str) {
         let r = self.next(LINE_HEIGHT);
+        self.auto(Role::Label, text, r, false);
         self.text_at(r.x, r.y + 2, text, Style::Body, colour::MUTED, r);
     }
 
@@ -237,6 +332,8 @@ impl<'s, 'f> Ui<'s, 'f> {
     /// under it (lists of facts, as in Settings).
     pub fn row(&mut self, name: &str, value: &str) {
         let r = self.next(ROW_HEIGHT - GAP);
+        let said = alloc::format!("{name}: {value}");
+        self.auto(Role::Label, &said, r, false);
         self.text_at(r.x, r.y + 4, name, Style::Body, colour::TEXT, r);
         let width = self.measure(value, Style::Body);
         self.text_at(
@@ -272,9 +369,14 @@ impl<'s, 'f> Ui<'s, 'f> {
         self.button_in(r, text, true)
     }
 
-    /// A button at `r` (for grids and toolbars); `true` when clicked.
+    /// A button at `r` (for grids and toolbars); `true` when clicked, or
+    /// pressed with Enter or Space while it has the keyboard.
     pub fn button_in(&mut self, r: Rect, text: &str, primary: bool) -> bool {
-        let clicked = self.take_click(r);
+        let id = self.auto(Role::Button, text, r, true);
+        let clicked = self.take_click(r) || self.take_key(id, b"\r ").is_some();
+        if self.has_focus(id) {
+            self.focus_ring(r);
+        }
         let hovered = self.hovered(r);
         let fill = match (primary, hovered) {
             (true, false) => colour::ACCENT,
@@ -301,9 +403,14 @@ impl<'s, 'f> Ui<'s, 'f> {
     }
 
     /// A list of `items`, one row each, `selected` highlighted; returns the
-    /// row clicked.
+    /// row clicked. With the keyboard, Up, Down, Home and End return the
+    /// row they move to, and Enter the selected row (as a second click).
     pub fn list(&mut self, items: &[&str], selected: Option<usize>) -> Option<usize> {
-        let mut clicked = None;
+        let height = items.len() as i32 * (ROW_HEIGHT + 2);
+        let whole = Rect::new(self.area.x, self.y, self.area.w, height.max(ROW_HEIGHT));
+        let id = self.auto(Role::List, "", whole, !items.is_empty());
+        let mut clicked = self.list_keys(id, selected, items.len());
+        let focused = self.has_focus(id);
         for (i, item) in items.iter().enumerate() {
             let r = Rect::new(self.area.x, self.y, self.area.w, ROW_HEIGHT);
             self.y += ROW_HEIGHT + 2;
@@ -312,19 +419,42 @@ impl<'s, 'f> Ui<'s, 'f> {
             }
             if selected == Some(i) {
                 self.surface.round_fill(r, 6, colour::SELECTED);
+                if focused {
+                    self.focus_ring(r);
+                }
             } else if self.hovered(r) {
                 self.surface.tint(r, 6, Rgb(0), 12);
             }
             self.text_at(r.x + 10, r.y + 6, item, Style::Body, colour::TEXT, r);
         }
+        // Focused with nothing selected: the ring round the whole list.
+        if focused && selected.is_none_or(|i| i >= items.len()) {
+            self.focus_ring(whole);
+        }
         self.y += GAP;
         clicked
+    }
+
+    /// The row the keys pressed for list `id` choose (see [`Ui::list`]).
+    fn list_keys(&mut self, id: u32, selected: Option<usize>, count: usize) -> Option<usize> {
+        use oceans_abi::display::{KEY_DOWN, KEY_END, KEY_HOME, KEY_UP};
+        let mut row = None;
+        while let Some(key) = self.take_key(id, &[KEY_UP, KEY_DOWN, KEY_HOME, KEY_END, b'\r']) {
+            let from = row.or(selected);
+            row = if key == b'\r' {
+                from.filter(|&i| i < count)
+            } else {
+                list_key(key, from, count).or(row)
+            };
+        }
+        row
     }
 
     /// A one-line text field (`id` tells fields apart): a click gives it
     /// the keyboard. Returns `true` when Enter is pressed in it.
     pub fn text_field(&mut self, id: u32, text: &mut String, placeholder: &str) -> bool {
         let r = self.next(BUTTON_HEIGHT);
+        self.node(id, Role::Field, placeholder, r, true);
         if self.take_click(r) {
             *self.focus = Some(id);
         }
@@ -393,10 +523,15 @@ impl<'s, 'f> Ui<'s, 'f> {
 
     /// A left sidebar of `items` (`width` wide, the full height); returns
     /// the item clicked. Widgets after it go to its right.
+    /// With the keyboard, Up, Down, Home and End choose an item.
     pub fn sidebar(&mut self, width: i32, items: &[&str], selected: usize) -> Option<usize> {
         let bar = Rect::new(self.area.x, self.area.y, width, self.area.h);
         self.surface.fill(bar, colour::SIDEBAR);
-        let mut clicked = None;
+        let id = self.auto(Role::List, "Sidebar", bar, !items.is_empty());
+        let mut clicked = self
+            .list_keys(id, Some(selected), items.len())
+            .filter(|&i| i != selected);
+        let focused = self.has_focus(id);
         for (i, item) in items.iter().enumerate() {
             let r = Rect::new(bar.x + 8, bar.y + 12 + i as i32 * 34, width - 16, 30);
             if self.take_click(r) {
@@ -404,6 +539,9 @@ impl<'s, 'f> Ui<'s, 'f> {
             }
             if i == selected {
                 self.surface.round_fill(r, 6, colour::ACCENT);
+                if focused {
+                    self.focus_ring(r);
+                }
             } else if self.hovered(r) {
                 self.surface.tint(r, 6, Rgb(0), 14);
             }
@@ -537,6 +675,7 @@ fn run_window<S>(
             ui.windows = Some(windows);
             ui.window = id;
             frame(&mut ui, state);
+            ui.finish();
             let changed = ui.changed;
             let copied = ui.copied.take();
             let _ = window.present();

@@ -303,6 +303,9 @@ pub mod display {
     pub const KEY_DELETE: u8 = 0x86;
     pub const KEY_PAGE_UP: u8 = 0x87;
     pub const KEY_PAGE_DOWN: u8 = 0x88;
+    /// Shift+Tab (ADR-0106): the keyboard's focus to the previous widget.
+    /// Tab stays `\t`.
+    pub const KEY_BACK_TAB: u8 = 0x8f;
 
     /// Ctrl+Shift+C, X and V, and the Copy, Cut and Paste keys of
     /// keyboards that have them (ADR-0095). Ctrl+C, X and V stay the

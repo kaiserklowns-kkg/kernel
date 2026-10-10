@@ -1,0 +1,10 @@
+[package]
+name = "oceans-access"
+description = "Accessibility for Oceans' UI: what each widget is (role and name), stable ids, and the keyboard's focus order (ADR-0106)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-abi.workspace = true

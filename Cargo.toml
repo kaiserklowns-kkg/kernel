@@ -1,10 +1,10 @@
 [workspace]
 exclude = ["user"]
 resolver = "3"
-members = ["kernel", "tools/enroll", "libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/gpt", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/edit", "libs/wav", "libs/image", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
+members = ["kernel", "tools/enroll", "libs/abi", "libs/access", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/gpt", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/edit", "libs/wav", "libs/image", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
 # The kernel only builds for bare-metal targets; host-side `cargo test`
 # and `cargo build` cover the portable crates and tooling.
-default-members = ["libs/abi", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/gpt", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/edit", "libs/wav", "libs/image", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
+default-members = ["libs/abi", "libs/access", "libs/acpi", "libs/archive", "libs/capability", "libs/elf", "libs/fat", "libs/gpt", "libs/frame-allocator", "libs/heap", "libs/http", "libs/inet", "libs/input", "libs/memory-map", "libs/pci", "libs/dns", "libs/e1000e", "libs/net", "libs/nvme", "libs/ahci", "libs/hda", "libs/draw", "libs/edit", "libs/wav", "libs/image", "libs/package", "libs/random", "libs/scheduler", "libs/tls", "libs/usb", "libs/volume", "libs/window", "libs/hardware", "tools/oceans", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oceans-abi = { path = "libs/abi" }
+oceans-access = { path = "libs/access" }
 oceans-acpi = { path = "libs/acpi" }
 oceans-archive = { path = "libs/archive" }
 oceans-capability = { path = "libs/capability" }
