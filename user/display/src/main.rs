@@ -239,6 +239,10 @@ fn main(start: Start) -> i64 {
         pixels: BTreeMap::new(),
         power: directory.find("power", "power"),
     };
+    // Full screen covers all of it (ADR-0107).
+    service
+        .windows
+        .set_screen(oceans_window::Rect::new(0, 0, canvas.width, canvas.height));
     service.register_windows(server);
     // The keyboard comes here only if it can be handed on to the console.
     match console.map(|_| oceans_rt::display_keyboard(display, notification, KEYS)) {
@@ -354,6 +358,10 @@ impl Service {
             .map(|n| (String::from(n.app), n.state, String::from(n.title)));
         let focus = self.windows.focus();
         self.desktop.terminal_focused = focus == Focus::Terminal;
+        // Arranging windows (ADR-0107): where a dragged window would go,
+        // and whether one covers the screen.
+        self.desktop.snap = self.windows.snap_preview();
+        self.desktop.full_screen = self.windows.full_screen().is_some();
         let views: Vec<WindowView<'_>> = self
             .windows
             .frames()
@@ -399,9 +407,11 @@ impl Service {
                 // taskbar, an open Start menu and the sound panel lie over
                 // the windows, but a release always reaches them (it ends a
                 // drag).
+                // Full screen (ADR-0107), the menu bar and the dock give way.
+                let bars = self.windows.full_screen().is_none();
                 let over = self.desktop.start_open
-                    || y < desktop::MENU_HEIGHT
-                    || y >= h - desktop::DOCK_RESERVE
+                    || (bars && y < desktop::MENU_HEIGHT)
+                    || (bars && y >= h - desktop::DOCK_RESERVE)
                     || (self.desktop.volume_open
                         && desktop::sound_panel(w, self.desktop.now_playing.is_some())
                             .contains(x, y));

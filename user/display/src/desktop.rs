@@ -171,6 +171,11 @@ pub struct Desktop {
     /// What the player with the media keys plays (ADR-0103): its app,
     /// state (`proto::playing`) and title.
     pub now_playing: Option<(String, u8, String)>,
+    /// Where the window dragged would go if let go now (ADR-0107).
+    pub snap: Option<Rect>,
+    /// A window with the focus covers the screen (ADR-0107): no menu bar
+    /// or dock.
+    pub full_screen: bool,
 }
 
 /// An app window to draw.
@@ -596,8 +601,16 @@ impl Desktop {
             draw_window(canvas, view, self.pointer);
         }
 
-        self.draw_menu_bar(canvas, windows);
-        self.draw_dock(canvas, windows);
+        // Where a dragged window would go (ADR-0107): a tinted sheet.
+        if let Some(r) = self.snap {
+            let inset = Rect::new(r.x + 4, r.y + 4, r.w - 8, r.h - 8);
+            canvas.tint(inset, 12, ACCENT, 70);
+        }
+
+        if !self.full_screen {
+            self.draw_menu_bar(canvas, windows);
+            self.draw_dock(canvas, windows);
+        }
         if self.start_open {
             self.draw_apps_panel(canvas);
         }
@@ -1127,6 +1140,16 @@ fn traffic_lights(canvas: &mut Canvas, buttons: &[(Rect, Option<Rgb>)], pointer:
 /// An app window: the frame the system draws, and the app's pixels inside.
 fn draw_window(canvas: &mut Canvas, view: &WindowView<'_>, pointer: (i32, i32)) {
     let frame = view.frame;
+    // Full screen (ADR-0107): no frame, only the app's pixels.
+    if !frame.full_screen() {
+        draw_chrome(canvas, view, pointer);
+    }
+    draw_content(canvas, view);
+}
+
+/// The frame the system draws: border, title bar, title and buttons.
+fn draw_chrome(canvas: &mut Canvas, view: &WindowView<'_>, pointer: (i32, i32)) {
+    let frame = view.frame;
     chrome(canvas, frame.outer(), view.focused);
     title_text(
         canvas,
@@ -1148,6 +1171,11 @@ fn draw_window(canvas: &mut Canvas, view: &WindowView<'_>, pointer: (i32, i32)) 
         ],
         pointer,
     );
+}
+
+/// The app's pixels, in the frame's content.
+fn draw_content(canvas: &mut Canvas, view: &WindowView<'_>) {
+    let frame = view.frame;
     let content = frame.content();
     match view.pixels {
         Some((pixels, width, height)) if frame.presented => {

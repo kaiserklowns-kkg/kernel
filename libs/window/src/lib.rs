@@ -82,14 +82,42 @@ pub struct Frame {
     /// The smallest content the app can lay out, once it said it can be
     /// resized (ADR-0097); `None`: its size is fixed.
     pub min: Option<(i32, i32)>,
-    /// Where it was before it was maximized (`x`, `y`, `width`,
-    /// `height`): the zoom button and a double click put it back.
+    /// Where it was before it was maximized or tiled (`x`, `y`, `width`,
+    /// `height`): the zoom button, a double click, a shortcut or a drag
+    /// away put it back.
     pub restore: Option<(i32, i32, i32, i32)>,
+    /// Where it was put (ADR-0107): a half or a quarter of the area, all
+    /// of it, or the whole screen. `None`: where the user left it.
+    pub tile: Option<Tile>,
+}
+
+/// Where a window can be put (ADR-0107).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tile {
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    /// The whole area (between the menu bar and the dock).
+    Maximized,
+    /// The whole screen, with no frame: the menu bar and the dock give
+    /// way while it has the focus.
+    FullScreen,
 }
 
 impl Frame {
+    /// Full screen: no border or title bar, only the app's pixels.
+    pub fn full_screen(&self) -> bool {
+        self.tile == Some(Tile::FullScreen)
+    }
+
     /// Everything the window covers: border, title bar and content.
     pub fn outer(&self) -> Rect {
+        if self.full_screen() {
+            return self.content();
+        }
         Rect::new(
             self.x,
             self.y,
@@ -98,12 +126,20 @@ impl Frame {
         )
     }
 
+    /// Empty in full screen.
     pub fn title_bar(&self) -> Rect {
+        if self.full_screen() {
+            return Rect::new(self.x, self.y, 0, 0);
+        }
         Rect::new(self.x, self.y, self.width + 2, TITLE_HEIGHT)
     }
 
-    /// At the left of the title bar (ADR-0078).
+    /// At the left of the title bar (ADR-0078). Empty in full screen, as
+    /// are the other buttons.
     pub fn close_button(&self) -> Rect {
+        if self.full_screen() {
+            return Rect::new(self.x, self.y, 0, 0);
+        }
         Rect::new(
             self.x + 6,
             self.y + (TITLE_HEIGHT - CLOSE_SIZE) / 2,
@@ -115,18 +151,23 @@ impl Frame {
     /// Right of the close button.
     pub fn minimize_button(&self) -> Rect {
         let close = self.close_button();
-        Rect::new(close.x + BUTTON_STEP, close.y, CLOSE_SIZE, CLOSE_SIZE)
+        let size = close.w;
+        Rect::new(close.x + BUTTON_STEP, close.y, size, size)
     }
 
     /// Right of the minimize button: maximizes and restores a window that
     /// can be resized (ADR-0097); drawn disabled on one that cannot.
     pub fn zoom_button(&self) -> Rect {
         let minimize = self.minimize_button();
-        Rect::new(minimize.x + BUTTON_STEP, minimize.y, CLOSE_SIZE, CLOSE_SIZE)
+        let size = minimize.w;
+        Rect::new(minimize.x + BUTTON_STEP, minimize.y, size, size)
     }
 
     /// Where the app's pixels go.
     pub fn content(&self) -> Rect {
+        if self.full_screen() {
+            return Rect::new(self.x, self.y, self.width, self.height);
+        }
         Rect::new(self.x + 1, self.y + TITLE_HEIGHT, self.width, self.height)
     }
 
@@ -137,7 +178,7 @@ impl Frame {
     /// The edges (`edge::*`) a press at `x`, `y` would drag: within
     /// [`GRIP`] outside the frame, or on its border; never the title bar.
     pub fn edges_at(&self, x: i32, y: i32) -> u8 {
-        if !self.resizable() || self.minimized {
+        if !self.resizable() || self.minimized || self.full_screen() {
             return 0;
         }
         let o = self.outer();
@@ -181,6 +222,41 @@ pub mod edge {
 
 /// How far outside a resizable window's frame its edges can be caught.
 pub const GRIP: i32 = 5;
+/// A title bar dragged this close to the screen's side, or to the area's
+/// top, puts the window there when let go (ADR-0107).
+pub const SNAP_EDGE: i32 = 4;
+/// At the side, this close to the area's top or bottom: a quarter.
+pub const SNAP_CORNER: i32 = 80;
+/// How far a tiled window's title bar is dragged before it comes loose.
+const LOOSEN: i32 = 6;
+
+/// The shortcuts for the focused window (ADR-0107): Super with the
+/// arrows, and Super+F.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileKey {
+    /// The left half; from the right half, back where it was.
+    Left,
+    Right,
+    /// All of the area.
+    Up,
+    /// Back where it was; a window where the user left it is minimized.
+    Down,
+    /// Full screen, or back.
+    FullScreen,
+}
+
+impl TileKey {
+    pub fn of(byte: u8) -> Option<Self> {
+        match byte {
+            proto::KEY_TILE_LEFT => Some(Self::Left),
+            proto::KEY_TILE_RIGHT => Some(Self::Right),
+            proto::KEY_TILE_UP => Some(Self::Up),
+            proto::KEY_TILE_DOWN => Some(Self::Down),
+            proto::KEY_FULL_SCREEN => Some(Self::FullScreen),
+            _ => None,
+        }
+    }
+}
 /// How far along an edge from a corner a press takes the corner.
 const CORNER: i32 = 14;
 
@@ -286,6 +362,13 @@ pub struct Manager {
     next_id: u32,
     /// The window being dragged, and the grab point inside it.
     drag: Option<(u32, i32, i32)>,
+    /// Where the drag's press was: a tiled window comes loose once the
+    /// pointer has moved from it (ADR-0107).
+    drag_from: (i32, i32),
+    /// Where the window dragged would be put if let go now (ADR-0107).
+    snap: Option<Tile>,
+    /// The whole screen, for full screen (ADR-0107); the area until set.
+    screen: Rect,
     /// The window being resized by an edge (ADR-0097).
     resize: Option<Resize>,
     /// Content pixels allowed on all windows together.
@@ -316,6 +399,9 @@ impl Manager {
             signals: BTreeSet::new(),
             next_id: 1,
             drag: None,
+            drag_from: (0, 0),
+            snap: None,
+            screen: area,
             resize: None,
             pixel_budget,
             clipboard: None,
@@ -329,6 +415,11 @@ impl Manager {
     /// The windows, bottom to top.
     pub fn frames(&self) -> &[Frame] {
         &self.frames
+    }
+
+    /// The whole screen, which full screen covers (ADR-0107).
+    pub fn set_screen(&mut self, screen: Rect) {
+        self.screen = screen;
     }
 
     pub fn focus(&self) -> Focus {
@@ -528,6 +619,7 @@ impl Manager {
             minimized: false,
             min: None,
             restore: None,
+            tile: None,
         });
         self.set_focus(Focus::Window(id));
         Ok(id)
@@ -632,6 +724,10 @@ impl Manager {
         }
         if let Some(key) = VolumeKey::of(byte) {
             return KeyRoute::Volume(key);
+        }
+        if let Some(key) = TileKey::of(byte) {
+            self.tile_key(key);
+            return KeyRoute::Consumed;
         }
         if matches!(
             byte,
@@ -794,16 +890,167 @@ impl Manager {
     /// The largest content a window may have: the area, the protocol's
     /// limit, and the pixels the other windows leave.
     fn largest(&self, id: u32) -> (i32, i32) {
+        self.largest_in(id, self.area.w - 2, self.area.h - TITLE_HEIGHT - 1)
+    }
+
+    /// The largest content up to `width × height`: the protocol's limit,
+    /// and the pixels the other windows leave.
+    fn largest_in(&self, id: u32, width: i32, height: i32) -> (i32, i32) {
         let others: usize = self
             .frames
             .iter()
             .filter(|f| f.id != id)
             .map(|f| (f.width * f.height) as usize)
             .sum();
-        let width = (self.area.w - 2).min(i32::from(proto::MAX_WIDTH));
-        let height = (self.area.h - TITLE_HEIGHT - 1).min(i32::from(proto::MAX_HEIGHT));
+        let width = width.min(i32::from(proto::MAX_WIDTH));
+        let height = height.min(i32::from(proto::MAX_HEIGHT));
         let budget = self.pixel_budget.saturating_sub(others) as i32;
         (width, height.min(budget / width.max(1)))
+    }
+
+    /// Where window `id` goes for `tile` (`x`, `y`, content `width`,
+    /// `height`): its part of the area (of the screen, full screen), at
+    /// least its smallest size; in that part's middle if it cannot fill
+    /// it.
+    fn tile_geometry(&self, id: u32, tile: Tile) -> Option<(i32, i32, i32, i32)> {
+        let frame = &self.frames[self.index(id)?];
+        let (min_w, min_h) = frame.min?;
+        if tile == Tile::FullScreen {
+            let s = self.screen;
+            let (w, h) = self.largest_in(id, s.w, s.h);
+            let (w, h) = (w.max(min_w), h.max(min_h));
+            return Some((s.x + (s.w - w) / 2, s.y + (s.h - h) / 2, w, h));
+        }
+        let a = self.area;
+        let (half_w, half_h) = (a.w / 2, a.h / 2);
+        // The part's outer rectangle.
+        let part = match tile {
+            Tile::Left => Rect::new(a.x, a.y, half_w, a.h),
+            Tile::Right => Rect::new(a.x + a.w - half_w, a.y, half_w, a.h),
+            Tile::TopLeft => Rect::new(a.x, a.y, half_w, half_h),
+            Tile::TopRight => Rect::new(a.x + a.w - half_w, a.y, half_w, half_h),
+            Tile::BottomLeft => Rect::new(a.x, a.y + a.h - half_h, half_w, half_h),
+            Tile::BottomRight => Rect::new(a.x + a.w - half_w, a.y + a.h - half_h, half_w, half_h),
+            Tile::Maximized | Tile::FullScreen => a,
+        };
+        let (w, h) = self.largest_in(id, part.w - 2, part.h - TITLE_HEIGHT - 1);
+        let (w, h) = (w.max(min_w), h.max(min_h));
+        let x = part.x + (part.w - (w + 2)).max(0) / 2;
+        let y = part.y + (part.h - (h + TITLE_HEIGHT + 1)).max(0) / 2;
+        Some((x, y, w, h))
+    }
+
+    /// Puts window `id` in `tile`'s place, or (`None`) back where it was
+    /// before (ADR-0107). Only a window that can be resized moves; `false`
+    /// if it did not.
+    pub fn tile(&mut self, id: u32, tile: Option<Tile>) -> bool {
+        let Some(index) = self.index(id).filter(|&i| self.frames[i].resizable()) else {
+            return false;
+        };
+        self.drag = None;
+        self.resize = None;
+        self.snap = None;
+        match tile {
+            None => {
+                let frame = &mut self.frames[index];
+                let Some((x, y, w, h)) = frame.restore.take() else {
+                    return false;
+                };
+                (frame.x, frame.y, frame.width, frame.height) = (x, y, w, h);
+                frame.tile = None;
+            }
+            Some(tile) => {
+                let Some((x, y, w, h)) = self.tile_geometry(id, tile) else {
+                    return false;
+                };
+                let frame = &mut self.frames[index];
+                if frame.tile.is_none() {
+                    frame.restore = Some((frame.x, frame.y, frame.width, frame.height));
+                }
+                (frame.x, frame.y, frame.width, frame.height) = (x, y, w, h);
+                frame.tile = Some(tile);
+                frame.minimized = false;
+            }
+        }
+        self.set_focus(Focus::Window(id));
+        // `set_focus` moved it to the top.
+        let top = self.frames.len() - 1;
+        self.tell_size(top);
+        true
+    }
+
+    /// The window shown full screen with the focus (ADR-0107): the
+    /// desktop then draws no menu bar or dock.
+    pub fn full_screen(&self) -> Option<u32> {
+        let Focus::Window(id) = self.focus else {
+            return None;
+        };
+        let frame = &self.frames[self.index(id)?];
+        (frame.full_screen() && !frame.minimized).then_some(id)
+    }
+
+    /// Where the window dragged would go if let go now (ADR-0107): its
+    /// outer rectangle, for the desktop to show.
+    pub fn snap_preview(&self) -> Option<Rect> {
+        let (id, _, _) = self.drag?;
+        let (x, y, w, h) = self.tile_geometry(id, self.snap?)?;
+        Some(Rect::new(x, y, w + 2, h + TITLE_HEIGHT + 1))
+    }
+
+    /// The place a title bar dragged to `x`, `y` would take: a half at
+    /// the screen's left or right edge, a quarter near its corners, all
+    /// of the area at its top.
+    fn snap_at(&self, x: i32, y: i32) -> Option<Tile> {
+        let (a, s) = (self.area, self.screen);
+        let left = x <= s.x + SNAP_EDGE;
+        let right = x >= s.x + s.w - 1 - SNAP_EDGE;
+        let top = y < a.y + SNAP_CORNER;
+        let bottom = y >= a.y + a.h - SNAP_CORNER;
+        match (left, right, top, bottom) {
+            (true, _, true, _) => Some(Tile::TopLeft),
+            (true, _, _, true) => Some(Tile::BottomLeft),
+            (true, ..) => Some(Tile::Left),
+            (_, true, true, _) => Some(Tile::TopRight),
+            (_, true, _, true) => Some(Tile::BottomRight),
+            (_, true, ..) => Some(Tile::Right),
+            _ if y <= a.y + SNAP_EDGE => Some(Tile::Maximized),
+            _ => None,
+        }
+    }
+
+    /// A shortcut for the focused window (ADR-0107); `true` if a window
+    /// moved.
+    fn tile_key(&mut self, key: TileKey) -> bool {
+        let Focus::Window(id) = self.focus else {
+            return false;
+        };
+        let Some(index) = self.index(id) else {
+            return false;
+        };
+        let frame = &self.frames[index];
+        let now = frame.tile;
+        if !frame.resizable() {
+            // A window of a fixed size can only be put away.
+            if key == TileKey::Down {
+                self.minimize(id);
+                return true;
+            }
+            return false;
+        }
+        match key {
+            TileKey::Left if now == Some(Tile::Right) => self.tile(id, None),
+            TileKey::Left => self.tile(id, Some(Tile::Left)),
+            TileKey::Right if now == Some(Tile::Left) => self.tile(id, None),
+            TileKey::Right => self.tile(id, Some(Tile::Right)),
+            TileKey::Up => self.tile(id, Some(Tile::Maximized)),
+            TileKey::Down if now.is_some() => self.tile(id, None),
+            TileKey::Down => {
+                self.minimize(id);
+                true
+            }
+            TileKey::FullScreen if now == Some(Tile::FullScreen) => self.tile(id, None),
+            TileKey::FullScreen => self.tile(id, Some(Tile::FullScreen)),
+        }
     }
 
     /// Follows the pointer with the edges being dragged; `true` if the
@@ -859,7 +1106,9 @@ impl Manager {
         };
         let frame = &mut self.frames[index];
         if (frame.width, frame.height) != (resize.start.2, resize.start.3) {
+            // Resized by hand: it is where the user left it now.
             frame.restore = None;
+            frame.tile = None;
             self.tell_size(index);
         }
     }
@@ -884,31 +1133,16 @@ impl Manager {
     /// Maximizes a resizable window to the area (in its middle, if the
     /// largest content is smaller), or puts it back where it was. `false`
     /// if it cannot be resized.
+    /// Tiled (ADR-0107) windows are put back too.
     pub fn zoom(&mut self, id: u32) -> bool {
-        let Some(index) = self.index(id).filter(|&i| self.frames[i].resizable()) else {
+        let Some(index) = self.index(id) else {
             return false;
         };
-        self.drag = None;
-        self.resize = None;
-        let (largest_w, largest_h) = self.largest(id);
-        let area = self.area;
-        let frame = &mut self.frames[index];
-        let (min_w, min_h) = frame.min.unwrap_or_default();
-        if let Some((x, y, w, h)) = frame.restore.take() {
-            (frame.x, frame.y, frame.width, frame.height) = (x, y, w, h);
+        if self.frames[index].tile.is_some() {
+            self.tile(id, None)
         } else {
-            frame.restore = Some((frame.x, frame.y, frame.width, frame.height));
-            let (w, h) = (largest_w.max(min_w), largest_h.max(min_h));
-            frame.width = w;
-            frame.height = h;
-            frame.x = area.x + (area.w - (w + 2)) / 2;
-            frame.y = area.y;
+            self.tile(id, Some(Tile::Maximized))
         }
-        self.set_focus(Focus::Window(id));
-        // `set_focus` moved it to the top.
-        let top = self.frames.len() - 1;
-        self.tell_size(top);
-        true
     }
 
     /// A double click at `x`, `y`: on a resizable window's title bar (not
@@ -968,9 +1202,35 @@ impl Manager {
         if let Some(resize) = self.resize {
             return self.resize_to(resize, x, y);
         }
-        if let Some((id, grab_x, grab_y)) = self.drag
+        if let Some((id, mut grab_x, grab_y)) = self.drag
             && let Some(index) = self.index(id)
         {
+            let (fx, fy) = self.drag_from;
+            let moved = (x - fx).abs() > LOOSEN || (y - fy).abs() > LOOSEN;
+            // A tiled window dragged away goes back to its size, the grab
+            // as far along its title bar as before (ADR-0107).
+            if moved
+                && self.frames[index].tile.is_some()
+                && let Some((_, _, w, h)) = self.frames[index].restore
+            {
+                let frame = &mut self.frames[index];
+                let before = frame.outer().w.max(1);
+                grab_x = grab_x * (w + 2) / before;
+                (frame.width, frame.height) = (w, h);
+                frame.restore = None;
+                frame.tile = None;
+                self.drag = Some((id, grab_x, grab_y));
+                self.tell_size(index);
+            }
+            // Not yet loose: it stays in its place.
+            if self.frames[index].tile.is_some() {
+                return false;
+            }
+            self.snap = if self.frames[index].resizable() && self.frames[index].tile.is_none() {
+                self.snap_at(x, y)
+            } else {
+                None
+            };
             let area = self.area;
             let frame = &mut self.frames[index];
             let w = frame.outer().w;
@@ -1005,7 +1265,14 @@ impl Manager {
     /// A pointer button went down or up at `x`, `y`. `true` if a window
     /// took it; otherwise the desktop behind the windows gets it.
     pub fn button(&mut self, button: u8, pressed: bool, x: i32, y: i32) -> bool {
-        if !pressed && button == 1 && self.drag.take().is_some() {
+        if !pressed
+            && button == 1
+            && let Some((id, _, _)) = self.drag.take()
+        {
+            // Let go at an edge: the window takes that place (ADR-0107).
+            if let Some(tile) = self.snap.take() {
+                self.tile(id, Some(tile));
+            }
             return true;
         }
         if !pressed
@@ -1063,6 +1330,8 @@ impl Manager {
             );
         } else if pressed && button == 1 && on_title {
             self.drag = Some((id, grab_x, grab_y));
+            self.drag_from = (x, y);
+            self.snap = None;
         } else if content.contains(x, y) && self.focus == Focus::Window(id) {
             if pressed {
                 self.user_acted(owner);

@@ -31,6 +31,8 @@ const SHIFT: u8 = 1 << 0;
 const CTRL: u8 = 1 << 1;
 const CAPS: u8 = 1 << 2;
 const EXTENDED: u8 = 1 << 3;
+/// The Windows (Super) key, left or right (`0xe0 0x5b`, `0xe0 0x5c`).
+const SUPER: u8 = 1 << 4;
 
 static STATE: AtomicU8 = AtomicU8::new(0);
 
@@ -151,6 +153,7 @@ fn translate(code: u8) -> Option<u8> {
     let modifier = match key {
         0x2a | 0x36 => SHIFT,
         0x1d => CTRL, // left or (extended) right control
+        0x5b | 0x5c if extended => SUPER,
         _ => 0,
     };
     if modifier != 0 {
@@ -169,6 +172,18 @@ fn translate(code: u8) -> Option<u8> {
     STATE.store(state, Ordering::Relaxed);
     if released {
         return None;
+    }
+    // Super with the arrows, and Super+F: arranging windows (ADR-0107).
+    if state & SUPER != 0 {
+        use oceans_abi::display as d;
+        return match (extended, key) {
+            (true, 0x4b) => Some(d::KEY_TILE_LEFT),
+            (true, 0x4d) => Some(d::KEY_TILE_RIGHT),
+            (true, 0x48) => Some(d::KEY_TILE_UP),
+            (true, 0x50) => Some(d::KEY_TILE_DOWN),
+            (false, 0x21) => Some(d::KEY_FULL_SCREEN),
+            _ => None,
+        };
     }
     if extended {
         use oceans_abi::display as d;

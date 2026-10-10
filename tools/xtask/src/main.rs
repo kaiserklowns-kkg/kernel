@@ -496,8 +496,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey ret",
     b"@monitor sendkey ctrl-v",
     // Resizing (ADR-0097): the window is at 451,171 (content 760x520).
-    // Its zoom button (511,185) maximizes it to the area (1024x663 at
-    // 127,28): the page then covers 200,400, and 1150,175 is page, not
+    // Its zoom button (511,185) maximizes it to the area (1278x663 at
+    // 0,28, ADR-0107): the page then covers 200,400, and 1150,175 is page, not
     // title bar. A double click on the title bar puts it back; then its
     // right edge, caught outside the frame at 1214,400, is dragged 200
     // to the left: the page, laid out again, ends at 1012.
@@ -514,6 +514,28 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move -200 0",
     b"@monitor mouse_button 0",
     b"@screen 1000 499 ffffff Text Editor narrower, its page laid out again",
+    // Arranging windows (ADR-0107). Its title bar (at 700,185), dragged
+    // to the screen's left side, puts it in the left half (content from
+    // 1,56: 638 x 663), its page at 300,400. Super+Right puts it back,
+    // again the right half (from 641,56); Super+Up all of the area;
+    // Super+F full screen, its toolbar where the menu bar was and its
+    // page over the dock; Super+F back where it was dragged.
+    b"@monitor mouse_move -314 -215",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_move -3000 0",
+    b"@monitor mouse_button 0",
+    b"@screen 300 400 ffffff Text Editor in the left half",
+    b"@monitor sendkey meta_l-right",
+    b"@monitor sendkey meta_l-right",
+    b"@screen 1000 400 ffffff Text Editor in the right half",
+    b"@monitor sendkey meta_l-up",
+    b"@screen 300 400 ffffff Text Editor in all of the area",
+    b"@monitor sendkey meta_l-f",
+    b"@screen 900 10 e9e9ee Text Editor full screen, its toolbar over the menu bar",
+    b"@screen 640 760 ffffff Text Editor full screen, its page over the dock",
+    b"@monitor sendkey meta_l-f",
+    // The mouse back where it was, from 0,185.
+    b"@monitor mouse_move 1014 215",
     // The mouse stays for opening a file from Files (ADR-0099), at 1014,400.
     b"@monitor sendkey ctrl-s",
     b"app stop app.oceans.editor\r\n",
@@ -1011,8 +1033,11 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("edited in oceansoceans> "),
     Expect::Contains("display: clipboard: pasted into the Terminal"),
     // Resizing (ADR-0097): maximized, restored, narrowed by its edge.
-    Expect::Contains("display: Text Editor's window resized to 1024x663"),
+    Expect::Contains("display: Text Editor's window resized to 1278x663"),
     Expect::Contains("display: Text Editor's window resized to 760x520"),
+    // Arranging windows (ADR-0107): a half, then full screen.
+    Expect::Contains("display: Text Editor's window resized to 638x663"),
+    Expect::Contains("display: Text Editor's window resized to 1280x800"),
     Expect::Contains("display: Text Editor's window resized to 560x520"),
     // Opening files (ADR-0099): from Files, in the default app for PNG,
     // then in the one chosen; started with the file's name.

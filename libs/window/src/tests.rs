@@ -745,3 +745,160 @@ fn the_player_with_the_media_keys_says_what_it_plays() {
     assert_eq!(m.media_key(proto::KEY_PLAY_PAUSE), KeyRoute::Window(APP));
     assert_eq!(kinds(&mut m, APP), [(kind::KEY, music)]);
 }
+
+/// The screen around `AREA`: from the menu bar's top to below the dock.
+const SCREEN: Rect = Rect::new(AREA.x, 0, AREA.w, 800);
+
+fn resizable(m: &mut Manager) -> u32 {
+    m.set_screen(SCREEN);
+    let id = m.open(APP, "A", "", 400, 300).unwrap();
+    m.set_resizable(APP, id, 200, 100).unwrap();
+    m.take_events(APP, 100);
+    id
+}
+
+fn place(m: &Manager) -> (i32, i32, i32, i32, Option<Tile>) {
+    let f = m.frames().last().unwrap();
+    (f.x, f.y, f.width, f.height, f.tile)
+}
+
+#[test]
+fn a_title_bar_dragged_to_an_edge_tiles_the_window() {
+    let mut m = manager();
+    let id = resizable(&mut m);
+    let before = m.frames()[0].clone();
+    let title = before.title_bar();
+    // To the left side: the left half (486 of the 972, with the frame).
+    m.button(1, true, title.x + 100, title.y + 10);
+    m.pointer_moved(AREA.x, 400);
+    assert_eq!(m.snap_preview(), Some(Rect::new(AREA.x, AREA.y, 486, 732)));
+    m.button(1, false, AREA.x, 400);
+    assert_eq!(place(&m), (AREA.x, AREA.y, 484, 703, Some(Tile::Left)));
+    assert_eq!(resizes(&mut m, APP), [(id, 484, 703)]);
+    assert_eq!(m.snap_preview(), None);
+    // Dragged away: a few pixels do nothing; then back to its size, the
+    // grab as far along the title bar (100 of 486 → 82 of 402).
+    let title = m.frames()[0].title_bar();
+    m.button(1, true, title.x + 100, title.y + 10);
+    assert!(!m.pointer_moved(title.x + 103, title.y + 12));
+    assert_eq!(place(&m).4, Some(Tile::Left));
+    m.pointer_moved(title.x + 300, title.y + 200);
+    let f = m.frames()[0].clone();
+    assert_eq!(
+        (f.width, f.height, f.tile, f.restore),
+        (400, 300, None, None)
+    );
+    assert_eq!(f.x, title.x + 300 - 82);
+    assert_eq!(resizes(&mut m, APP), [(id, 400, 300)]);
+    // Near the right side's top: the top right quarter (486 x 366).
+    m.pointer_moved(AREA.x + AREA.w - 1, AREA.y + 10);
+    assert_eq!(
+        m.snap_preview(),
+        Some(Rect::new(AREA.x + 486, AREA.y, 486, 366))
+    );
+    m.button(1, false, AREA.x + AREA.w - 1, AREA.y + 10);
+    assert_eq!(place(&m).4, Some(Tile::TopRight));
+    // To the top: all of the area.
+    m.tile(id, None);
+    let title = m.frames()[0].title_bar();
+    m.button(1, true, title.x + 150, title.y + 10);
+    m.pointer_moved(600, AREA.y);
+    m.button(1, false, 600, AREA.y);
+    assert_eq!(place(&m), (AREA.x, AREA.y, 970, 703, Some(Tile::Maximized)));
+    // A drag let go away from the edges leaves no tile; a fixed window is
+    // never tiled.
+    m.tile(id, None);
+    let title = m.frames()[0].title_bar();
+    m.button(1, true, title.x + 150, title.y + 10);
+    m.pointer_moved(600, 400);
+    assert_eq!(m.snap_preview(), None);
+    m.button(1, false, 600, 400);
+    assert_eq!(place(&m).4, None);
+    let fixed = m.open(OTHER, "B", "", 200, 100).unwrap();
+    let title = m.frames()[1].title_bar();
+    m.button(1, true, title.x + 150, title.y + 10);
+    m.pointer_moved(AREA.x, 400);
+    assert_eq!(m.snap_preview(), None);
+    m.button(1, false, AREA.x, 400);
+    assert_eq!(m.frames()[1].tile, None);
+    assert!(!m.tile(fixed, Some(Tile::Left)));
+}
+
+#[test]
+fn shortcuts_tile_the_focused_window() {
+    let mut m = manager();
+    let id = resizable(&mut m);
+    let before = place(&m);
+    assert_eq!(m.key(proto::KEY_TILE_LEFT), KeyRoute::Consumed);
+    assert_eq!(place(&m).4, Some(Tile::Left));
+    // From the left half, Super+Right puts it back; again, the right half.
+    m.key(proto::KEY_TILE_RIGHT);
+    assert_eq!(place(&m), before);
+    m.key(proto::KEY_TILE_RIGHT);
+    assert_eq!(
+        place(&m),
+        (AREA.x + 486, AREA.y, 484, 703, Some(Tile::Right))
+    );
+    // Up: all of the area; Down: back where it was; Down again: away.
+    m.key(proto::KEY_TILE_UP);
+    assert_eq!(place(&m).4, Some(Tile::Maximized));
+    m.key(proto::KEY_TILE_DOWN);
+    assert_eq!(place(&m), before);
+    assert_eq!(resizes(&mut m, APP).len(), 5);
+    m.key(proto::KEY_TILE_DOWN);
+    assert!(m.frames()[0].minimized);
+    assert_eq!(m.focus(), Focus::Terminal);
+    // No app sees the keys; with the Terminal focused they do nothing.
+    m.take_events(APP, 100);
+    assert_eq!(m.key(proto::KEY_TILE_LEFT), KeyRoute::Consumed);
+    assert!(kinds(&mut m, APP).is_empty());
+    // A fixed window only goes away.
+    let fixed = m.open(OTHER, "B", "", 200, 100).unwrap();
+    m.key(proto::KEY_TILE_LEFT);
+    assert_eq!(m.frames().last().unwrap().tile, None);
+    m.key(proto::KEY_TILE_DOWN);
+    assert!(m.frames().iter().any(|f| f.id == fixed && f.minimized));
+    assert_eq!(m.frames()[0].id, id);
+}
+
+#[test]
+fn full_screen_covers_the_screen_without_a_frame() {
+    let mut m = Manager::new(AREA, 2 * 972 * 800);
+    let id = resizable(&mut m);
+    let before = place(&m);
+    m.key(proto::KEY_FULL_SCREEN);
+    let f = m.frames()[0].clone();
+    assert_eq!((f.x, f.y, f.width, f.height), (AREA.x, 0, 972, 800));
+    assert!(f.full_screen());
+    assert_eq!(f.outer(), f.content());
+    assert_eq!(f.content(), SCREEN);
+    assert_eq!(f.title_bar().w, 0);
+    assert_eq!(f.edges_at(AREA.x + 971, 400), 0);
+    assert_eq!(m.full_screen(), Some(id));
+    assert_eq!(resizes(&mut m, APP), [(id, 972, 800)]);
+    // A click at the screen's corner is the app's, at its own (0, 0).
+    assert!(m.button(1, true, AREA.x, 0));
+    let event = m.take_events(APP, 10)[0];
+    assert_eq!((event.kind, event.x, event.y), (kind::BUTTON, 0, 0));
+    // The menu bar and dock come back while another has the focus.
+    m.key(proto::KEY_NEXT_WINDOW);
+    assert_eq!(m.full_screen(), None);
+    m.set_focus(Focus::Window(id));
+    assert_eq!(m.full_screen(), Some(id));
+    // Super+F again: back where it was.
+    m.key(proto::KEY_FULL_SCREEN);
+    assert_eq!(place(&m), before);
+    assert_eq!(m.full_screen(), None);
+}
+
+#[test]
+fn windows_may_be_as_large_as_a_4k_screen() {
+    let request = OpenRequest {
+        bits: 1,
+        width: 3840,
+        height: 2160,
+        title: "big",
+    };
+    let (data, len) = request.encode().unwrap();
+    assert_eq!(OpenRequest::decode(&data[..len]), Some(request));
+}

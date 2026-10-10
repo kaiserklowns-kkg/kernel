@@ -13,6 +13,8 @@ const LEFT_CTRL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
 const RIGHT_CTRL: u8 = 1 << 4;
 const RIGHT_SHIFT: u8 = 1 << 5;
+const LEFT_GUI: u8 = 1 << 3;
+const RIGHT_GUI: u8 = 1 << 7;
 
 /// Usage IDs (HID Usage Tables §10).
 const CAPS_LOCK: u8 = 0x39;
@@ -45,6 +47,26 @@ const VOLUME_DOWN: u8 = 0x8d;
 const VOLUME_UP: u8 = 0x8e;
 /// Keypad usages 0x54–0x63.
 const KEYPAD: &[u8; 0x10] = b"/*-+\r1234567890.";
+/// Super (the GUI key) with Left, Right, Up, Down and F:
+/// `display::KEY_TILE_LEFT` … `KEY_FULL_SCREEN` (ADR-0107).
+pub const TILE_LEFT: u8 = 0xa4;
+pub const TILE_RIGHT: u8 = 0xa5;
+pub const TILE_UP: u8 = 0xa6;
+pub const TILE_DOWN: u8 = 0xa7;
+pub const FULL_SCREEN: u8 = 0xa8;
+
+/// What a key pressed with Super sends: arranging windows; other keys
+/// with Super send nothing.
+fn arrange(key: u8) -> Option<u8> {
+    match key {
+        0x50 => Some(TILE_LEFT),
+        0x4f => Some(TILE_RIGHT),
+        0x52 => Some(TILE_UP),
+        0x51 => Some(TILE_DOWN),
+        0x09 => Some(FULL_SCREEN),
+        _ => None,
+    }
+}
 
 pub const REPORT_SIZE: usize = 8;
 
@@ -76,11 +98,16 @@ impl Keyboard {
         }
         let shift = modifiers & (LEFT_SHIFT | RIGHT_SHIFT) != 0;
         let ctrl = modifiers & (LEFT_CTRL | RIGHT_CTRL) != 0;
+        let super_key = modifiers & (LEFT_GUI | RIGHT_GUI) != 0;
         for &key in keys {
             if key == 0 || self.pressed.contains(&key) {
                 continue;
             }
-            if key == CAPS_LOCK {
+            if super_key {
+                if let Some(byte) = arrange(key) {
+                    emit(byte);
+                }
+            } else if key == CAPS_LOCK {
                 self.caps = !self.caps;
             } else if let Some(byte) = self.translate(key, shift, ctrl) {
                 emit(byte);
@@ -210,6 +237,39 @@ mod tests {
             ],
         );
         assert_eq!(out, [BACK_TAB, BACK_TAB, NEXT_WINDOW]);
+    }
+
+    #[test]
+    fn super_with_the_arrows_and_f_arranges_windows() {
+        let mut keyboard = Keyboard::new();
+        let out = feed(
+            &mut keyboard,
+            &[
+                keys(LEFT_GUI, [0x50, 0, 0, 0, 0, 0]),
+                keys(LEFT_GUI, [0; 6]),
+                keys(RIGHT_GUI, [0x4f, 0, 0, 0, 0, 0]),
+                keys(RIGHT_GUI, [0; 6]),
+                keys(LEFT_GUI, [0x52, 0, 0, 0, 0, 0]),
+                keys(LEFT_GUI, [0x51, 0, 0, 0, 0, 0]),
+                keys(LEFT_GUI, [0x09, 0, 0, 0, 0, 0]),
+                // Other keys with Super: nothing; without it, as ever.
+                keys(LEFT_GUI, [0x04, 0, 0, 0, 0, 0]),
+                keys(0, [0; 6]),
+                keys(0, [0x50, 0x09, 0, 0, 0, 0]),
+            ],
+        );
+        assert_eq!(
+            out,
+            [
+                TILE_LEFT,
+                TILE_RIGHT,
+                TILE_UP,
+                TILE_DOWN,
+                FULL_SCREEN,
+                0x82,
+                b'f'
+            ]
+        );
     }
 
     #[test]

@@ -328,6 +328,15 @@ pub mod display {
     pub const KEY_STOP: u8 = 0xa1;
     pub const KEY_PREVIOUS: u8 = 0xa2;
     pub const KEY_NEXT: u8 = 0xa3;
+    /// Super (the Windows key) with Left, Right, Up and Down, and Super+F
+    /// (ADR-0107): the focused window to the left or right half, all of
+    /// the area, back where it was (or away), and full screen. The
+    /// desktop takes them; no app sees them.
+    pub const KEY_TILE_LEFT: u8 = 0xa4;
+    pub const KEY_TILE_RIGHT: u8 = 0xa5;
+    pub const KEY_TILE_UP: u8 = 0xa6;
+    pub const KEY_TILE_DOWN: u8 = 0xa7;
+    pub const KEY_FULL_SCREEN: u8 = 0xa8;
     /// Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A as keyboards send them.
     pub const CTRL_A: u8 = 0x01;
     pub const CTRL_C: u8 = 0x03;

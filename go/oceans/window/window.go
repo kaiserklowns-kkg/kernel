@@ -49,8 +49,8 @@ const MaxNotification = 120
 const (
 	MinWidth   = 64
 	MinHeight  = 32
-	MaxWidth   = 1024
-	MaxHeight  = 768
+	MaxWidth   = 3840
+	MaxHeight  = 2160
 	MaxTitle   = 48
 	MaxEvents  = 20
 	eventSize  = 12

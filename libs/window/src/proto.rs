@@ -151,8 +151,11 @@ impl Status {
 /// Window content sizes accepted, in pixels.
 pub const MIN_WIDTH: u16 = 64;
 pub const MIN_HEIGHT: u16 = 32;
-pub const MAX_WIDTH: u16 = 1024;
-pub const MAX_HEIGHT: u16 = 768;
+/// Up to a 4K screen, so a window can fill one (ADR-0107; 1024 × 768
+/// before). The display service's pixel budget bounds what all windows
+/// take together.
+pub const MAX_WIDTH: u16 = 3840;
+pub const MAX_HEIGHT: u16 = 2160;
 /// Longest title, in bytes (UTF-8, no control characters).
 pub const MAX_TITLE: usize = 48;
 pub const MAX_WINDOWS_PER_APP: usize = 4;
@@ -178,6 +181,15 @@ pub const KEY_PLAY_PAUSE: u8 = 0xa0;
 pub const KEY_STOP: u8 = 0xa1;
 pub const KEY_PREVIOUS: u8 = 0xa2;
 pub const KEY_NEXT: u8 = 0xa3;
+/// Super with Left, Right, Up and Down, and Super+F
+/// (`oceans_abi::display::KEY_TILE_LEFT` … `KEY_FULL_SCREEN`, ADR-0107):
+/// the focused window to a half, all of the area, back, full screen. The
+/// desktop's, never an app's.
+pub const KEY_TILE_LEFT: u8 = 0xa4;
+pub const KEY_TILE_RIGHT: u8 = 0xa5;
+pub const KEY_TILE_UP: u8 = 0xa6;
+pub const KEY_TILE_DOWN: u8 = 0xa7;
+pub const KEY_FULL_SCREEN: u8 = 0xa8;
 
 /// Event kinds.
 pub mod kind {
