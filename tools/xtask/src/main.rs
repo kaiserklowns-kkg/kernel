@@ -677,6 +677,24 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: unlock refused",
     b"@keys oceans123\r",
     b"@wait desktop: unlocked",
+    // Settings' Account (ADR-0111), by the keyboard alone: Tab gives the
+    // sidebar the keyboard and End chooses Account; three Tabs reach the
+    // current password (after the name field and Rename). The password
+    // becomes waves2026, Enter in its second field.
+    b"app start app.oceans.settings\r\n",
+    b"@wait display: windows for app.oceans.settings",
+    b"@monitor sendkey tab",
+    b"@monitor sendkey end",
+    b"@monitor sendkey tab",
+    b"@monitor sendkey tab",
+    b"@monitor sendkey tab",
+    b"@keys oceans123",
+    b"@monitor sendkey tab",
+    b"@keys waves2026",
+    b"@monitor sendkey tab",
+    b"@keys waves2026\r",
+    b"@wait core: audit: changed the user's password, with the current one",
+    b"app stop app.oceans.settings\r\n",
     b"@monitor device_del deskmouse",
     // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
     // Down goes back to 75%, Mute mutes again.
@@ -1073,7 +1091,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed settings.opk from the system image"),
     // `system-settings` (ADR-0096), with the system's own rights, unasked.
     Expect::Contains(
-        "core: audit: started app.oceans.settings 1.1.0 with window, system-info, manage-apps, system-settings",
+        "core: audit: started app.oceans.settings 1.2.0 with window, system-info, manage-apps, system-settings",
     ),
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),
@@ -1113,6 +1131,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("desktop: locked"),
     Expect::Contains("core: audit: a wrong password at the lock screen (1 in a row)"),
     Expect::Contains("core: user: unlocked"),
+    // Changed in Settings, with the current password (ADR-0111).
+    Expect::Contains("core: audit: changed the user's password, with the current one"),
     // The system volume (ADR-0100): at full on a fresh disk; set from the
     // shell, the driver applies it and Core keeps it; the panel's slider
     // and Mute go the same way.

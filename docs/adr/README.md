@@ -117,5 +117,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0108](0108-search-and-launcher.md) | Search in the launcher: Super alone, apps and the files of Home (Core's `FIND`), Enter opens | Accepted |
 | [0109](0109-apps-kept-in-the-dock.md) | Apps kept in the dock: a right click keeps or takes out, Core keeps them across reboots | Accepted |
 | [0110](0110-lock-screen-and-password.md) | The lock screen and the user's password: Argon2id kept by Core, Super+L, waits after wrong passwords | Accepted |
+| [0111](0111-the-account-in-settings.md) | The account in Settings: changing the password needs the current one (`CHANGE_PASSWORD`), a password field | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

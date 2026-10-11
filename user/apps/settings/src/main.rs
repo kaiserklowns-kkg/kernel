@@ -8,6 +8,8 @@
 //! - **Apps:** the installed apps; for the one chosen, what it is, each
 //!   permission and its decision (allow, deny, ask again), and removing
 //!   it. Decisions are made through Core and audited as made in Settings.
+//! - **Account** (ADR-0111): the user's name, and the password that locks
+//!   the screen, set, changed or removed only with the current one.
 //!
 //! Its rights: `system-info`, and `manage-apps` (ADR-0081): a Core end
 //! that may query, decide, manage and audit, given only to the system's
@@ -24,7 +26,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use oceans_abi::sysinfo::{self, KernelInfo, MemoryInfo};
-use oceans_core_proto::{Core, Decision, decision, field, op, parts, source};
+use oceans_core_proto::{Core, CoreError, Decision, Status, decision, field, op, parts, source};
 use oceans_net_proto::{Colons, Dotted};
 use oceans_package::Permission;
 use oceans_rt::{Directory, Handle, Start};
@@ -34,7 +36,25 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 520;
-const SECTIONS: [&str; 4] = ["General", "Network", "Sound", "Apps"];
+const SECTIONS: [&str; 5] = ["General", "Network", "Sound", "Apps", "Account"];
+/// The Account section's fields (ADR-0111).
+const NAME_FIELD: u32 = 10;
+const CURRENT_FIELD: u32 = 11;
+const NEW_FIELD: u32 = 12;
+const CONFIRM_FIELD: u32 = 13;
+
+/// The account's page (ADR-0111): its name, and what is typed into its
+/// fields, kept only until it is used.
+#[derive(Default)]
+struct Account {
+    name: String,
+    password_set: bool,
+    new_name: String,
+    current: String,
+    new: String,
+    confirm: String,
+    message: String,
+}
 
 struct App {
     id: String,
@@ -63,6 +83,7 @@ struct Settings {
     /// The apps (and the detail) are read again at the next frame.
     stale: bool,
     message: String,
+    account: Account,
 }
 
 impl Settings {
@@ -89,6 +110,14 @@ impl Settings {
                 _ => break,
             }
         }
+        // The account (ADR-0111).
+        if let Ok(got) = core.call(op::USER, &[], &[], &mut reply)
+            && got.len >= 1
+        {
+            self.account.password_set = reply[0] != 0;
+            self.account.name =
+                String::from(core::str::from_utf8(&reply[1..got.len]).unwrap_or("?"));
+        }
         self.chosen = self.chosen.filter(|&i| i < self.apps.len());
         self.detail = self
             .chosen
@@ -107,6 +136,61 @@ impl Settings {
         self.message = match core.about(op::DECIDE, &request, &detail.id, &mut reply) {
             Ok(_) => String::from("Saved."),
             Err((error, _)) => alloc::format!("Not saved: {}", error.message()),
+        };
+        self.stale = true;
+    }
+
+    /// `SET_NAME`: the account's new name.
+    fn rename(&mut self) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let name = self.account.new_name.trim().to_string();
+        let mut reply = [0u8; 8];
+        self.account.message = match core.call(op::SET_NAME, name.as_bytes(), &[], &mut reply) {
+            Ok(_) => {
+                self.account.new_name.clear();
+                alloc::format!("Named {name}.")
+            }
+            Err(_) => String::from("A name has 1 to 32 characters."),
+        };
+        self.stale = true;
+    }
+
+    /// `CHANGE_PASSWORD` (ADR-0111): with the current password; `remove`,
+    /// to none. What was typed is forgotten whatever happens.
+    fn change_password(&mut self, remove: bool) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let current = core::mem::take(&mut self.account.current);
+        let new = core::mem::take(&mut self.account.new);
+        let confirm = core::mem::take(&mut self.account.confirm);
+        let new = if remove { String::new() } else { new };
+        if !remove && new != confirm {
+            self.account.message = String::from("The two new passwords are not the same.");
+            return;
+        }
+        if !remove && !(4..=64).contains(&new.len()) {
+            self.account.message = String::from("A password has 4 to 64 characters.");
+            return;
+        }
+        let mut data = Vec::with_capacity(1 + current.len() + new.len());
+        data.push(current.len() as u8);
+        data.extend_from_slice(current.as_bytes());
+        data.extend_from_slice(new.as_bytes());
+        let mut reply = [0u8; 16];
+        self.account.message = match core.call(op::CHANGE_PASSWORD, &data, &[], &mut reply) {
+            Ok(_) if remove => String::from("Password removed: the screen is not locked."),
+            Ok(_) => String::from("Password changed: it unlocks the screen from now on."),
+            Err((CoreError::Status(Status::WrongPassword), _)) => {
+                String::from("The current password is not right.")
+            }
+            Err((CoreError::Status(Status::TooSoon), got)) => alloc::format!(
+                "Too many wrong passwords: wait {} s.",
+                core::str::from_utf8(&reply[..got.min(reply.len())]).unwrap_or("?")
+            ),
+            Err((error, _)) => alloc::format!("Not changed: {}", error.message()),
         };
         self.stale = true;
     }
@@ -320,6 +404,50 @@ fn sound(ui: &mut Ui<'_, '_>, settings: &Settings) {
     ui.muted("Sound plays at 48 kHz, 16-bit stereo; apps that may play it are in Apps.");
 }
 
+/// The account (ADR-0111): its name, and the password that locks the
+/// screen, changed only with the current one.
+fn account(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
+    ui.heading("Account");
+    if settings.core.is_none() {
+        ui.muted("The account is not available to Settings.");
+        return;
+    }
+    let account = &mut settings.account;
+    ui.row("Name", &account.name);
+    let renamed = ui.text_field(NAME_FIELD, &mut account.new_name, "A new name");
+    let rename = ui.button("Rename") || renamed;
+    ui.separator();
+    ui.label(if account.password_set {
+        "A password locks the screen at start and with Super+L."
+    } else {
+        "No password: the screen is never locked."
+    });
+    if account.password_set {
+        ui.password_field(CURRENT_FIELD, &mut account.current, "Current password");
+    }
+    ui.password_field(NEW_FIELD, &mut account.new, "New password");
+    let entered = ui.password_field(CONFIRM_FIELD, &mut account.confirm, "New password again");
+    let label = if account.password_set {
+        "Change Password"
+    } else {
+        "Set Password"
+    };
+    let change = ui.primary_button(label) || entered;
+    let remove = account.password_set && ui.button("Remove Password");
+    if !account.message.is_empty() {
+        let message = account.message.clone();
+        ui.muted(&message);
+    }
+    if rename && !settings.account.new_name.trim().is_empty() {
+        settings.rename();
+    }
+    if change {
+        settings.change_password(false);
+    } else if remove {
+        settings.change_password(true);
+    }
+}
+
 fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     ui.heading("Apps");
     if settings.core.is_none() {
@@ -440,7 +568,8 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         0 => general(ui, settings),
         1 => network(ui, settings),
         2 => sound(ui, settings),
-        _ => apps(ui, settings),
+        3 => apps(ui, settings),
+        _ => account(ui, settings),
     }
 }
 
@@ -459,6 +588,7 @@ fn main(start: Start) -> i64 {
         detail: None,
         stale: true,
         message: String::new(),
+        account: Account::default(),
     };
     oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut settings, frame)
 }

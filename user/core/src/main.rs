@@ -771,6 +771,17 @@ impl Core {
     /// `SET_PASSWORD` (ADR-0110): hashed with Argon2id and a new salt;
     /// empty, no password.
     fn set_password(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let set = self.apply_password(data)?;
+        self.record(format_args!(
+            "{} the user's password",
+            if set { "set" } else { "removed" }
+        ));
+        Ok(())
+    }
+
+    /// The password `data` (empty: none) hashed and kept; `true` if one is
+    /// set now.
+    fn apply_password(&mut self, data: &[u8]) -> Result<bool, Refusal> {
         let password = core::str::from_utf8(data).map_err(|_| Status::BadRequest)?;
         let mut account = self.account.clone().unwrap_or_default();
         if password.is_empty() {
@@ -788,9 +799,45 @@ impl Core {
         let set = account.secret.is_some();
         self.save_account(account)?;
         self.throttle.succeeded();
+        Ok(set)
+    }
+
+    /// `CHANGE_PASSWORD` (ADR-0111): the current password first, checked
+    /// and slowed after wrong ones as at the lock screen; then as
+    /// `SET_PASSWORD`.
+    fn change_password(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let (&len, rest) = data.split_first().ok_or(Status::BadRequest)?;
+        let len = usize::from(len);
+        let (Some(current), Some(new)) = (rest.get(..len), rest.get(len..)) else {
+            return Err(Status::BadRequest.into());
+        };
+        let current = core::str::from_utf8(current).map_err(|_| Status::BadRequest)?;
+        let now = oceans_rt::clock_ms();
+        if let Err(wait_ms) = self.throttle.check(now) {
+            return Err(Refusal {
+                status: Status::TooSoon,
+                text: Some(alloc::format!("{}", wait_ms.div_ceil(1000))),
+            });
+        }
+        let right = match &self.account {
+            Some(account) => match &account.secret {
+                Some(secret) => secret.verify(current),
+                None => current.is_empty(),
+            },
+            None => false,
+        };
+        if !right {
+            self.throttle.failed(now);
+            self.record(format_args!(
+                "a wrong password to change the password ({} in a row)",
+                self.throttle.failures()
+            ));
+            return Err(Status::WrongPassword.into());
+        }
+        let set = self.apply_password(new)?;
         self.record(format_args!(
-            "{} the user's password",
-            if set { "set" } else { "removed" }
+            "{} the user's password, with the current one",
+            if set { "changed" } else { "removed" }
         ));
         Ok(())
     }
@@ -1278,6 +1325,7 @@ impl Core {
                     op::SET_PASSWORD => self.set_password(data),
                     op::SET_NAME => self.set_name(data),
                     op::UNLOCK => self.unlock(data),
+                    op::CHANGE_PASSWORD => self.change_password(data),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;

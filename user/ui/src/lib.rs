@@ -453,6 +453,16 @@ impl<'s, 'f> Ui<'s, 'f> {
     /// A one-line text field (`id` tells fields apart): a click gives it
     /// the keyboard. Returns `true` when Enter is pressed in it.
     pub fn text_field(&mut self, id: u32, text: &mut String, placeholder: &str) -> bool {
+        self.field(id, text, placeholder, false)
+    }
+
+    /// A text field for a password (ADR-0111): a dot for each character,
+    /// and it cannot be copied or cut (pasting into it works).
+    pub fn password_field(&mut self, id: u32, text: &mut String, placeholder: &str) -> bool {
+        self.field(id, text, placeholder, true)
+    }
+
+    fn field(&mut self, id: u32, text: &mut String, placeholder: &str, secret: bool) -> bool {
         let r = self.next(BUTTON_HEIGHT);
         self.node(id, Role::Field, placeholder, r, true);
         if self.take_click(r) {
@@ -470,7 +480,7 @@ impl<'s, 'f> Ui<'s, 'f> {
                     0x20..=0x7e if text.len() < FIELD_MAX => text.push(char::from(key)),
                     // A field has no selection: Ctrl+C copies all of it,
                     // Ctrl+X cuts all of it (ADR-0095).
-                    key if is_copy(key) || is_cut(key) => {
+                    key if !secret && (is_copy(key) || is_cut(key)) => {
                         self.copied = (!text.is_empty()).then(|| text.clone());
                         if is_cut(key) {
                             text.clear();
@@ -508,7 +518,21 @@ impl<'s, 'f> Ui<'s, 'f> {
             (text.as_str(), colour::TEXT)
         };
         let clip = Rect::new(inner.x + 8, inner.y, inner.w - 16, inner.h);
-        let end = self.text_at(inner.x + 8, inner.y + 5, shown, Style::Body, ink, clip);
+        let end = if secret && !text.is_empty() {
+            // A dot for each character, never the text.
+            let dots = text.chars().count().min(40) as i32;
+            for i in 0..dots {
+                self.surface.circle(
+                    inner.x + 12 + i * 12,
+                    inner.y + inner.h / 2,
+                    4,
+                    colour::TEXT,
+                );
+            }
+            inner.x + 12 + dots * 12 - 6
+        } else {
+            self.text_at(inner.x + 8, inner.y + 5, shown, Style::Body, ink, clip)
+        };
         if focused {
             let x = if text.is_empty() {
                 inner.x + 8

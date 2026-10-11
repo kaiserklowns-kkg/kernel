@@ -131,6 +131,11 @@ pub mod op {
     /// opens. `WrongPassword`; after a few, `TooSoon`, its reply the
     /// seconds to wait (decimal). Without a password, `Ok`.
     pub const UNLOCK: u64 = 30;
+    /// data = `[current length u8][current][new]` (ADR-0111): as
+    /// `SET_PASSWORD`, only with the current password (empty if none is
+    /// set), checked and slowed after wrong ones as `UNLOCK` is: for apps
+    /// such as Settings, whose user may not be the account's.
+    pub const CHANGE_PASSWORD: u64 = 31;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -199,6 +204,7 @@ pub mod access {
             | op::SET_VOLUME
             | op::PIN
             | op::SET_PASSWORD
+            | op::CHANGE_PASSWORD
             | op::SET_NAME => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
