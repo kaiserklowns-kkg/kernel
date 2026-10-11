@@ -14,6 +14,7 @@
 extern crate alloc;
 
 mod text;
+pub mod theme;
 
 pub use oceans_window::Rect;
 pub use text::{Glyph, Style, Typesetter};

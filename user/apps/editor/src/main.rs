@@ -206,7 +206,7 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
             app.open();
         }
     }
-    ui.background(colour::WINDOW);
+    ui.background(colour::window());
     let whole = ui.area;
     if app.home.is_none() {
         ui.area = Rect::new(whole.x + 20, whole.y + 20, whole.w - 40, whole.h - 40);
@@ -218,9 +218,11 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
 
     // The toolbar: the name, Open, Save, New.
     let bar = Rect::new(whole.x, whole.y, whole.w, TOOLBAR);
-    ui.surface.fill(bar, colour::SIDEBAR);
-    ui.surface
-        .fill(Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1), colour::LINE);
+    ui.surface.fill(bar, colour::sidebar());
+    ui.surface.fill(
+        Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1),
+        colour::line(),
+    );
     ui.area = Rect::new(12, 11, 320, 30);
     ui.y = 11;
     if ui.text_field(NAME, &mut app.name, "File name, in Home") && app.may(Pending::Open) {
@@ -253,7 +255,7 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         whole.w,
         whole.h - TOOLBAR - STATUS,
     );
-    ui.surface.fill(page, colour::SURFACE);
+    ui.surface.fill(page, colour::surface());
     let text_x = page.x + 16;
     let text_top = page.y + 10;
     let rows = ((page.h - 20) / LINE).max(1) as usize;
@@ -350,10 +352,17 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
                 let x1 = ui.measure(&text[..from], Style::Body);
                 let x2 = ui.measure(&text[..to], Style::Body) + if number < l2 { 6 } else { 0 };
                 let band = Rect::new(text_x - app.left + x1, y, x2 - x1, LINE - 2);
-                ui.surface.fill(clip(band, view), colour::SELECTED);
+                ui.surface.fill(clip(band, view), colour::selected());
             }
         }
-        ui.text_at(text_x - app.left, y, text, Style::Body, colour::TEXT, view);
+        ui.text_at(
+            text_x - app.left,
+            y,
+            text,
+            Style::Body,
+            colour::text(),
+            view,
+        );
     }
     let page_focused = *ui.focus == Some(PAGE) && ui.input.focused;
     if page_focused {
@@ -361,15 +370,15 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         let y = text_top + (line - app.top) as i32 * LINE;
         if view.contains(x, y) {
             ui.surface
-                .fill(Rect::new(x, y + 1, 2, LINE - 4), colour::ACCENT);
+                .fill(Rect::new(x, y + 1, 2, LINE - 4), colour::accent());
         }
     }
 
     // The status bar.
     let status = Rect::new(whole.x, whole.y + whole.h - STATUS, whole.w, STATUS);
-    ui.surface.fill(status, colour::WINDOW);
+    ui.surface.fill(status, colour::window());
     ui.surface
-        .fill(Rect::new(status.x, status.y, status.w, 1), colour::LINE);
+        .fill(Rect::new(status.x, status.y, status.w, 1), colour::line());
     let mut text = String::new();
     let _ = write!(
         text,
@@ -388,7 +397,7 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         status.y + 5,
         &text,
         Style::Body,
-        colour::MUTED,
+        colour::muted(),
         status,
     );
     if !app.message.is_empty() {
@@ -398,7 +407,7 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
             status.y + 5,
             &message,
             Style::Body,
-            colour::MUTED,
+            colour::muted(),
             status,
         );
     }

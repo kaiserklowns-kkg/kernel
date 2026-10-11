@@ -705,6 +705,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: locked",
     b"@keys waves2026\r",
     b"@wait desktop: unlocked",
+    // Dark (ADR-0113): chosen in the shell, kept by Core; the desktop
+    // follows, its apps panel (at 905,330) dark. It stays for the next
+    // boot.
+    b"appearance dark\r\n",
+    b"@wait desktop: appearance dark, accent 0",
+    b"@monitor sendkey meta_l",
+    b"@screen 905 330 262629 the apps panel, dark",
+    b"@monitor sendkey esc",
     b"@monitor device_del deskmouse",
     // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
     // Down goes back to 75%, Mute mutes again.
@@ -905,6 +913,8 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("user: the screen locks after 1 minute without input"),
     Expect::Contains("core: user: the screen locks after 1 minute without input"),
     Expect::Contains("desktop: locked after 1 minute without input"),
+    // The appearance the first boot chose (ADR-0113), at start.
+    Expect::Contains("desktop: appearance dark, accent 0"),
     Expect::Contains("hda: volume 70%"),
     // Switching off (ADR-0085): the system stopped in order.
     Expect::Line("Stopping the system, then switching off..."),
@@ -1113,7 +1123,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed settings.opk from the system image"),
     // `system-settings` (ADR-0096), with the system's own rights, unasked.
     Expect::Contains(
-        "core: audit: started app.oceans.settings 1.3.0 with window, system-info, manage-apps, system-settings",
+        "core: audit: started app.oceans.settings 1.4.0 with window, system-info, manage-apps, system-settings",
     ),
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),
@@ -1155,6 +1165,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: user: unlocked"),
     // Changed in Settings, with the current password (ADR-0111).
     Expect::Contains("core: audit: changed the user's password, with the current one"),
+    // Dark (ADR-0113): kept by Core, followed by the desktop.
+    Expect::Line("appearance: dark, blue"),
+    Expect::Contains("core: appearance dark, accent 0"),
     // The system volume (ADR-0100): at full on a fresh disk; set from the
     // shell, the driver applies it and Core keeps it; the panel's slider
     // and Mute go the same way.

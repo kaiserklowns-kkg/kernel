@@ -224,7 +224,7 @@ impl Viewer {
 }
 
 fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
-    ui.background(colour::WINDOW);
+    ui.background(colour::window());
     let whole = ui.area;
     if app.home.is_none() {
         ui.area = Rect::new(whole.x + 20, whole.y + 20, whole.w - 40, whole.h - 40);
@@ -251,9 +251,11 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
 
     // The toolbar: the name, Open, Previous, Next, Fit / Actual size.
     let bar = Rect::new(whole.x, whole.y, whole.w, TOOLBAR);
-    ui.surface.fill(bar, colour::SIDEBAR);
-    ui.surface
-        .fill(Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1), colour::LINE);
+    ui.surface.fill(bar, colour::sidebar());
+    ui.surface.fill(
+        Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1),
+        colour::line(),
+    );
     ui.area = Rect::new(12, 11, 260, 30);
     ui.y = 11;
     if ui.text_field(NAME, &mut app.name, "Picture name, in Home") {
@@ -356,22 +358,22 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
             area.y + area.h / 2 - 10,
             hint,
             Style::Body,
-            colour::SURFACE,
+            colour::surface(),
             area,
         );
     }
 
     // The status bar.
     let bar = Rect::new(whole.x, whole.y + whole.h - STATUS, whole.w, STATUS);
-    ui.surface.fill(bar, colour::WINDOW);
+    ui.surface.fill(bar, colour::window());
     ui.surface
-        .fill(Rect::new(bar.x, bar.y, bar.w, 1), colour::LINE);
+        .fill(Rect::new(bar.x, bar.y, bar.w, 1), colour::line());
     let end = ui.text_at(
         bar.x + 12,
         bar.y + 5,
         &status,
         Style::Body,
-        colour::MUTED,
+        colour::muted(),
         bar,
     );
     if !app.message.is_empty() {
@@ -381,7 +383,7 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
         } else {
             end + 24
         };
-        ui.text_at(x, bar.y + 5, &message, Style::Body, colour::MUTED, bar);
+        ui.text_at(x, bar.y + 5, &message, Style::Body, colour::muted(), bar);
     }
 }
 

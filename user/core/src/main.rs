@@ -81,6 +81,8 @@ const DOCK_FILE: &str = "dock";
 /// The user's account (ADR-0110), in `/system`: the name and the
 /// password's Argon2id hash.
 const USER_FILE: &str = "user";
+/// The appearance and accent (ADR-0113), in `/system`: `APPEARANCE ACCENT`.
+const APPEARANCE_FILE: &str = "appearance";
 /// `FIND` (ADR-0108): the most entries of Home it looks at, how deep in
 /// folders, and the most names it gives.
 const FIND_VISIT: usize = 1000;
@@ -739,6 +741,22 @@ impl Core {
         Ok(())
     }
 
+    /// The appearance and accent the user chose (ADR-0113), from
+    /// `/system/appearance`; light and the first accent until then.
+    fn appearance(&self) -> [u8; 2] {
+        let bytes = read_path(&self.system_dir, APPEARANCE_FILE).unwrap_or_default();
+        let text = core::str::from_utf8(&bytes).unwrap_or("");
+        let mut words = text.split_whitespace().map(|w| w.parse::<u8>().ok());
+        match (words.next().flatten(), words.next().flatten()) {
+            (Some(appearance), Some(accent))
+                if appearance <= 1 && accent < oceans_core_proto::ACCENT_COUNT =>
+            {
+                [appearance, accent]
+            }
+            _ => [0, 0],
+        }
+    }
+
     /// At boot: the user's account (ADR-0110). None kept: no password.
     fn load_account(&mut self) {
         self.account = match read_path(&self.system_dir, USER_FILE) {
@@ -1326,6 +1344,28 @@ impl Core {
                     op::SET_NAME => self.set_name(data),
                     op::UNLOCK => self.unlock(data),
                     op::CHANGE_PASSWORD => self.change_password(data),
+                    op::APPEARANCE => {
+                        reply.extend_from_slice(&self.appearance());
+                        Ok(())
+                    }
+                    op::SET_APPEARANCE => match data {
+                        &[appearance, accent]
+                            if appearance <= 1 && accent < oceans_core_proto::ACCENT_COUNT =>
+                        {
+                            let text = alloc::format!("{appearance} {accent}\n");
+                            write_file(&self.system_dir, APPEARANCE_FILE, text.as_bytes())
+                                .map_err(io)?;
+                            say(
+                                self.log,
+                                format_args!(
+                                    "core: appearance {}, accent {accent}",
+                                    if appearance == 1 { "dark" } else { "light" }
+                                ),
+                            );
+                            Ok(())
+                        }
+                        _ => Err(Status::BadRequest.into()),
+                    },
                     op::LOCK_AFTER => {
                         let minutes = self
                             .account

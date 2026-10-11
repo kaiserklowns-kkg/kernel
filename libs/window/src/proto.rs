@@ -220,6 +220,10 @@ pub mod kind {
     /// The user resized the window (ADR-0097): `x` and `y` are its new
     /// width and height; `RESIZE` takes pixels of that size.
     pub const RESIZE: u8 = 7;
+    /// The theme to draw with (ADR-0113): `key` the appearance (0 light,
+    /// 1 dark), `button` the accent (`oceans_draw::theme::ACCENTS`). Sent
+    /// when the window opens and whenever the user changes it.
+    pub const THEME: u8 = 8;
 }
 
 /// Something that happened to a window.
@@ -261,7 +265,7 @@ impl Event {
             x: i16::from_le_bytes([bytes[8], bytes[9]]),
             y: i16::from_le_bytes([bytes[10], bytes[11]]),
         };
-        (kind::KEY..=kind::RESIZE)
+        (kind::KEY..=kind::THEME)
             .contains(&event.kind)
             .then_some(event)
     }

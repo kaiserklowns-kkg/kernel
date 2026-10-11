@@ -27,34 +27,84 @@ use oceans_window::{BUTTON_STEP, CLOSE_SIZE, Frame, TITLE_HEIGHT, dock};
 
 use crate::canvas::{Canvas, Font, Rect, Rgb};
 
-// Design tokens (master spec §31; ADR-0078): light surfaces, dark text,
-// one accent, the window buttons' signal colours.
+// Design tokens (master spec §31; ADR-0078): surfaces, text, one accent,
+// the window buttons' signal colours. Those that follow the theme
+// (ADR-0113: light or dark, the user's accent) are functions of it.
 pub const WHITE: Rgb = Rgb(0xff_ff_ff);
 pub const BLACK: Rgb = Rgb(0x00_00_00);
-pub const TEXT: Rgb = Rgb(0x1d_1d_1f);
-pub const MUTED: Rgb = Rgb(0x6e_6e_73);
-pub const ACCENT: Rgb = Rgb(0x2f_7c_f6);
-/// The search result Enter opens (ADR-0108).
-pub const CHOSEN: Rgb = Rgb(0xd4_e3_fc);
-pub const SUCCESS: Rgb = Rgb(0x34_c7_59);
+/// Dark text on what stays white whatever the theme (the lock screen's
+/// field).
+pub const INK: Rgb = Rgb(0x1d_1d_1f);
 pub const CLOSE: Rgb = Rgb(0xff_5f_57);
 pub const MINIMIZE: Rgb = Rgb(0xfe_bc_2e);
 /// The zoom button of a window that can be resized (ADR-0097).
 pub const ZOOM: Rgb = Rgb(0x28_c8_40);
-/// A window button that does nothing (yet), or any button of a window
-/// without the focus.
-pub const BUTTON_OFF: Rgb = Rgb(0xd1_d1_d6);
-/// Title bars: of the window (or Terminal) with the keyboard focus, and
-/// of the others.
-pub const FOCUS_TITLE: Rgb = Rgb(0xe3_e3_e8);
-pub const IDLE_TITLE: Rgb = Rgb(0xf6_f6_f8);
-pub const WINDOW_BORDER: Rgb = Rgb(0xb4_b4_bc);
 pub const TERMINAL_BACKGROUND: Rgb = Rgb(0x1c_1c_1e);
 pub const TERMINAL_TEXT: Rgb = Rgb(0xe8_e8_ed);
-/// The apps panel.
-pub const PANEL: Rgb = Rgb(0xf2_f2_f7);
-pub const DIALOG_SURFACE: Rgb = Rgb(0xf9_f9_fb);
-pub const BUTTON_SECONDARY: Rgb = Rgb(0xe3_e3_e8);
+
+/// The colours that follow the theme (ADR-0113).
+pub mod colour {
+    use super::{Rgb, WHITE};
+
+    fn theme() -> oceans_draw::theme::Theme {
+        oceans_draw::theme::current()
+    }
+
+    pub fn text() -> Rgb {
+        theme().text
+    }
+    pub fn muted() -> Rgb {
+        theme().muted
+    }
+    pub fn accent() -> Rgb {
+        theme().accent
+    }
+    /// The search result Enter opens (ADR-0108).
+    pub fn chosen() -> Rgb {
+        theme().selected
+    }
+    pub fn success() -> Rgb {
+        theme().success
+    }
+    /// A window button that does nothing (yet), or any button of a window
+    /// without the focus.
+    pub fn button_off() -> Rgb {
+        theme().button_off
+    }
+    /// Title bars: of the window (or Terminal) with the keyboard focus, and
+    /// of the others.
+    pub fn focus_title() -> Rgb {
+        theme().title_focused
+    }
+    pub fn idle_title() -> Rgb {
+        theme().title_idle
+    }
+    pub fn window_border() -> Rgb {
+        theme().border
+    }
+    /// The apps panel.
+    pub fn panel() -> Rgb {
+        theme().panel
+    }
+    pub fn dialog_surface() -> Rgb {
+        theme().dialog
+    }
+    pub fn button_secondary() -> Rgb {
+        theme().button
+    }
+    /// What holds content: fields, a window before its app draws.
+    pub fn surface() -> Rgb {
+        theme().surface
+    }
+    /// The tint of the menu bar and the dock over the wallpaper: light glass,
+    /// or dark.
+    pub fn glass() -> Rgb {
+        match theme().appearance {
+            oceans_draw::theme::Appearance::Light => WHITE,
+            oceans_draw::theme::Appearance::Dark => Rgb(0x1e_1e_20),
+        }
+    }
+}
 /// App icons' colours, chosen by the app's name.
 const ICON_COLOURS: [Rgb; 6] = [
     Rgb(0x2f_7c_f6),
@@ -721,7 +771,7 @@ impl Desktop {
         // Where a dragged window would go (ADR-0107): a tinted sheet.
         if let Some(r) = self.snap {
             let inset = Rect::new(r.x + 4, r.y + 4, r.w - 8, r.h - 8);
-            canvas.tint(inset, 12, ACCENT, 70);
+            canvas.tint(inset, 12, colour::accent(), 70);
         }
 
         if !self.full_screen {
@@ -747,10 +797,17 @@ impl Desktop {
             let w = canvas.width;
             let r = Rect::new(w - 12 - 360, MENU_HEIGHT + 8, 360, 56);
             canvas.shadow(r, 10, 70);
-            canvas.round_fill(r, 12, DIALOG_SURFACE);
-            let mark = if toast.error { CLOSE } else { ACCENT };
+            canvas.round_fill(r, 12, colour::dialog_surface());
+            let mark = if toast.error { CLOSE } else { colour::accent() };
             canvas.circle(r.x + 22, r.y + r.h / 2, 7, mark);
-            canvas.text(r.x + 40, r.y + 19, &toast.text, Font::Body, TEXT, r);
+            canvas.text(
+                r.x + 40,
+                r.y + 19,
+                &toast.text,
+                Font::Body,
+                colour::text(),
+                r,
+            );
         }
 
         // A system dialog, over everything else.
@@ -805,7 +862,7 @@ impl Desktop {
                     let x = body.x + t.col as i32 * Font::Mono.advance();
                     canvas.fill(
                         Rect::new(x, y + 2, Font::Mono.advance(), Font::Mono.height() - 2),
-                        ACCENT,
+                        colour::accent(),
                     );
                 }
             }
@@ -815,13 +872,13 @@ impl Desktop {
     fn draw_menu_bar(&self, canvas: &mut Canvas, windows: &[WindowView<'_>]) {
         let w = canvas.width;
         let bar = menu_bar(w);
-        canvas.tint(bar, 0, WHITE, 190);
+        canvas.tint(bar, 0, colour::glass(), 190);
         canvas.tint(Rect::new(0, MENU_HEIGHT - 1, w, 1), 0, BLACK, 25);
         let mark = menu_mark();
         if self.start_open || mark.contains(self.pointer.0, self.pointer.1) {
             canvas.tint(Rect::new(mark.x, 3, mark.w, MENU_HEIGHT - 6), 6, BLACK, 25);
         }
-        oceans_mark(canvas, mark, TEXT);
+        oceans_mark(canvas, mark, colour::text());
         // The app in use.
         let current = windows
             .iter()
@@ -829,12 +886,19 @@ impl Desktop {
             .map(|view| view.frame.app.as_str())
             .or((self.terminal_focused && !self.terminal_hidden).then_some("Terminal"))
             .unwrap_or("Oceans");
-        canvas.text(mark.x + mark.w + 10, 6, current, Font::Strong, TEXT, bar);
+        canvas.text(
+            mark.x + mark.w + 10,
+            6,
+            current,
+            Font::Strong,
+            colour::text(),
+            bar,
+        );
         // The date and time, then the system's state, from the right.
         let clock_x = w - 14 - canvas.measure(&self.clock, Font::Body);
-        canvas.text(clock_x, 6, &self.clock, Font::Body, TEXT, bar);
+        canvas.text(clock_x, 6, &self.clock, Font::Body, colour::text(), bar);
         let status_x = clock_x - 24 - canvas.measure(&self.status, Font::Body);
-        canvas.text(status_x, 6, &self.status, Font::Body, TEXT, bar);
+        canvas.text(status_x, 6, &self.status, Font::Body, colour::text(), bar);
         // The speaker (ADR-0100), in one place left of them.
         if let Some((level, muted)) = self.volume {
             let button = volume_button(w);
@@ -850,14 +914,14 @@ impl Desktop {
         let w = canvas.width;
         let whole = sound_panel(w, self.now_playing.is_some());
         canvas.shadow(whole, 12, 70);
-        canvas.round_fill(whole, 12, DIALOG_SURFACE);
+        canvas.round_fill(whole, 12, colour::dialog_surface());
         let panel = volume_panel(w);
         canvas.text(
             panel.x + 16,
             panel.y + 12,
             "Sound",
             Font::Strong,
-            TEXT,
+            colour::text(),
             panel,
         );
         let shown = if muted {
@@ -866,38 +930,70 @@ impl Desktop {
             alloc::format!("{level}%")
         };
         let x = panel.x + panel.w - 16 - canvas.measure(&shown, Font::Body);
-        canvas.text(x, panel.y + 12, &shown, Font::Body, MUTED, panel);
+        canvas.text(x, panel.y + 12, &shown, Font::Body, colour::muted(), panel);
         let track = volume_track(w);
-        canvas.round_fill(track, 3, BUTTON_SECONDARY);
+        canvas.round_fill(track, 3, colour::button_secondary());
         let filled = track.w * i32::from(level) / 100;
-        let ink = if muted { MUTED } else { ACCENT };
+        let ink = if muted {
+            colour::muted()
+        } else {
+            colour::accent()
+        };
         canvas.round_fill(Rect::new(track.x, track.y, filled, track.h), 3, ink);
-        canvas.circle(track.x + filled, track.y + track.h / 2, 8, WINDOW_BORDER);
+        canvas.circle(
+            track.x + filled,
+            track.y + track.h / 2,
+            8,
+            colour::window_border(),
+        );
         canvas.circle(track.x + filled, track.y + track.h / 2, 7, WHITE);
         let mute = volume_mute(w);
-        canvas.round_fill(mute, 7, if muted { ACCENT } else { BUTTON_SECONDARY });
+        canvas.round_fill(
+            mute,
+            7,
+            if muted {
+                colour::accent()
+            } else {
+                colour::button_secondary()
+            },
+        );
         let label = if muted { "Unmute" } else { "Mute" };
-        let ink = if muted { WHITE } else { TEXT };
+        let ink = if muted { WHITE } else { colour::text() };
         let lx = mute.x + (mute.w - canvas.measure(label, Font::Body)) / 2;
         canvas.text(lx, mute.y + 4, label, Font::Body, ink, mute);
         // What plays (ADR-0103): the title, the app, and its buttons.
         if let Some((app, state, title)) = &self.now_playing {
             canvas.fill(
                 Rect::new(panel.x + 16, panel.y + panel.h, panel.w - 32, 1),
-                BUTTON_SECONDARY,
+                colour::button_secondary(),
             );
             let row = Rect::new(panel.x + 16, panel.y + panel.h + 10, panel.w - 32, 22);
             let app_x = row.x + row.w - canvas.measure(app, Font::Body);
-            canvas.text(app_x, row.y, app, Font::Body, MUTED, row);
+            canvas.text(app_x, row.y, app, Font::Body, colour::muted(), row);
             let title_clip = Rect::new(row.x, row.y, app_x - row.x - 8, row.h);
-            canvas.text(row.x, row.y, title, Font::Strong, TEXT, title_clip);
+            canvas.text(
+                row.x,
+                row.y,
+                title,
+                Font::Strong,
+                colour::text(),
+                title_clip,
+            );
             let playing = *state == oceans_window::proto::playing::PLAYING;
             let labels = ["Prev", if playing { "Pause" } else { "Play" }, "Next"];
             for (which, label) in labels.iter().enumerate() {
                 let button = media_button(w, which);
                 let primary = which == 1;
-                canvas.round_fill(button, 7, if primary { ACCENT } else { BUTTON_SECONDARY });
-                let ink = if primary { WHITE } else { TEXT };
+                canvas.round_fill(
+                    button,
+                    7,
+                    if primary {
+                        colour::accent()
+                    } else {
+                        colour::button_secondary()
+                    },
+                );
+                let ink = if primary { WHITE } else { colour::text() };
                 let lx = button.x + (button.w - canvas.measure(label, Font::Body)) / 2;
                 canvas.text(lx, button.y + 4, label, Font::Body, ink, button);
             }
@@ -917,7 +1013,7 @@ impl Desktop {
         let d = dock(w, h, count);
         canvas.shadow(d, 10, 50);
         canvas.tint(Rect::new(d.x - 1, d.y - 1, d.w + 2, d.h + 2), 19, BLACK, 30);
-        canvas.tint(d, 18, WHITE, 120);
+        canvas.tint(d, 18, colour::glass(), 120);
 
         let pointer = self.pointer;
         let mut label: Option<(Rect, String)> = None;
@@ -927,7 +1023,7 @@ impl Desktop {
                 label = Some((r, String::from(name)));
             }
             if open {
-                canvas.circle(r.x + r.w / 2, d.y + d.h - 4, 2, TEXT);
+                canvas.circle(r.x + r.w / 2, d.y + d.h - 4, 2, colour::text());
             }
             r
         };
@@ -954,7 +1050,7 @@ impl Desktop {
                     app_icon(canvas, r, &view.frame.app);
                     if view.frame.minimized {
                         // Put away: the icon is a little faded.
-                        canvas.tint(r, 12, WHITE, 90);
+                        canvas.tint(r, 12, colour::glass(), 90);
                     }
                 }
             }
@@ -979,14 +1075,21 @@ impl Desktop {
             BLACK,
             35,
         );
-        canvas.round_fill(panel, 16, PANEL);
-        canvas.text(panel.x + 24, panel.y + 22, "Apps", Font::Title, TEXT, panel);
+        canvas.round_fill(panel, 16, colour::panel());
+        canvas.text(
+            panel.x + 24,
+            panel.y + 22,
+            "Apps",
+            Font::Title,
+            colour::text(),
+            panel,
+        );
         // The search field (ADR-0108): what is typed goes in while the
         // panel is open.
         let field = search_field(w, h);
-        canvas.round_fill(field, 10, ACCENT);
+        canvas.round_fill(field, 10, colour::accent());
         let inner = inset(field, 2);
-        canvas.round_fill(inner, 8, WHITE);
+        canvas.round_fill(inner, 8, colour::surface());
         let clip = Rect::new(inner.x + 10, inner.y, inner.w - 20, inner.h);
         let end = if self.search.is_empty() {
             canvas.text(
@@ -994,7 +1097,7 @@ impl Desktop {
                 inner.y + 7,
                 "Search apps and files",
                 Font::Body,
-                MUTED,
+                colour::muted(),
                 clip,
             );
             inner.x + 12
@@ -1004,13 +1107,13 @@ impl Desktop {
                 inner.y + 7,
                 &self.search,
                 Font::Body,
-                TEXT,
+                colour::text(),
                 clip,
             )
         };
         canvas.fill(
             Rect::new(end.min(clip.x + clip.w - 2), inner.y + 7, 2, 18),
-            ACCENT,
+            colour::accent(),
         );
         if !self.search.is_empty() {
             return self.draw_found(canvas);
@@ -1032,7 +1135,7 @@ impl Desktop {
             let icon = icon_in(t);
             app_icon(canvas, icon, &app.name);
             if app.running {
-                canvas.circle(icon.x + icon.w - 2, icon.y + 2, 5, SUCCESS);
+                canvas.circle(icon.x + icon.w - 2, icon.y + 2, 5, colour::success());
             }
             tile_label(canvas, t, &app.name);
         }
@@ -1057,7 +1160,14 @@ impl Desktop {
                 if self.apps.len() == 1 { "" } else { "s" }
             )
         };
-        canvas.text(panel.x + 24, footer_y + 16, &note, Font::Body, MUTED, panel);
+        canvas.text(
+            panel.x + 24,
+            footer_y + 16,
+            &note,
+            Font::Body,
+            colour::muted(),
+            panel,
+        );
         let mut buttons: Vec<(Rect, &str)> = Vec::new();
         // Lock (ADR-0112), with a password set.
         if self.password_set {
@@ -1072,11 +1182,11 @@ impl Desktop {
             let fill = if hovered {
                 Rgb(0xd5_d5_db)
             } else {
-                BUTTON_SECONDARY
+                colour::button_secondary()
             };
             canvas.round_fill(button, 8, fill);
             let tx = button.x + (button.w - canvas.measure(label, Font::Body)) / 2;
-            canvas.text(tx, button.y + 6, label, Font::Body, TEXT, button);
+            canvas.text(tx, button.y + 6, label, Font::Body, colour::text(), button);
         }
     }
 
@@ -1089,7 +1199,7 @@ impl Desktop {
         for (i, found) in self.found.iter().enumerate() {
             let row = found_row(w, h, i);
             if i == self.chosen {
-                canvas.round_fill(row, 8, CHOSEN);
+                canvas.round_fill(row, 8, colour::chosen());
             } else if row.contains(pointer.0, pointer.1) && self.dialog.is_none() {
                 canvas.tint(row, 8, BLACK, 14);
             }
@@ -1102,7 +1212,12 @@ impl Desktop {
                 }
                 Found::File(path) => {
                     canvas.round_fill(icon, 5, WHITE);
-                    canvas.tint(Rect::new(icon.x, icon.y, icon.w, 6), 5, ACCENT, 120);
+                    canvas.tint(
+                        Rect::new(icon.x, icon.y, icon.w, 6),
+                        5,
+                        colour::accent(),
+                        120,
+                    );
                     let name = oceans_search::file_name(path);
                     let folder = &path[..path.len() - name.len()];
                     let kind = if folder.is_empty() {
@@ -1115,9 +1230,23 @@ impl Desktop {
             };
             let kind_w = canvas.measure(&kind, Font::Body);
             let right = row.x + row.w - 12;
-            canvas.text(right - kind_w, row.y + 7, &kind, Font::Body, MUTED, row);
+            canvas.text(
+                right - kind_w,
+                row.y + 7,
+                &kind,
+                Font::Body,
+                colour::muted(),
+                row,
+            );
             let clip = Rect::new(row.x + 40, row.y, right - kind_w - 16 - (row.x + 40), row.h);
-            canvas.text(row.x + 40, row.y + 7, &name, Font::Body, TEXT, clip);
+            canvas.text(
+                row.x + 40,
+                row.y + 7,
+                &name,
+                Font::Body,
+                colour::text(),
+                clip,
+            );
         }
         let note = if self.found.is_empty() {
             alloc::format!("Nothing matches \"{}\"", self.search)
@@ -1125,7 +1254,14 @@ impl Desktop {
             String::from("Enter opens; the arrows choose; Esc closes")
         };
         let footer_y = panel.y + panel.h - 48;
-        canvas.text(panel.x + 24, footer_y + 16, &note, Font::Body, MUTED, panel);
+        canvas.text(
+            panel.x + 24,
+            footer_y + 16,
+            &note,
+            Font::Body,
+            colour::muted(),
+            panel,
+        );
     }
 
     /// The lock screen (ADR-0110): the time, the user, and a field for the
@@ -1152,7 +1288,7 @@ impl Desktop {
         app_icon(canvas, avatar, &self.user_name);
         centre(canvas, h / 2 - 44, &self.user_name, Font::Strong, WHITE);
         let field = lock_field(w, h);
-        canvas.round_fill(field, 12, ACCENT);
+        canvas.round_fill(field, 12, colour::accent());
         let inner = inset(field, 2);
         canvas.round_fill(inner, 10, WHITE);
         if self.lock_input.is_empty() {
@@ -1161,13 +1297,13 @@ impl Desktop {
                 inner.y + 10,
                 "Password",
                 Font::Body,
-                MUTED,
+                colour::muted(),
                 inner,
             );
         } else {
             let dots = self.lock_input.chars().count().min(24) as i32;
             for i in 0..dots {
-                canvas.circle(inner.x + 18 + i * 14, inner.y + inner.h / 2, 4, TEXT);
+                canvas.circle(inner.x + 18 + i * 14, inner.y + inner.h / 2, 4, INK);
             }
         }
         let note = if self.lock_note.is_empty() {
@@ -1183,18 +1319,25 @@ impl Desktop {
         let r = self::dialog(w, h);
         canvas.dim(BLACK, 100);
         canvas.shadow(r, 18, 120);
-        canvas.round_fill(r, 14, DIALOG_SURFACE);
+        canvas.round_fill(r, 14, colour::dialog_surface());
         let (x, mut y) = (r.x + 24, r.y + 20);
-        canvas.text(x, y, dialog.title, Font::Title, TEXT, r);
+        canvas.text(x, y, dialog.title, Font::Title, colour::text(), r);
         y += 36;
-        canvas.text(x, y, &dialog.app, Font::Body, MUTED, r);
+        canvas.text(x, y, &dialog.app, Font::Body, colour::muted(), r);
         y += 26;
-        canvas.text(x, y, dialog.ask, Font::Body, TEXT, r);
+        canvas.text(x, y, dialog.ask, Font::Body, colour::text(), r);
         y += 22;
-        canvas.text(x + 16, y, &dialog.description, Font::Strong, TEXT, r);
+        canvas.text(
+            x + 16,
+            y,
+            &dialog.description,
+            Font::Strong,
+            colour::text(),
+            r,
+        );
         if !dialog.note.is_empty() {
             y += 30;
-            canvas.text(x, y, &dialog.note, Font::Body, MUTED, r);
+            canvas.text(x, y, &dialog.note, Font::Body, colour::muted(), r);
         }
         for (button, label, primary) in [
             (deny(w, h), dialog.deny, false),
@@ -1202,14 +1345,14 @@ impl Desktop {
         ] {
             let hovered = button.contains(self.pointer.0, self.pointer.1);
             let fill = match (primary, hovered) {
-                (true, false) => ACCENT,
+                (true, false) => colour::accent(),
                 (true, true) => Rgb(0x52_93_f8),
-                (false, false) => BUTTON_SECONDARY,
+                (false, false) => colour::button_secondary(),
                 (false, true) => Rgb(0xd5_d5_db),
             };
             canvas.round_fill(button, 8, fill);
             let tx = button.x + (button.w - canvas.measure(label, Font::Strong)) / 2;
-            let colour = if primary { WHITE } else { TEXT };
+            let colour = if primary { WHITE } else { colour::text() };
             canvas.text(tx, button.y + 9, label, Font::Strong, colour, button);
         }
     }
@@ -1243,7 +1386,7 @@ fn tile_label(canvas: &mut Canvas, tile: Rect, name: &str) {
         tile.y + 68,
         &shown,
         Font::Body,
-        TEXT,
+        colour::text(),
         tile,
     );
 }
@@ -1295,7 +1438,7 @@ fn terminal_icon(canvas: &mut Canvas, r: Rect) {
 
 /// The apps button's icon: a grid of dots on the accent.
 fn apps_icon(canvas: &mut Canvas, r: Rect) {
-    canvas.round_fill(r, r.w / 4, ACCENT);
+    canvas.round_fill(r, r.w / 4, colour::accent());
     canvas.tint(Rect::new(r.x, r.y, r.w, r.h / 2), r.w / 4, WHITE, 35);
     let step = r.w / 4;
     for row in 1..4 {
@@ -1315,13 +1458,17 @@ pub fn volume_shown(width: i32, height: i32) -> Rect {
 fn draw_volume_shown(canvas: &mut Canvas, (level, muted): (u8, bool)) {
     let r = volume_shown(canvas.width, canvas.height);
     canvas.shadow(r, 12, 70);
-    canvas.round_fill(r, 14, DIALOG_SURFACE);
+    canvas.round_fill(r, 14, colour::dialog_surface());
     speaker(canvas, Rect::new(r.x + 8, r.y + 12, 28, 24), level, muted);
     let track = Rect::new(r.x + 48, r.y + 21, r.w - 64, 6);
-    canvas.round_fill(track, 3, BUTTON_SECONDARY);
+    canvas.round_fill(track, 3, colour::button_secondary());
     if !muted {
         let filled = track.w * i32::from(level) / 100;
-        canvas.round_fill(Rect::new(track.x, track.y, filled, track.h), 3, ACCENT);
+        canvas.round_fill(
+            Rect::new(track.x, track.y, filled, track.h),
+            3,
+            colour::accent(),
+        );
     }
 }
 
@@ -1329,14 +1476,17 @@ fn draw_volume_shown(canvas: &mut Canvas, (level, muted): (u8, bool)) {
 /// bars for the level, or a cross when muted.
 fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool) {
     let (cx, cy) = (r.x + r.w / 2 - 6, r.y + r.h / 2);
-    canvas.fill(Rect::new(cx - 5, cy - 3, 4, 7), TEXT);
+    canvas.fill(Rect::new(cx - 5, cy - 3, 4, 7), colour::text());
     for i in 0..5 {
-        canvas.fill(Rect::new(cx - 1 + i, cy - 3 - i, 1, 7 + 2 * i), TEXT);
+        canvas.fill(
+            Rect::new(cx - 1 + i, cy - 3 - i, 1, 7 + 2 * i),
+            colour::text(),
+        );
     }
     if muted || level == 0 {
         for i in 0..7 {
-            canvas.fill(Rect::new(cx + 7 + i, cy - 3 + i, 2, 1), TEXT);
-            canvas.fill(Rect::new(cx + 13 - i, cy - 3 + i, 2, 1), TEXT);
+            canvas.fill(Rect::new(cx + 7 + i, cy - 3 + i, 2, 1), colour::text());
+            canvas.fill(Rect::new(cx + 13 - i, cy - 3 + i, 2, 1), colour::text());
         }
         return;
     }
@@ -1347,7 +1497,7 @@ fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool) {
     };
     for i in 0..bars {
         let h = 4 + 3 * i;
-        canvas.fill(Rect::new(cx + 7 + 3 * i, cy - h / 2, 2, h), TEXT);
+        canvas.fill(Rect::new(cx + 7 + 3 * i, cy - h / 2, 2, h), colour::text());
     }
 }
 
@@ -1368,11 +1518,15 @@ fn oceans_mark(canvas: &mut Canvas, r: Rect, colour: Rgb) {
 /// and the title bar's colour.
 fn chrome(canvas: &mut Canvas, outer: Rect, focused: bool) {
     canvas.shadow(outer, 14, if focused { 120 } else { 60 });
-    canvas.round_fill(outer, 10, WINDOW_BORDER);
+    canvas.round_fill(outer, 10, colour::window_border());
     canvas.round_fill(
         inset(outer, 1),
         9,
-        if focused { FOCUS_TITLE } else { IDLE_TITLE },
+        if focused {
+            colour::focus_title()
+        } else {
+            colour::idle_title()
+        },
     );
 }
 
@@ -1383,9 +1537,16 @@ fn title_text(canvas: &mut Canvas, bar: Rect, app: &str, title: &str, left: i32)
     let width = canvas.measure(app, Font::Strong) + gap + canvas.measure(title, Font::Body);
     let clip = Rect::new(left, bar.y, bar.x + bar.w - 8 - left, bar.h);
     let x = (bar.x + (bar.w - width) / 2).max(left);
-    let end = canvas.text(x, bar.y + 5, app, Font::Strong, TEXT, clip);
+    let end = canvas.text(x, bar.y + 5, app, Font::Strong, colour::text(), clip);
     if !title.is_empty() {
-        canvas.text(end + gap, bar.y + 5, title, Font::Body, MUTED, clip);
+        canvas.text(
+            end + gap,
+            bar.y + 5,
+            title,
+            Font::Body,
+            colour::muted(),
+            clip,
+        );
     }
 }
 
@@ -1397,7 +1558,7 @@ fn traffic_lights(canvas: &mut Canvas, buttons: &[(Rect, Option<Rgb>)], pointer:
         .any(|(r, _)| r.contains(pointer.0, pointer.1));
     for (i, &(r, colour)) in buttons.iter().enumerate() {
         let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
-        canvas.circle(cx, cy, 6, colour.unwrap_or(BUTTON_OFF));
+        canvas.circle(cx, cy, 6, colour.unwrap_or(colour::button_off()));
         if hovered && colour.is_some() {
             let mark = Rgb(0x4a_1c_14);
             match i {
@@ -1462,13 +1623,13 @@ fn draw_content(canvas: &mut Canvas, view: &WindowView<'_>) {
             canvas.blit(Rect::new(content.x, content.y, w, h), pixels, width);
             canvas.fill(
                 Rect::new(content.x + w, content.y, content.w - w, content.h),
-                IDLE_TITLE,
+                colour::idle_title(),
             );
             canvas.fill(
                 Rect::new(content.x, content.y + h, w, content.h - h),
-                IDLE_TITLE,
+                colour::idle_title(),
             );
         }
-        _ => canvas.fill(content, WHITE),
+        _ => canvas.fill(content, colour::surface()),
     }
 }

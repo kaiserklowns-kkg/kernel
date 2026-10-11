@@ -369,7 +369,7 @@ fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
     }
     music.tick();
     music.report(ui);
-    ui.background(colour::WINDOW);
+    ui.background(colour::window());
     let whole = ui.area;
     if music.home.is_none() {
         ui.area = Rect::new(whole.x + 20, whole.y + 20, whole.w - 40, whole.h - 40);
@@ -381,17 +381,19 @@ fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
 
     // The player at the top: what plays, the time bar, the buttons.
     let top = Rect::new(whole.x, whole.y, whole.w, 132);
-    ui.surface.fill(top, colour::SIDEBAR);
-    ui.surface
-        .fill(Rect::new(top.x, top.y + top.h - 1, top.w, 1), colour::LINE);
+    ui.surface.fill(top, colour::sidebar());
+    ui.surface.fill(
+        Rect::new(top.x, top.y + top.h - 1, top.w, 1),
+        colour::line(),
+    );
     let title = match &music.playing {
         Some(playing) => music.songs[playing.index].clone(),
         None => String::from("Nothing playing"),
     };
     let clip = Rect::new(20, 14, whole.w - 40, 30);
-    ui.text_at(20, 16, &title, Style::Title, colour::TEXT, clip);
+    ui.text_at(20, 16, &title, Style::Title, colour::text(), clip);
     let bar = Rect::new(20, 56, whole.w - 40, 6);
-    ui.surface.round_fill(bar, 3, colour::LINE);
+    ui.surface.round_fill(bar, 3, colour::line());
     if let Some(playing) = &music.playing {
         let total = playing.wav.output_frames().max(1);
         let at = playing.position();
@@ -399,7 +401,7 @@ fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
         ui.surface.round_fill(
             Rect::new(bar.x, bar.y, filled.max(6), bar.h),
             3,
-            colour::ACCENT,
+            colour::accent(),
         );
         let rate = u64::from(OUTPUT_RATE);
         let text = alloc::format!("{} / {}", time(at * 1000 / rate), time(total * 1000 / rate));
@@ -409,7 +411,7 @@ fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
             68,
             &text,
             Style::Body,
-            colour::MUTED,
+            colour::muted(),
             top,
         );
     }
@@ -507,19 +509,19 @@ fn frame(ui: &mut Ui<'_, '_>, music: &mut Music) {
         let y = ui.area.y + index as i32 * 34 + 13;
         if y < ui.area.y + ui.area.h {
             ui.surface
-                .round_fill(Rect::new(ui.area.x - 6, y, 4, 8), 2, colour::ACCENT);
+                .round_fill(Rect::new(ui.area.x - 6, y, 4, 8), 2, colour::accent());
         }
     }
     if !music.message.is_empty() {
         let message = music.message.clone();
         let status = Rect::new(whole.x, whole.y + whole.h - 26, whole.w, 26);
-        ui.surface.fill(status, colour::WINDOW);
+        ui.surface.fill(status, colour::window());
         ui.text_at(
             16,
             status.y + 4,
             &message,
             Style::Body,
-            colour::MUTED,
+            colour::muted(),
             status,
         );
     }

@@ -270,6 +270,7 @@ fn main(start: Start) -> i64 {
         service.desktop.lock = desktop::Lock::Open;
     }
     service.refresh_user();
+    service.refresh_appearance();
     service.refresh_volume();
     service.refresh_clock();
     service.refresh_terminal();
@@ -344,6 +345,7 @@ fn main(start: Start) -> i64 {
                 last_apps = now;
                 dirty |= service.refresh_apps();
                 dirty |= service.refresh_user();
+                dirty |= service.refresh_appearance();
                 dirty |= service.refresh_volume();
                 dirty |= service.refresh_pending();
             }
@@ -865,6 +867,37 @@ impl Service {
             return true;
         }
         changed
+    }
+
+    /// The appearance and accent from Core (ADR-0113): the desktop draws in
+    /// them, and every window hears of a change. `true` if it changed.
+    fn refresh_appearance(&mut self) -> bool {
+        let Some(core) = self.core else {
+            return false;
+        };
+        let mut reply = [0u8; 2];
+        let Ok(got) = core.call(op::APPEARANCE, &[], &[], &mut reply) else {
+            return false;
+        };
+        if got.len != 2 || oceans_draw::theme::bytes() == (reply[0], reply[1]) {
+            return false;
+        }
+        let appearance = oceans_draw::theme::Appearance::from_byte(reply[0]);
+        oceans_draw::theme::set(appearance, reply[1]);
+        self.windows.set_theme(reply[0], reply[1]);
+        say(
+            self.log,
+            format_args!(
+                "desktop: appearance {}, accent {}",
+                if appearance == oceans_draw::theme::Appearance::Dark {
+                    "dark"
+                } else {
+                    "light"
+                },
+                reply[1]
+            ),
+        );
+        true
     }
 
     /// No input for the time the user chose (ADR-0112): the screen locks.

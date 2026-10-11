@@ -388,6 +388,9 @@ pub struct Manager {
     /// The windows that asked for the media keys (ADR-0102), the one
     /// that gets them last.
     media: Vec<Player>,
+    /// The theme (ADR-0113): appearance and accent, as `kind::THEME`
+    /// carries them.
+    theme: (u8, u8),
 }
 
 impl Manager {
@@ -410,12 +413,40 @@ impl Manager {
             may_open: None,
             paste: None,
             media: Vec::new(),
+            theme: (0, 0),
         }
     }
 
     /// The windows, bottom to top.
     pub fn frames(&self) -> &[Frame] {
         &self.frames
+    }
+
+    /// The theme the user chose (ADR-0113): every window hears of a change
+    /// (`kind::THEME`), and new ones of it when they open.
+    pub fn set_theme(&mut self, appearance: u8, accent: u8) {
+        if self.theme == (appearance, accent) {
+            return;
+        }
+        self.theme = (appearance, accent);
+        let windows: Vec<(u64, u32)> = self.frames.iter().map(|f| (f.owner, f.id)).collect();
+        for (owner, id) in windows {
+            self.tell_theme(owner, id);
+        }
+    }
+
+    fn tell_theme(&mut self, owner: u64, id: u32) {
+        let (appearance, accent) = self.theme;
+        self.queue(
+            owner,
+            Event {
+                window: id,
+                kind: kind::THEME,
+                key: appearance,
+                button: accent,
+                ..Event::default()
+            },
+        );
     }
 
     /// The whole screen, which full screen covers (ADR-0107).
@@ -622,6 +653,8 @@ impl Manager {
             restore: None,
             tile: None,
         });
+        // The theme first (ADR-0113): the app draws its first frame in it.
+        self.tell_theme(owner, id);
         self.set_focus(Focus::Window(id));
         Ok(id)
     }

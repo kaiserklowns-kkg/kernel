@@ -70,13 +70,13 @@ fn processes(sysinfo: Handle) -> Vec<Process> {
 
 /// A card at the top: a title and a value.
 fn card(ui: &mut Ui<'_, '_>, r: Rect, title: &str, value: &str) {
-    ui.surface.round_fill(r, 10, colour::SURFACE);
-    ui.text_at(r.x + 14, r.y + 10, title, Style::Body, colour::MUTED, r);
-    ui.text_at(r.x + 14, r.y + 32, value, Style::Title, colour::TEXT, r);
+    ui.surface.round_fill(r, 10, colour::surface());
+    ui.text_at(r.x + 14, r.y + 10, title, Style::Body, colour::muted(), r);
+    ui.text_at(r.x + 14, r.y + 32, value, Style::Title, colour::text(), r);
 }
 
 fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
-    ui.background(colour::WINDOW);
+    ui.background(colour::window());
     let whole = ui.area;
     let Some(sysinfo) = activity.sysinfo else {
         ui.area = Rect::new(20, 20, whole.w - 40, whole.h - 40);
@@ -104,12 +104,12 @@ fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
         // The bar under it.
         let r = cards(0);
         let bar = Rect::new(r.x + 14, r.y + r.h - 12, r.w - 28, 4);
-        ui.surface.round_fill(bar, 2, colour::LINE);
+        ui.surface.round_fill(bar, 2, colour::line());
         let filled = (bar.w as u64 * used / total.max(1)) as i32;
         let tone = if used * 10 > total * 9 {
-            colour::DANGER
+            colour::danger()
         } else {
-            colour::ACCENT
+            colour::accent()
         };
         ui.surface
             .round_fill(Rect::new(bar.x, bar.y, filled.max(4), bar.h), 2, tone);
@@ -131,7 +131,7 @@ fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
 
     // The table.
     let table = Rect::new(14, top + 72 + 16, whole.w - 28, whole.h - top - 72 - 30);
-    ui.surface.round_fill(table, 10, colour::SURFACE);
+    ui.surface.round_fill(table, 10, colour::surface());
     let columns = [
         (table.x + 16, "PID"),
         (table.x + 76, "Name"),
@@ -139,11 +139,18 @@ fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
         (table.x + table.w - 100, "State"),
     ];
     for (x, title) in columns {
-        ui.text_at(x, table.y + 10, title, Style::Strong, colour::MUTED, table);
+        ui.text_at(
+            x,
+            table.y + 10,
+            title,
+            Style::Strong,
+            colour::muted(),
+            table,
+        );
     }
     ui.surface.fill(
         Rect::new(table.x + 12, table.y + 34, table.w - 24, 1),
-        colour::LINE,
+        colour::line(),
     );
     let mut y = table.y + 42;
     for (i, process) in list.iter().enumerate() {
@@ -160,14 +167,14 @@ fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
         }
         let mut cell = String::new();
         let _ = write!(cell, "{}", process.id);
-        ui.text_at(table.x + 16, y, &cell, Style::Body, colour::TEXT, table);
+        ui.text_at(table.x + 16, y, &cell, Style::Body, colour::text(), table);
         let name_clip = Rect::new(table.x + 76, table.y, table.w - 290, table.h);
         ui.text_at(
             table.x + 76,
             y,
             &process.name,
             Style::Body,
-            colour::TEXT,
+            colour::text(),
             name_clip,
         );
         ui.text_at(
@@ -175,7 +182,7 @@ fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
             y,
             &mib(process.memory),
             Style::Body,
-            colour::TEXT,
+            colour::text(),
             table,
         );
         cell.clear();
@@ -190,7 +197,7 @@ fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
             y,
             &cell,
             Style::Body,
-            colour::MUTED,
+            colour::muted(),
             table,
         );
         y += 24;

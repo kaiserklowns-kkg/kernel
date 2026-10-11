@@ -86,6 +86,8 @@ struct Settings {
     stale: bool,
     message: String,
     account: Account,
+    /// The appearance and accent (ADR-0113), as Core keeps them.
+    appearance: (u8, u8),
 }
 
 impl Settings {
@@ -125,6 +127,11 @@ impl Settings {
         {
             self.account.lock_after = reply[0];
         }
+        if let Ok(got) = core.call(op::APPEARANCE, &[], &[], &mut reply)
+            && got.len == 2
+        {
+            self.appearance = (reply[0], reply[1]);
+        }
         self.chosen = self.chosen.filter(|&i| i < self.apps.len());
         self.detail = self
             .chosen
@@ -162,6 +169,24 @@ impl Settings {
             Err(_) => String::from("A name has 1 to 32 characters."),
         };
         self.stale = true;
+    }
+
+    /// `SET_APPEARANCE` (ADR-0113): Core keeps it, the desktop and every
+    /// window follow; this window at once.
+    fn set_appearance(&mut self, dark: u8, accent: u8) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 8];
+        match core.call(op::SET_APPEARANCE, &[dark, accent], &[], &mut reply) {
+            Ok(_) => {
+                self.appearance = (dark, accent);
+                oceans_ui::theme::set(oceans_ui::theme::Appearance::from_byte(dark), accent);
+            }
+            Err((error, _)) => {
+                self.message = alloc::format!("Not saved: {}", error.message());
+            }
+        }
     }
 
     /// `SET_LOCK_AFTER` (ADR-0112).
@@ -275,7 +300,7 @@ fn detail(core: Core, id: &str) -> Detail {
     }
 }
 
-fn general(ui: &mut Ui<'_, '_>, settings: &Settings) {
+fn general(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     ui.heading("General");
     ui.space(6);
     let mut line = String::new();
@@ -333,6 +358,39 @@ fn general(ui: &mut Ui<'_, '_>, settings: &Settings) {
         None => line.push_str("not set"),
     }
     ui.row("Date and time", &line);
+    // The appearance (ADR-0113): light or dark, and the accent.
+    if settings.core.is_none() {
+        return;
+    }
+    ui.space(10);
+    ui.heading("Appearance");
+    let (dark, accent) = settings.appearance;
+    let y = ui.y;
+    let x = ui.area.x;
+    let mut chosen = None;
+    for (i, label) in ["Light", "Dark"].into_iter().enumerate() {
+        let r = Rect::new(x + i as i32 * 96, y, 88, 30);
+        if ui.button_in(r, label, usize::from(dark) == i) {
+            chosen = Some((i as u8, accent));
+        }
+    }
+    ui.y = y + 38;
+    ui.label("Accent:");
+    let y = ui.y;
+    for (i, &(name, rgb)) in oceans_ui::theme::ACCENTS.iter().enumerate() {
+        // A button by the accent's name (the keyboard reaches it,
+        // ADR-0106), the one in use filled; the colour itself under it.
+        let r = Rect::new(x + i as i32 * 82, y, 76, 30);
+        if ui.button_in(r, name, usize::from(accent) == i) {
+            chosen = Some((dark, i as u8));
+        }
+        ui.surface
+            .round_fill(Rect::new(r.x + 8, r.y + r.h + 4, r.w - 16, 4), 2, rgb);
+    }
+    ui.y = y + 46;
+    if let Some((dark, accent)) = chosen {
+        settings.set_appearance(dark, accent);
+    }
 }
 
 /// The network's configuration (ADR-0096), through a reader end of the
@@ -552,7 +610,7 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     if let Some(app) = settings.chosen.and_then(|i| settings.apps.get(i)) {
         let title = alloc::format!("{} {}", app.name, app.version);
         let r = Rect::new(ui.area.x, ui.y, ui.area.w, 24);
-        ui.text_at(r.x, r.y, &title, Style::Strong, colour::TEXT, r);
+        ui.text_at(r.x, r.y, &title, Style::Strong, colour::text(), r);
         ui.space(28);
     }
     for (name, value) in &detail.lines {
@@ -575,13 +633,13 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
             Decision::Undecided => "asks at the next start",
         };
         let row = Rect::new(ui.area.x, ui.y, ui.area.w, 30);
-        ui.text_at(row.x, row.y + 6, name, Style::Body, colour::TEXT, row);
+        ui.text_at(row.x, row.y + 6, name, Style::Body, colour::text(), row);
         ui.text_at(
             row.x + 130,
             row.y + 6,
             shown,
             Style::Body,
-            colour::MUTED,
+            colour::muted(),
             row,
         );
         if state != Decision::Automatic {
@@ -617,7 +675,7 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     if settings.stale {
         settings.refresh();
     }
-    ui.background(colour::WINDOW);
+    ui.background(colour::window());
     if let Some(section) = ui.sidebar(180, &SECTIONS, settings.section) {
         settings.section = section;
         settings.stale = true;
@@ -647,6 +705,7 @@ fn main(start: Start) -> i64 {
         stale: true,
         message: String::new(),
         account: Account::default(),
+        appearance: (0, 0),
     };
     oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut settings, frame)
 }

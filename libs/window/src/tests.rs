@@ -38,7 +38,7 @@ fn events_round_trip_and_unknown_kinds_are_refused() {
     let mut bad = event.encode();
     bad[4] = 0;
     assert_eq!(Event::decode(&bad), None);
-    bad[4] = 8;
+    bad[4] = 9;
     assert_eq!(Event::decode(&bad), None);
 }
 
@@ -93,7 +93,11 @@ fn a_new_window_is_placed_in_the_area_on_top_with_the_focus() {
         Rect::new(x + 1, y + TITLE_HEIGHT, 480, 240)
     );
     assert_eq!(m.focus(), Focus::Window(first));
-    assert_eq!(kinds(&mut m, APP), [(kind::FOCUS, first)]);
+    // The theme first (ADR-0113), then the focus.
+    assert_eq!(
+        kinds(&mut m, APP),
+        [(kind::THEME, first), (kind::FOCUS, first)]
+    );
     assert_eq!(m.take_signals().into_iter().collect::<Vec<_>>(), [APP]);
 
     let second = m.open(OTHER, "Other", "", 200, 100).unwrap();
@@ -179,7 +183,7 @@ fn ctrl_tab_goes_round_the_terminal_and_the_windows_in_order() {
         m.take_events(APP, 100)
             .iter()
             .chain(m.take_events(OTHER, 100).iter())
-            .all(|e| e.kind == kind::FOCUS)
+            .all(|e| e.kind == kind::FOCUS || e.kind == kind::THEME)
     );
 }
 
@@ -901,4 +905,32 @@ fn windows_may_be_as_large_as_a_4k_screen() {
     };
     let (data, len) = request.encode().unwrap();
     assert_eq!(OpenRequest::decode(&data[..len]), Some(request));
+}
+
+#[test]
+fn every_window_hears_of_the_theme() {
+    let mut m = manager();
+    let a = m.open(APP, "A", "", 100, 100).unwrap();
+    let b = m.open(OTHER, "B", "", 100, 100).unwrap();
+    m.take_events(APP, 100);
+    m.take_events(OTHER, 100);
+    // Dark, the third accent: both windows hear of it, once.
+    m.set_theme(1, 2);
+    m.set_theme(1, 2);
+    let events = m.take_events(APP, 100);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (
+            events[0].kind,
+            events[0].window,
+            events[0].key,
+            events[0].button
+        ),
+        (kind::THEME, a, 1, 2)
+    );
+    assert_eq!(m.take_events(OTHER, 100)[0].window, b);
+    // A window opened later starts in it.
+    let c = m.open(APP, "C", "", 100, 100).unwrap();
+    let first = m.take_events(APP, 100)[0];
+    assert_eq!((first.kind, first.window, first.key), (kind::THEME, c, 1));
 }

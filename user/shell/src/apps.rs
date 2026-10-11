@@ -615,6 +615,49 @@ impl Shell {
         }
     }
 
+    /// `appearance [light | dark] [ACCENT]` (ADR-0113): the theme, kept by
+    /// Core; the desktop and every window follow.
+    pub(super) fn appearance(&self, words: &[&str]) {
+        const ACCENTS: [&str; 6] = ["blue", "purple", "pink", "orange", "green", "graphite"];
+        let Some(core) = self.core() else {
+            return self.print(format_args!(
+                "appearance: this shell cannot reach Oceans Core\r\n"
+            ));
+        };
+        let mut reply = [0u8; 8];
+        let (mut dark, mut accent) = match core.call(op::APPEARANCE, &[], &[], &mut reply) {
+            Ok(got) if got.len == 2 => (reply[0], reply[1]),
+            Ok(_) => return self.print(format_args!("appearance: no answer\r\n")),
+            Err((error, _)) => {
+                return self.print(format_args!("appearance: {}\r\n", error.message()));
+            }
+        };
+        for word in words {
+            match *word {
+                "light" => dark = 0,
+                "dark" => dark = 1,
+                name => match ACCENTS.iter().position(|a| *a == name) {
+                    Some(i) => accent = i as u8,
+                    None => {
+                        return self.print(format_args!(
+                            "usage: appearance [light | dark] [blue | purple | pink | orange | green | graphite]\r\n"
+                        ));
+                    }
+                },
+            }
+        }
+        if !words.is_empty()
+            && let Err((error, _)) = core.call(op::SET_APPEARANCE, &[dark, accent], &[], &mut reply)
+        {
+            return self.print(format_args!("appearance: {}\r\n", error.message()));
+        }
+        self.print(format_args!(
+            "appearance: {}, {}\r\n",
+            if dark == 1 { "dark" } else { "light" },
+            ACCENTS.get(usize::from(accent)).unwrap_or(&"?")
+        ));
+    }
+
     /// `volume [LEVEL | mute | unmute]`: the system volume (ADR-0100), kept
     /// by Core. A level (0 to 100) also unmutes, as volume keys do.
     pub(super) fn volume(&self, words: &[&str]) {

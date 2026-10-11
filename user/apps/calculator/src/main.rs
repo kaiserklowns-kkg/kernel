@@ -138,7 +138,7 @@ impl Calculator {
 }
 
 fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
-    ui.background(colour::WINDOW);
+    ui.background(colour::window());
     // Typed keys first. A button with the keyboard's focus (Tab, ADR-0106)
     // is pressed by Enter and Space: they are left for it.
     let button_focused = ui.focus.is_some();
@@ -166,7 +166,7 @@ fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
     // The display.
     let (w, _) = (ui.area.w, ui.area.h);
     let screen = Rect::new(12, 12, w - 24, 72);
-    ui.surface.round_fill(screen, 12, colour::SURFACE);
+    ui.surface.round_fill(screen, 12, colour::surface());
     let shown = if calculator.error {
         "Error"
     } else if calculator.entry.is_empty() {
@@ -180,7 +180,7 @@ fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
         screen.y + 36,
         shown,
         Style::Title,
-        colour::TEXT,
+        colour::text(),
         screen,
     );
     if let Some((left, operator)) = calculator.pending {
@@ -192,7 +192,7 @@ fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
             screen.y + 10,
             &above,
             Style::Body,
-            colour::MUTED,
+            colour::muted(),
             screen,
         );
     }

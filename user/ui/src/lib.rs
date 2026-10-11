@@ -34,26 +34,38 @@ use oceans_abi::display::{is_copy, is_cut};
 pub use oceans_access::Role;
 use oceans_access::{Ids, Node, Tree, focus_move, list_key};
 use oceans_display_proto::{Event, Window, events, kind};
-pub use oceans_draw::{Rect, Rgb, Style, Surface, Typesetter};
+pub use oceans_draw::{Rect, Rgb, Style, Surface, Typesetter, theme};
 use oceans_rt::Directory;
 
-/// The look (ADR-0078).
+/// The look (ADR-0078): the colours of the theme the window draws with
+/// (ADR-0113), light or dark, in the user's accent. Functions, not
+/// constants: the theme changes while the app runs.
 pub mod colour {
     use super::Rgb;
+    use oceans_draw::theme;
 
-    pub const WINDOW: Rgb = Rgb(0xf6_f6_f8);
-    pub const SIDEBAR: Rgb = Rgb(0xe9_e9_ee);
-    pub const SURFACE: Rgb = Rgb(0xff_ff_ff);
-    pub const TEXT: Rgb = Rgb(0x1d_1d_1f);
-    pub const MUTED: Rgb = Rgb(0x6e_6e_73);
-    pub const ACCENT: Rgb = Rgb(0x2f_7c_f6);
-    pub const ACCENT_PRESSED: Rgb = Rgb(0x52_93_f8);
-    pub const BUTTON: Rgb = Rgb(0xe3_e3_e8);
-    pub const BUTTON_HOVER: Rgb = Rgb(0xd5_d5_db);
-    pub const SELECTED: Rgb = Rgb(0xd4_e3_fc);
-    pub const LINE: Rgb = Rgb(0xd8_d8_de);
-    pub const DANGER: Rgb = Rgb(0xff_3b_30);
-    pub const SUCCESS: Rgb = Rgb(0x34_c7_59);
+    macro_rules! colours {
+        ($($name:ident),*) => {
+            $(pub fn $name() -> Rgb { theme::current().$name })*
+        };
+    }
+
+    colours!(
+        window,
+        sidebar,
+        surface,
+        text,
+        muted,
+        accent,
+        accent_pressed,
+        on_accent,
+        button,
+        button_hover,
+        selected,
+        line,
+        danger,
+        success
+    );
 }
 
 /// What arrived since the last frame.
@@ -202,7 +214,7 @@ impl<'s, 'f> Ui<'s, 'f> {
     fn focus_ring(&mut self, r: Rect) {
         for grow in [2, 3] {
             let ring = Rect::new(r.x - grow, r.y - grow, r.w + 2 * grow, r.h + 2 * grow);
-            self.surface.outline(ring, 8 + grow, colour::ACCENT, 255);
+            self.surface.outline(ring, 8 + grow, colour::accent(), 255);
         }
     }
 
@@ -313,19 +325,19 @@ impl<'s, 'f> Ui<'s, 'f> {
     pub fn heading(&mut self, text: &str) {
         let r = self.next(28);
         self.auto(Role::Heading, text, r, false);
-        self.text_at(r.x, r.y + 2, text, Style::Title, colour::TEXT, r);
+        self.text_at(r.x, r.y + 2, text, Style::Title, colour::text(), r);
     }
 
     pub fn label(&mut self, text: &str) {
         let r = self.next(LINE_HEIGHT);
         self.auto(Role::Label, text, r, false);
-        self.text_at(r.x, r.y + 2, text, Style::Body, colour::TEXT, r);
+        self.text_at(r.x, r.y + 2, text, Style::Body, colour::text(), r);
     }
 
     pub fn muted(&mut self, text: &str) {
         let r = self.next(LINE_HEIGHT);
         self.auto(Role::Label, text, r, false);
-        self.text_at(r.x, r.y + 2, text, Style::Body, colour::MUTED, r);
+        self.text_at(r.x, r.y + 2, text, Style::Body, colour::muted(), r);
     }
 
     /// A name and its value on one row, the value right-aligned, a line
@@ -334,23 +346,23 @@ impl<'s, 'f> Ui<'s, 'f> {
         let r = self.next(ROW_HEIGHT - GAP);
         let said = alloc::format!("{name}: {value}");
         self.auto(Role::Label, &said, r, false);
-        self.text_at(r.x, r.y + 4, name, Style::Body, colour::TEXT, r);
+        self.text_at(r.x, r.y + 4, name, Style::Body, colour::text(), r);
         let width = self.measure(value, Style::Body);
         self.text_at(
             r.x + r.w - width,
             r.y + 4,
             value,
             Style::Body,
-            colour::MUTED,
+            colour::muted(),
             r,
         );
         self.surface
-            .fill(Rect::new(r.x, r.y + r.h + GAP / 2, r.w, 1), colour::LINE);
+            .fill(Rect::new(r.x, r.y + r.h + GAP / 2, r.w, 1), colour::line());
     }
 
     pub fn separator(&mut self) {
         let r = self.next(1);
-        self.surface.fill(r, colour::LINE);
+        self.surface.fill(r, colour::line());
     }
 
     /// A button as wide as its text; `true` when clicked.
@@ -379,17 +391,17 @@ impl<'s, 'f> Ui<'s, 'f> {
         }
         let hovered = self.hovered(r);
         let fill = match (primary, hovered) {
-            (true, false) => colour::ACCENT,
-            (true, true) => colour::ACCENT_PRESSED,
-            (false, false) => colour::BUTTON,
-            (false, true) => colour::BUTTON_HOVER,
+            (true, false) => colour::accent(),
+            (true, true) => colour::accent_pressed(),
+            (false, false) => colour::button(),
+            (false, true) => colour::button_hover(),
         };
         self.surface.round_fill(r, 8, fill);
         let width = self.measure(text, Style::Strong);
         let ink = if primary {
-            Rgb(0xff_ff_ff)
+            colour::on_accent()
         } else {
-            colour::TEXT
+            colour::text()
         };
         self.text_at(
             r.x + (r.w - width) / 2,
@@ -418,14 +430,14 @@ impl<'s, 'f> Ui<'s, 'f> {
                 clicked = Some(i);
             }
             if selected == Some(i) {
-                self.surface.round_fill(r, 6, colour::SELECTED);
+                self.surface.round_fill(r, 6, colour::selected());
                 if focused {
                     self.focus_ring(r);
                 }
             } else if self.hovered(r) {
                 self.surface.tint(r, 6, Rgb(0), 12);
             }
-            self.text_at(r.x + 10, r.y + 6, item, Style::Body, colour::TEXT, r);
+            self.text_at(r.x + 10, r.y + 6, item, Style::Body, colour::text(), r);
         }
         // Focused with nothing selected: the ring round the whole list.
         if focused && selected.is_none_or(|i| i >= items.len()) {
@@ -505,17 +517,17 @@ impl<'s, 'f> Ui<'s, 'f> {
             r,
             7,
             if focused {
-                colour::ACCENT
+                colour::accent()
             } else {
-                colour::LINE
+                colour::line()
             },
         );
         let inner = Rect::new(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
-        self.surface.round_fill(inner, 6, colour::SURFACE);
+        self.surface.round_fill(inner, 6, colour::surface());
         let (shown, ink) = if text.is_empty() {
-            (placeholder, colour::MUTED)
+            (placeholder, colour::muted())
         } else {
-            (text.as_str(), colour::TEXT)
+            (text.as_str(), colour::text())
         };
         let clip = Rect::new(inner.x + 8, inner.y, inner.w - 16, inner.h);
         let end = if secret && !text.is_empty() {
@@ -526,7 +538,7 @@ impl<'s, 'f> Ui<'s, 'f> {
                     inner.x + 12 + i * 12,
                     inner.y + inner.h / 2,
                     4,
-                    colour::TEXT,
+                    colour::text(),
                 );
             }
             inner.x + 12 + dots * 12 - 6
@@ -540,7 +552,7 @@ impl<'s, 'f> Ui<'s, 'f> {
                 end + 1
             };
             self.surface
-                .fill(Rect::new(x, inner.y + 6, 2, inner.h - 12), colour::ACCENT);
+                .fill(Rect::new(x, inner.y + 6, 2, inner.h - 12), colour::accent());
         }
         entered
     }
@@ -550,7 +562,7 @@ impl<'s, 'f> Ui<'s, 'f> {
     /// With the keyboard, Up, Down, Home and End choose an item.
     pub fn sidebar(&mut self, width: i32, items: &[&str], selected: usize) -> Option<usize> {
         let bar = Rect::new(self.area.x, self.area.y, width, self.area.h);
-        self.surface.fill(bar, colour::SIDEBAR);
+        self.surface.fill(bar, colour::sidebar());
         let id = self.auto(Role::List, "Sidebar", bar, !items.is_empty());
         let mut clicked = self
             .list_keys(id, Some(selected), items.len())
@@ -562,7 +574,7 @@ impl<'s, 'f> Ui<'s, 'f> {
                 clicked = Some(i);
             }
             if i == selected {
-                self.surface.round_fill(r, 6, colour::ACCENT);
+                self.surface.round_fill(r, 6, colour::accent());
                 if focused {
                     self.focus_ring(r);
                 }
@@ -570,9 +582,9 @@ impl<'s, 'f> Ui<'s, 'f> {
                 self.surface.tint(r, 6, Rgb(0), 14);
             }
             let ink = if i == selected {
-                Rgb(0xff_ff_ff)
+                colour::on_accent()
             } else {
-                colour::TEXT
+                colour::text()
             };
             self.text_at(r.x + 10, r.y + 5, item, Style::Body, ink, r);
         }
@@ -742,6 +754,12 @@ fn run_window<S>(
                     kind::RESIZE => {
                         let _ = window.resize();
                     }
+                    // The theme (ADR-0113): the frame after this batch is
+                    // drawn in it.
+                    kind::THEME => oceans_draw::theme::set(
+                        oceans_draw::theme::Appearance::from_byte(event.key),
+                        event.button,
+                    ),
                     kind::PASTE => {
                         input.paste =
                             oceans_display_proto::paste(windows, |text: &str| String::from(text))

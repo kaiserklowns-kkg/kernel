@@ -275,7 +275,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
     if files.stale {
         files.refresh();
     }
-    ui.background(colour::WINDOW);
+    ui.background(colour::window());
     let whole = ui.area;
     if files.home.is_none() {
         ui.area = Rect::new(whole.x + 20, whole.y + 20, whole.w - 40, whole.h - 40);
@@ -287,9 +287,11 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
 
     // The toolbar: back, where, and the actions.
     let bar = Rect::new(whole.x, whole.y, whole.w, 52);
-    ui.surface.fill(bar, colour::SIDEBAR);
-    ui.surface
-        .fill(Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1), colour::LINE);
+    ui.surface.fill(bar, colour::sidebar());
+    ui.surface.fill(
+        Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1),
+        colour::line(),
+    );
     if !files.path.is_empty() && ui.button_in(Rect::new(12, 11, 64, 30), "Back", false) {
         files.path.pop();
         files.stale = true;
@@ -303,7 +305,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
         16,
         &place,
         Style::Strong,
-        colour::TEXT,
+        colour::text(),
         Rect::new(88, 0, whole.w - 360, 52),
     );
     let new_button = Rect::new(whole.w - 252, 11, 112, 30);
@@ -382,7 +384,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
         whole.w - list_width - 48,
         whole.h - top - 12,
     );
-    ui.surface.round_fill(side, 10, colour::SURFACE);
+    ui.surface.round_fill(side, 10, colour::surface());
     let clip = Rect::new(side.x + 14, side.y + 10, side.w - 28, side.h - 20);
     match files
         .selected
@@ -394,15 +396,22 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                 clip.y,
                 &entry.name,
                 Style::Strong,
-                colour::TEXT,
+                colour::text(),
                 clip,
             );
             let hint = "Click again to open the folder.";
-            ui.text_at(clip.x, clip.y + 28, hint, Style::Body, colour::MUTED, clip);
+            ui.text_at(
+                clip.x,
+                clip.y + 28,
+                hint,
+                Style::Body,
+                colour::muted(),
+                clip,
+            );
         }
         Some((index, entry)) => {
             let name = entry.name.clone();
-            ui.text_at(clip.x, clip.y, &name, Style::Strong, colour::TEXT, clip);
+            ui.text_at(clip.x, clip.y, &name, Style::Strong, colour::text(), clip);
             // Open (in the app for its kind) and Open with… (ADR-0099).
             let mut y = clip.y + 28;
             if ui.button_in(Rect::new(clip.x, y, 80, 30), "Open", true) {
@@ -420,7 +429,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
             if let Some(apps) = &files.choosing {
                 if apps.is_empty() {
                     let none = "No app opens this kind of file.";
-                    ui.text_at(clip.x, y, none, Style::Body, colour::MUTED, clip);
+                    ui.text_at(clip.x, y, none, Style::Body, colour::muted(), clip);
                     y += 26;
                 }
                 for (id, app) in apps {
@@ -440,7 +449,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                 if y + 18 > clip.y + clip.h {
                     break;
                 }
-                ui.text_at(clip.x, y, line, Style::Body, colour::TEXT, clip);
+                ui.text_at(clip.x, y, line, Style::Body, colour::text(), clip);
                 y += 20;
             }
         }
@@ -451,7 +460,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                 clip.y,
                 "Choose a file or a folder.",
                 Style::Body,
-                colour::MUTED,
+                colour::muted(),
                 clip,
             );
         }

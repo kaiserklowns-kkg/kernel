@@ -119,5 +119,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0110](0110-lock-screen-and-password.md) | The lock screen and the user's password: Argon2id kept by Core, Super+L, waits after wrong passwords | Accepted |
 | [0111](0111-the-account-in-settings.md) | The account in Settings: changing the password needs the current one (`CHANGE_PASSWORD`), a password field | Accepted |
 | [0112](0112-locking-after-a-while.md) | Locking after a while without input, chosen in Settings; Lock in the apps panel | Accepted |
+| [0113](0113-dark-appearance-and-accent.md) | The dark appearance and the accent: one set of design values, kept by Core, every window told (`kind::THEME`) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

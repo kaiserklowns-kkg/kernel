@@ -141,7 +141,16 @@ pub mod op {
     pub const LOCK_AFTER: u64 = 32;
     /// data = `[minutes u8]`, one of [`crate::LOCK_CHOICES`].
     pub const SET_LOCK_AFTER: u64 = 33;
+    /// → `[appearance u8][accent u8]` (ADR-0113): 0 light, 1 dark; the
+    /// accent's index (`oceans_draw::theme::ACCENTS`).
+    pub const APPEARANCE: u64 = 34;
+    /// data = `[appearance u8][accent u8]`, kept across reboots.
+    pub const SET_APPEARANCE: u64 = 35;
 }
+
+/// How many accents there are to choose from (ADR-0113;
+/// `oceans_draw::theme::ACCENTS` holds them).
+pub const ACCENT_COUNT: u8 = 6;
 
 /// The times the screen may lock after (ADR-0112), in minutes; 0 is never
 /// (`oceans_account::LOCK_CHOICES` keeps the same).
@@ -199,7 +208,8 @@ pub mod access {
             | op::PINNED
             | op::USER
             | op::UNLOCK
-            | op::LOCK_AFTER => QUERY,
+            | op::LOCK_AFTER
+            | op::APPEARANCE => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -216,7 +226,8 @@ pub mod access {
             | op::SET_PASSWORD
             | op::CHANGE_PASSWORD
             | op::SET_NAME
-            | op::SET_LOCK_AFTER => DECIDE,
+            | op::SET_LOCK_AFTER
+            | op::SET_APPEARANCE => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

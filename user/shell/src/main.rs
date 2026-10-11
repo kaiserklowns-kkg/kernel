@@ -239,6 +239,7 @@ impl Shell {
             ["app", words @ ..] => self.app(words),
             ["volume", words @ ..] => self.volume(words),
             ["user", words @ ..] => self.user(words),
+            ["appearance", words @ ..] => self.appearance(words),
             ["ai", words @ ..] => self.ai(words),
             ["ui", words @ ..] => self.ui(words),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
@@ -296,6 +297,7 @@ impl Shell {
              \x20 user [name NAME]           the user's account; its name\r\n\
              \x20 user password PW | --remove  the password that locks the screen\r\n\
              \x20 user lock-after [MIN | never]  lock after a while without input\r\n\
+             \x20 appearance [light | dark] [ACCENT]  the theme; ACCENT: blue, purple, ...\r\n\
              \x20 shutdown | reboot          stop the system, then switch off or restart\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"
