@@ -1,9 +1,9 @@
-//! The user's account (ADR-0110): a name, and a password kept only as an
-//! Argon2id hash (RFC 9106) with its salt and parameters; and the wait
-//! after wrong passwords.
+//! The users' accounts (ADR-0110, ADR-0115): each a name, and a password
+//! kept only as an Argon2id hash (RFC 9106) with its salt and parameters;
+//! and the wait after wrong passwords.
 //!
-//! Oceans Core keeps the [`Record`] in `/system/user` and checks passwords
-//! for the lock screen; nothing else ever sees the hash.
+//! Oceans Core keeps the [`Users`] in `/system/user` and checks passwords
+//! for the lock screen; nothing else ever sees a hash.
 
 #![no_std]
 
@@ -99,6 +99,9 @@ pub fn valid_name(name: &str) -> bool {
 /// The account, as Core keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
+    /// Its short name (ADR-0115): [`OWNER`] for the first account, which
+    /// administers the others; else a login of [`valid_id`].
+    pub id: String,
     pub name: String,
     /// `None`: no password; the screen is never locked.
     pub secret: Option<Secret>,
@@ -119,6 +122,7 @@ pub const DEFAULT_LOCK_AFTER: u8 = 10;
 impl Default for Record {
     fn default() -> Self {
         Self {
+            id: String::from(OWNER),
             name: String::from(DEFAULT_NAME),
             secret: None,
             lock_after: DEFAULT_LOCK_AFTER,
@@ -199,6 +203,109 @@ impl Record {
             }
         }
         Some(record)
+    }
+}
+
+/// The first account's id (ADR-0115): the one there always is, whose Home
+/// is `/home` as before there were others.
+pub const OWNER: &str = "owner";
+/// The most accounts, the first included.
+pub const MAX_USERS: usize = 8;
+/// Logins: 1 to 16 of `a`–`z` and `0`–`9`, a letter first.
+pub const MAX_ID: usize = 16;
+
+/// Whether `id` may name an account added after the first: it becomes a
+/// folder's name, so only lowercase letters and digits.
+pub fn valid_id(id: &str) -> bool {
+    (1..=MAX_ID).contains(&id.len())
+        && id.starts_with(|c: char| c.is_ascii_lowercase())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && id != OWNER
+}
+
+impl Record {
+    /// Whether it administers the others: adds and removes accounts.
+    pub fn admin(&self) -> bool {
+        self.id == OWNER
+    }
+
+    /// Its Home, from the root: `home` for the first account, else
+    /// `users/ID`.
+    pub fn home(&self) -> String {
+        if self.admin() {
+            String::from("home")
+        } else {
+            alloc::format!("users/{}", self.id)
+        }
+    }
+}
+
+/// Every account (ADR-0115), the first account first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Users {
+    pub accounts: Vec<Record>,
+}
+
+impl Default for Users {
+    fn default() -> Self {
+        Self {
+            accounts: alloc::vec![Record::default()],
+        }
+    }
+}
+
+impl Users {
+    pub fn get(&self, id: &str) -> Option<&Record> {
+        self.accounts.iter().find(|a| a.id == id)
+    }
+
+    pub fn index(&self, id: &str) -> Option<usize> {
+        self.accounts.iter().position(|a| a.id == id)
+    }
+
+    /// The first account's lines as before (an older Oceans reads them),
+    /// then each other's after its `user ID`.
+    pub fn encode(&self) -> String {
+        let mut out = String::new();
+        for account in &self.accounts {
+            if !account.admin() {
+                let _ = writeln!(out, "user {}", account.id);
+            }
+            out.push_str(&account.encode());
+        }
+        out
+    }
+
+    /// From [`Users::encode`]'s text (or one account's, as kept before
+    /// ADR-0115); `None` if any of it is damaged.
+    pub fn decode(text: &str) -> Option<Self> {
+        let mut blocks: Vec<(String, String)> = alloc::vec![(String::from(OWNER), String::new())];
+        for line in text.lines() {
+            if let Some(id) = line.strip_prefix("user ") {
+                if !valid_id(id) || blocks.iter().any(|(other, _)| other == id) {
+                    return None;
+                }
+                blocks.push((String::from(id), String::new()));
+            } else if let Some((_, block)) = blocks.last_mut() {
+                block.push_str(line);
+                block.push('\n');
+            }
+        }
+        if blocks.len() > MAX_USERS {
+            return None;
+        }
+        let accounts = blocks
+            .into_iter()
+            .map(|(id, block)| {
+                Some(Record {
+                    id,
+                    ..Record::decode(&block)?
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { accounts })
     }
 }
 
@@ -298,6 +405,7 @@ mod tests {
     fn records_round_trip_and_refuse_damage() {
         let secret = Secret::new("oceans123", [1; SALT_LEN], QUICK).unwrap();
         let record = Record {
+            id: String::from(OWNER),
             name: String::from("Kai"),
             secret: Some(secret),
             lock_after: DEFAULT_LOCK_AFTER,
@@ -321,6 +429,87 @@ mod tests {
         assert_eq!(Record::decode("password scrypt a b c d e\n"), None);
         assert_eq!(Record::decode("what is this\n"), None);
         assert_eq!(Record::decode("name \n"), None);
+    }
+
+    #[test]
+    fn several_accounts_are_kept_after_the_first() {
+        let secret = Secret::new("oceans123", [1; SALT_LEN], QUICK).unwrap();
+        let mut users = Users::default();
+        users.accounts[0].name = String::from("Kai");
+        users.accounts.push(Record {
+            id: String::from("kim"),
+            name: String::from("Kim"),
+            secret: Some(secret),
+            lock_after: 5,
+        });
+        let text = users.encode();
+        assert!(text.starts_with(
+            "name Kai
+user kim
+name Kim
+lock-after 5
+password "
+        ));
+        assert_eq!(Users::decode(&text), Some(users.clone()));
+        // The one account kept before ADR-0115 is the first.
+        assert_eq!(
+            Users::decode(
+                "name Kai
+"
+            )
+            .map(|u| u.accounts[0].clone()),
+            Some(users.accounts[0].clone())
+        );
+        assert_eq!(Users::decode(""), Some(Users::default()));
+        // Their Homes, and who administers.
+        assert_eq!(users.accounts[0].home(), "home");
+        assert_eq!(
+            users.get("kim").map(Record::home).as_deref(),
+            Some("users/kim")
+        );
+        assert!(users.accounts[0].admin() && !users.accounts[1].admin());
+        assert_eq!(users.index("kim"), Some(1));
+        // Damage anywhere is damage.
+        assert_eq!(
+            Users::decode(
+                "user kim
+user kim
+"
+            ),
+            None
+        );
+        assert_eq!(
+            Users::decode(
+                "user Kim
+"
+            ),
+            None
+        );
+        assert_eq!(
+            Users::decode(
+                "user kim
+what
+"
+            ),
+            None
+        );
+        let many: String = (0..MAX_USERS)
+            .map(|i| {
+                alloc::format!(
+                    "user u{i}
+"
+                )
+            })
+            .collect();
+        assert_eq!(Users::decode(&many), None, "too many");
+    }
+
+    #[test]
+    fn logins_are_folder_names() {
+        assert!(valid_id("kim") && valid_id("k2"));
+        assert!(!valid_id("") && !valid_id("2k") && !valid_id("Kim"));
+        assert!(!valid_id("../x") && !valid_id("a b") && !valid_id(OWNER));
+        assert!(!valid_id(&"k".repeat(MAX_ID + 1)));
     }
 
     #[test]

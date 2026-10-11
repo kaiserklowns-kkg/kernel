@@ -603,10 +603,85 @@ impl Shell {
                     Err((error, _)) => Err(error),
                 }
             }
+            // The other accounts (ADR-0115).
+            ["list"] => {
+                let mut list = [0u8; 1024];
+                match core.call(op::USERS, &[], &[], &mut list) {
+                    Ok(got) => {
+                        let text = core::str::from_utf8(&list[..got.len]).unwrap_or("");
+                        for line in text.lines() {
+                            let mut fields = line.split('\t');
+                            let (id, name) =
+                                (fields.next().unwrap_or("?"), fields.next().unwrap_or("?"));
+                            let flags = fields.next().unwrap_or("");
+                            self.print(format_args!(
+                                "user: {id} ({name}){}{}\r\n",
+                                if flags.contains('a') {
+                                    ", administrator"
+                                } else {
+                                    ""
+                                },
+                                if flags.contains('c') { ", in use" } else { "" }
+                            ));
+                        }
+                        Ok(())
+                    }
+                    Err((error, _)) => Err(error),
+                }
+            }
+            ["add", id, password, name @ ..] if !name.is_empty() => {
+                let mut joined = Buffer::<64>::new();
+                for (i, word) in name.iter().enumerate() {
+                    let _ = write!(joined, "{}{word}", if i == 0 { "" } else { " " });
+                }
+                let name = joined.as_str();
+                // `[id length][id][name length][name][password]`.
+                let mut data = [0u8; 160];
+                let mut len = 0;
+                let parts = [id.as_bytes(), name.as_bytes(), password.as_bytes()];
+                for (i, part) in parts.into_iter().enumerate() {
+                    // The password, last, is not counted.
+                    let counted = i < 2;
+                    let need = part.len() + usize::from(counted);
+                    if part.len() > usize::from(u8::MAX) || len + need > data.len() {
+                        return self.print(format_args!("user: that is too long\r\n"));
+                    }
+                    if counted {
+                        data[len] = part.len() as u8;
+                        len += 1;
+                    }
+                    data[len..len + part.len()].copy_from_slice(part);
+                    len += part.len();
+                }
+                match core.call(op::ADD_USER, &data[..len], &[], &mut reply) {
+                    Ok(_) => {
+                        self.print(format_args!(
+                            "user: added {id} ({name}); its Home is /users/{id}\r\n"
+                        ));
+                        Ok(())
+                    }
+                    Err((CoreError::Status(Status::BadRequest), _)) => {
+                        return self.print(format_args!(
+                            "user: a login has 1 to 16 of a-z and 0-9, a letter first, and is not\r\n\
+                             \x20 taken; a password has 4 to 64 characters\r\n"
+                        ));
+                    }
+                    Err((error, _)) => Err(error),
+                }
+            }
+            ["remove", id] => core
+                .call(op::REMOVE_USER, id.as_bytes(), &[], &mut reply)
+                .map(|_| {
+                    self.print(format_args!(
+                        "user: removed {id}; its files stay in /users/{id}\r\n"
+                    ))
+                })
+                .map_err(|(error, _)| error),
             _ => {
                 return self.print(format_args!(
                     "usage: user [name NAME | password PASSWORD | password --remove |\r\n\
-                     \x20 lock-after [MINUTES | never]]\r\n"
+                     \x20 lock-after [MINUTES | never] | list | add LOGIN PASSWORD NAME |\r\n\
+                     \x20 remove LOGIN]\r\n"
                 ));
             }
         };

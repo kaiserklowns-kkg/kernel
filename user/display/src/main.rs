@@ -231,6 +231,8 @@ fn main(start: Start) -> i64 {
             pointer: (canvas.width / 2, canvas.height / 2),
             terminal_focused: true,
             can_power: directory.find("power", "power").is_some(),
+            // Until Core says otherwise (without Core, no one else).
+            admin: true,
             ..Desktop::default()
         },
         pending: Vec::new(),
@@ -425,7 +427,23 @@ impl Service {
                 };
                 self.desktop.pointer = (scale(x, x_max, w), scale(y, y_max, h));
             }
-            // Locked (ADR-0110): clicks reach nothing.
+            // Locked (ADR-0110): clicks reach nothing but the accounts'
+            // pictures, which choose one (ADR-0115).
+            Kind::Button {
+                button: 1,
+                pressed: true,
+            } if self.desktop.lock == desktop::Lock::Locked && self.desktop.users.len() > 1 => {
+                let (x, y) = self.desktop.pointer;
+                let count = self.desktop.users.len();
+                let Some(index) =
+                    (0..count).find(|&i| desktop::lock_avatar(w, h, i, count).contains(x, y))
+                else {
+                    return false;
+                };
+                if index != self.desktop.chosen_user {
+                    self.choose_user(index);
+                }
+            }
             Kind::Button { .. } if self.desktop.lock != desktop::Lock::Open => return false,
             Kind::Button { button, pressed } => {
                 let (x, y) = self.desktop.pointer;
@@ -625,7 +643,8 @@ impl Service {
                     continue;
                 }
                 match self.windows.key(byte) {
-                    KeyRoute::Terminal(byte) => terminal.push(byte),
+                    KeyRoute::Terminal(byte) if self.desktop.admin => terminal.push(byte),
+                    KeyRoute::Terminal(_) => {}
                     KeyRoute::Window(owner) => {
                         // A media key (ADR-0102), to the player that asked.
                         if let Some(name) = media_key_name(byte) {
@@ -812,6 +831,13 @@ impl Service {
 
     /// The Terminal, shown and given the keyboard.
     fn show_terminal(&mut self) {
+        // The system's console (ADR-0115): the administrator's only.
+        if !self.desktop.admin {
+            return self.toast(
+                String::from("The Terminal is for the administrator's account."),
+                false,
+            );
+        }
         self.desktop.terminal_hidden = false;
         self.windows.set_focus(Focus::Terminal);
     }
@@ -872,9 +898,29 @@ impl Service {
         {
             self.lock_after = minutes[0];
         }
+        // The accounts (ADR-0115): the lock screen chooses among them.
+        let mut list = [0u8; 1024];
+        if let Ok(got) = core.call(op::USERS, &[], &[], &mut list) {
+            let text = core::str::from_utf8(&list[..got.len]).unwrap_or("");
+            let mut users = Vec::new();
+            for (index, line) in text.lines().enumerate() {
+                let mut fields = line.split('\t');
+                let (id, name) = (fields.next().unwrap_or(""), fields.next().unwrap_or(""));
+                let flags = fields.next().unwrap_or("");
+                if flags.contains('c') {
+                    self.desktop.current_user = index;
+                    self.desktop.admin = flags.contains('a');
+                }
+                users.push((String::from(id), String::from(name)));
+            }
+            self.desktop.users = users;
+        }
         let changed = name != self.desktop.user_name || password != self.desktop.password_set;
         self.desktop.user_name = name;
         self.desktop.password_set = password;
+        if self.desktop.lock != desktop::Lock::Locked {
+            self.desktop.chosen_user = self.desktop.current_user;
+        }
         if self.desktop.lock == desktop::Lock::Starting {
             self.desktop.lock = if password {
                 say(self.log, format_args!("desktop: locked at start"));
@@ -953,6 +999,7 @@ impl Service {
         self.desktop.volume_open = false;
         self.desktop.lock_input.clear();
         self.desktop.lock_note.clear();
+        self.desktop.chosen_user = self.desktop.current_user;
         say(self.log, format_args!("desktop: locked"));
     }
 
@@ -973,8 +1020,50 @@ impl Service {
                 let c = desktop.layout.character(byte).unwrap_or(char::from(byte));
                 desktop.lock_input.push(c)
             }
+            // Another account (ADR-0115): what was typed is forgotten.
+            oceans_window::proto::KEY_LEFT if desktop.chosen_user > 0 => {
+                let to = desktop.chosen_user - 1;
+                self.choose_user(to);
+            }
+            oceans_window::proto::KEY_RIGHT if desktop.chosen_user + 1 < desktop.users.len() => {
+                let to = desktop.chosen_user + 1;
+                self.choose_user(to);
+            }
             _ => {}
         }
+    }
+
+    /// Another account signed in (ADR-0115): Core stopped the apps; what
+    /// was copied, the search and the Terminal are not the new user's.
+    fn signed_in(&mut self) {
+        self.windows.clear_clipboard();
+        self.refresh_user();
+        self.refresh_pinned();
+        self.refresh_appearance();
+        self.refresh_apps();
+        if !self.desktop.admin {
+            self.desktop.terminal_hidden = true;
+        }
+        say(
+            self.log,
+            format_args!("desktop: {} signed in", self.desktop.user_name),
+        );
+    }
+
+    /// The lock screen's account (ADR-0115).
+    fn choose_user(&mut self, index: usize) {
+        let desktop = &mut self.desktop;
+        desktop.chosen_user = index;
+        desktop.lock_input.clear();
+        desktop.lock_note.clear();
+        let name = desktop
+            .users
+            .get(index)
+            .map_or("?", |(_, name)| name.as_str());
+        say(
+            self.log,
+            format_args!("desktop: {name} chosen at the lock screen"),
+        );
     }
 
     fn try_unlock(&mut self) {
@@ -983,11 +1072,28 @@ impl Service {
         };
         let password = core::mem::take(&mut self.desktop.lock_input);
         let mut reply = [0u8; 16];
-        match core.call(op::UNLOCK, password.as_bytes(), &[], &mut reply) {
+        // Several accounts (ADR-0115): the chosen one signs in.
+        let chosen = self.desktop.chosen_user;
+        let other = chosen != self.desktop.current_user;
+        let result = match self.desktop.users.get(chosen) {
+            Some((id, _)) if self.desktop.users.len() > 1 => {
+                let mut data = Vec::with_capacity(1 + id.len() + password.len());
+                data.push(id.len() as u8);
+                data.extend_from_slice(id.as_bytes());
+                data.extend_from_slice(password.as_bytes());
+                core.call(op::SIGN_IN, &data, &[], &mut reply)
+            }
+            _ => core.call(op::UNLOCK, password.as_bytes(), &[], &mut reply),
+        };
+        match result {
             Ok(_) => {
                 self.desktop.lock = desktop::Lock::Open;
                 self.desktop.lock_note.clear();
-                say(self.log, format_args!("desktop: unlocked"));
+                if other {
+                    self.signed_in();
+                } else {
+                    say(self.log, format_args!("desktop: unlocked"));
+                }
             }
             Err((CoreError::Status(Status::TooSoon), got)) => {
                 let wait = core::str::from_utf8(&reply[..got.min(reply.len())]).unwrap_or("?");

@@ -725,6 +725,34 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey meta_l",
     b"@screen 905 330 262629 the apps panel, dark",
     b"@monitor sendkey esc",
+    // Several users (ADR-0115): the administrator adds Kim. Super+L, Right
+    // chooses her, her password signs her in: the apps stop, and her Home
+    // is her own (the search finds no picture.png in it). Left and Kai's
+    // password go back; Kim goes.
+    b"user add kim seashell9 Kim\r\n",
+    b"@wait core: audit: added the account kim (Kim)",
+    b"user list\r\n",
+    b"app start app.oceans.calculator\r\n",
+    b"@wait display: windows for app.oceans.calculator",
+    b"@monitor sendkey meta_l-l",
+    b"@wait desktop: locked",
+    b"@monitor sendkey right",
+    b"@wait desktop: Kim chosen at the lock screen",
+    b"@keys seashell9\r",
+    b"@wait desktop: Kim signed in",
+    b"@monitor sendkey meta_l",
+    b"@keys pict",
+    b"@monitor sendkey ret",
+    b"@wait desktop: nothing found for pict",
+    b"@monitor sendkey esc",
+    b"@monitor sendkey meta_l-l",
+    b"@wait desktop: locked",
+    b"@monitor sendkey left",
+    b"@wait desktop: Kai chosen at the lock screen",
+    b"@keys waves2026\r",
+    b"@wait desktop: Kai signed in",
+    b"user remove kim\r\n",
+    b"@wait core: audit: removed the account kim",
     b"@monitor device_del deskmouse",
     // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
     // Down goes back to 75%, Mute mutes again.
@@ -1135,7 +1163,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed settings.opk from the system image"),
     // `system-settings` (ADR-0096), with the system's own rights, unasked.
     Expect::Contains(
-        "core: audit: started app.oceans.settings 1.4.0 with window, system-info, manage-apps, system-settings",
+        "core: audit: started app.oceans.settings 1.5.0 with window, system-info, manage-apps, system-settings",
     ),
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),
@@ -1184,6 +1212,16 @@ const SHELL_EXPECT: &[Expect] = &[
     // Dark (ADR-0113): kept by Core, followed by the desktop.
     Expect::Line("appearance: dark, blue"),
     Expect::Contains("core: appearance dark, accent 0"),
+    // Several users (ADR-0115): added, listed, signed in with their own
+    // Home (the apps stopped first), back, and removed.
+    Expect::Line("user: added kim (Kim); its Home is /users/kim"),
+    Expect::Line("user: owner (Kai), administrator, in use"),
+    Expect::Line("user: kim (Kim)"),
+    Expect::Contains("core: audit: stopped app.oceans.calculator: another user signed in"),
+    Expect::Contains("core: user: kim signed in"),
+    Expect::Contains("desktop: nothing found for pict"),
+    Expect::Contains("core: user: owner signed in"),
+    Expect::Contains("core: audit: removed the account kim; its files stay"),
     // The system volume (ADR-0100): at full on a fresh disk; set from the
     // shell, the driver applies it and Core keeps it; the panel's slider
     // and Mute go the same way.

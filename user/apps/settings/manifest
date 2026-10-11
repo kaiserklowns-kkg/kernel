@@ -4,7 +4,7 @@
 # image. `manage-apps` is granted only to the system's own apps.
 id = app.oceans.settings
 name = Settings
-version = 1.4.0
+version = 1.5.0
 publisher = {{PUBLISHER}}
 description = The system's settings: general information, the network, the sound, apps and their permissions, the account
 architecture = x86_64

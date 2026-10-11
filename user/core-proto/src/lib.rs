@@ -146,6 +146,21 @@ pub mod op {
     pub const APPEARANCE: u64 = 34;
     /// data = `[appearance u8][accent u8]`, kept across reboots.
     pub const SET_APPEARANCE: u64 = 35;
+    /// → lines `ID`, `NAME`, `FLAGS` between tabs (ADR-0115), the first first;
+    /// FLAGS has `a` for the administrator, `p` with a password and `c` for
+    /// the account in use.
+    pub const USERS: u64 = 36;
+    /// data = `[id length u8][id][name length u8][name][password]`: a new
+    /// account, its Home made. Only the administrator, with a password
+    /// set (`NotAdministrator`); the new one needs one too.
+    pub const ADD_USER: u64 = 37;
+    /// data = `[id]`: the account goes; its Home stays. Only the
+    /// administrator; not the first account, nor the one in use.
+    pub const REMOVE_USER: u64 = 38;
+    /// data = `[id length u8][id][password]`: as `UNLOCK`, for that
+    /// account; another one than in use stops the apps (they hold its
+    /// Home) and is in use from then on.
+    pub const SIGN_IN: u64 = 39;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -209,7 +224,8 @@ pub mod access {
             | op::USER
             | op::UNLOCK
             | op::LOCK_AFTER
-            | op::APPEARANCE => QUERY,
+            | op::APPEARANCE
+            | op::USERS => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -227,7 +243,10 @@ pub mod access {
             | op::CHANGE_PASSWORD
             | op::SET_NAME
             | op::SET_LOCK_AFTER
-            | op::SET_APPEARANCE => DECIDE,
+            | op::SET_APPEARANCE
+            | op::ADD_USER
+            | op::REMOVE_USER
+            | op::SIGN_IN => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.
@@ -370,6 +389,9 @@ pub enum Status {
     /// `UNLOCK` after too many wrong passwords: the reply is how many
     /// seconds to wait, in decimal.
     TooSoon = 16,
+    /// `ADD_USER`, `REMOVE_USER` (ADR-0115) by an account that does not
+    /// administer, or before it has a password.
+    NotAdministrator = 17,
 }
 
 impl Status {
@@ -391,6 +413,7 @@ impl Status {
             14 => Self::Pending,
             15 => Self::WrongPassword,
             16 => Self::TooSoon,
+            17 => Self::NotAdministrator,
             _ => Self::BadRequest,
         }
     }
@@ -414,6 +437,7 @@ impl Status {
             Self::Pending => "another install is waiting for confirmation on the device",
             Self::WrongPassword => "wrong password",
             Self::TooSoon => "too many wrong passwords: wait",
+            Self::NotAdministrator => "only the administrator, with a password, may",
         }
     }
 }

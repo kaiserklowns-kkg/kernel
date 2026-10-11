@@ -36,12 +36,27 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 520;
-const SECTIONS: [&str; 5] = ["General", "Network", "Sound", "Apps", "Account"];
+const SECTIONS: [&str; 6] = ["General", "Network", "Sound", "Apps", "Users", "Account"];
 /// The Account section's fields (ADR-0111).
 const NAME_FIELD: u32 = 10;
 const CURRENT_FIELD: u32 = 11;
 const NEW_FIELD: u32 = 12;
 const CONFIRM_FIELD: u32 = 13;
+/// The Users section's fields (ADR-0115).
+const LOGIN_FIELD: u32 = 20;
+const USER_NAME_FIELD: u32 = 21;
+const USER_PASSWORD_FIELD: u32 = 22;
+
+/// The accounts (ADR-0115), as Core lists them, and a new one's fields.
+#[derive(Default)]
+struct Users {
+    /// Id, name and flags (`a` administrator, `p` password, `c` in use).
+    list: Vec<(String, String, String)>,
+    login: String,
+    name: String,
+    password: String,
+    message: String,
+}
 
 /// The account's page (ADR-0111): its name, and what is typed into its
 /// fields, kept only until it is used.
@@ -86,6 +101,7 @@ struct Settings {
     stale: bool,
     message: String,
     account: Account,
+    users: Users,
     /// The appearance and accent (ADR-0113), as Core keeps them.
     appearance: (u8, u8),
 }
@@ -121,6 +137,19 @@ impl Settings {
             self.account.password_set = reply[0] != 0;
             self.account.name =
                 String::from(core::str::from_utf8(&reply[1..got.len]).unwrap_or("?"));
+        }
+        // The accounts (ADR-0115).
+        let mut list = [0u8; 1024];
+        if let Ok(got) = core.call(op::USERS, &[], &[], &mut list) {
+            let text = core::str::from_utf8(&list[..got.len]).unwrap_or("");
+            self.users.list = text
+                .lines()
+                .map(|line| {
+                    let mut fields = line.split('\t').map(String::from);
+                    let mut next = || fields.next().unwrap_or_default();
+                    (next(), next(), next())
+                })
+                .collect();
         }
         if let Ok(got) = core.call(op::LOCK_AFTER, &[], &[], &mut reply)
             && got.len == 1
@@ -167,6 +196,50 @@ impl Settings {
                 alloc::format!("Named {name}.")
             }
             Err(_) => String::from("A name has 1 to 32 characters."),
+        };
+        self.stale = true;
+    }
+
+    /// `ADD_USER` (ADR-0115). The password typed is forgotten whatever
+    /// happens.
+    fn add_user(&mut self) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let login = self.users.login.trim().to_string();
+        let name = self.users.name.trim().to_string();
+        let password = core::mem::take(&mut self.users.password);
+        let mut data = Vec::with_capacity(2 + login.len() + name.len() + password.len());
+        data.push(login.len().min(255) as u8);
+        data.extend_from_slice(login.as_bytes());
+        data.push(name.len().min(255) as u8);
+        data.extend_from_slice(name.as_bytes());
+        data.extend_from_slice(password.as_bytes());
+        let mut reply = [0u8; 8];
+        self.users.message = match core.call(op::ADD_USER, &data, &[], &mut reply) {
+            Ok(_) => {
+                self.users.login.clear();
+                self.users.name.clear();
+                alloc::format!("Added {name}: the lock screen offers them from now on.")
+            }
+            Err((CoreError::Status(Status::BadRequest), _)) => String::from(
+                "A login has 1 to 16 of a-z and 0-9, a letter first, not taken; \
+                 a name 1 to 32 characters; a password 4 to 64.",
+            ),
+            Err((error, _)) => alloc::format!("Not added: {}", error.message()),
+        };
+        self.stale = true;
+    }
+
+    /// `REMOVE_USER` (ADR-0115): the account goes, its files stay.
+    fn remove_user(&mut self, id: &str) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 8];
+        self.users.message = match core.call(op::REMOVE_USER, id.as_bytes(), &[], &mut reply) {
+            Ok(_) => alloc::format!("Removed {id}; its files stay."),
+            Err((error, _)) => alloc::format!("Not removed: {}", error.message()),
         };
         self.stale = true;
     }
@@ -564,6 +637,61 @@ fn account(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     }
 }
 
+/// The accounts (ADR-0115): who may use this computer. The administrator
+/// adds and removes the others; each has its own Home.
+fn users(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
+    ui.heading("Users");
+    if settings.core.is_none() {
+        ui.muted("The accounts are not available to Settings.");
+        return;
+    }
+    let admin = settings
+        .users
+        .list
+        .iter()
+        .any(|(_, _, flags)| flags.contains('a') && flags.contains('c'));
+    let mut remove = None;
+    for (id, name, flags) in &settings.users.list {
+        let mut kind = String::from(if flags.contains('a') {
+            "Administrator"
+        } else {
+            "Standard"
+        });
+        if flags.contains('c') {
+            kind.push_str(", in use");
+        }
+        ui.row(name, &kind);
+        if admin && !flags.contains('a') && !flags.contains('c') {
+            let label = alloc::format!("Remove {name}");
+            if ui.button(&label) {
+                remove = Some(id.clone());
+            }
+        }
+    }
+    ui.separator();
+    let mut add = false;
+    if admin {
+        ui.label("Add a user, with a password; their files are their own.");
+        let users = &mut settings.users;
+        ui.text_field(LOGIN_FIELD, &mut users.login, "Login (a-z, 0-9)");
+        ui.text_field(USER_NAME_FIELD, &mut users.name, "Name");
+        let entered = ui.password_field(USER_PASSWORD_FIELD, &mut users.password, "Password");
+        add = ui.button("Add User") || entered;
+    } else {
+        ui.muted("Only the administrator adds and removes users.");
+    }
+    if !settings.users.message.is_empty() {
+        let message = settings.users.message.clone();
+        ui.muted(&message);
+    }
+    if add {
+        settings.add_user();
+    }
+    if let Some(id) = remove {
+        settings.remove_user(&id);
+    }
+}
+
 fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     ui.heading("Apps");
     if settings.core.is_none() {
@@ -685,6 +813,7 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         1 => network(ui, settings),
         2 => sound(ui, settings),
         3 => apps(ui, settings),
+        4 => users(ui, settings),
         _ => account(ui, settings),
     }
 }
@@ -705,6 +834,7 @@ fn main(start: Start) -> i64 {
         stale: true,
         message: String::new(),
         account: Account::default(),
+        users: Users::default(),
         appearance: (0, 0),
     };
     oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut settings, frame)

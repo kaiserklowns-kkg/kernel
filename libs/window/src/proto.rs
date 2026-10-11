@@ -204,6 +204,10 @@ pub const KEY_LAYOUT: u8 = 0xab;
 /// results they choose between while the launcher is open.
 pub const KEY_UP: u8 = 0x80;
 pub const KEY_DOWN: u8 = 0x81;
+/// Left and Right (`KEY_LEFT`, `KEY_RIGHT`): the account they choose
+/// between at the lock screen (ADR-0115).
+pub const KEY_LEFT: u8 = 0x82;
+pub const KEY_RIGHT: u8 = 0x83;
 
 /// Event kinds.
 pub mod kind {

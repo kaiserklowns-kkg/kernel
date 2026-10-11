@@ -915,6 +915,11 @@ impl Manager {
         self.clipboard.as_ref().map_or(0, String::len)
     }
 
+    /// Another user signed in (ADR-0115): what was copied is not theirs.
+    pub fn clear_clipboard(&mut self) {
+        self.clipboard = None;
+    }
+
     /// The focus goes round: the Terminal, then the windows in the order
     /// they were opened.
     fn next_window(&mut self) {

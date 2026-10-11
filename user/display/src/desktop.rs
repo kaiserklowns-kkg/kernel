@@ -245,6 +245,14 @@ pub struct Desktop {
     pub user_name: String,
     /// A password is set: the apps panel offers Lock (ADR-0112).
     pub password_set: bool,
+    /// The accounts (ADR-0115), by id and name, the first first; the one
+    /// chosen at the lock screen, and the one in use.
+    pub users: Vec<(String, String)>,
+    pub chosen_user: usize,
+    pub current_user: usize,
+    /// The account in use administers: the Terminal (the system's console)
+    /// is its alone.
+    pub admin: bool,
     /// The keyboard layout typed letters follow (ADR-0114).
     pub layout: oceans_window::layout::Layout,
 }
@@ -506,6 +514,17 @@ pub fn lock_button(width: i32, height: i32, can_power: bool) -> Rect {
 /// The lock screen's password field (ADR-0110), in the middle.
 pub fn lock_field(width: i32, height: i32) -> Rect {
     Rect::new((width - 320) / 2, height / 2, 320, 44)
+}
+
+/// The picture of account `index` of `count` at the lock screen
+/// (ADR-0115): 72 pixels, in a row centred above the field.
+pub fn lock_avatar(width: i32, height: i32, index: usize, count: usize) -> Rect {
+    const SIZE: i32 = 72;
+    const GAP: i32 = 36;
+    let count = count.max(1) as i32;
+    let row = count * SIZE + (count - 1) * GAP;
+    let x = (width - row) / 2 + index as i32 * (SIZE + GAP);
+    Rect::new(x, height / 2 - 130, SIZE, SIZE)
 }
 
 /// The apps panel's search field (ADR-0108), right of its title.
@@ -1306,9 +1325,29 @@ impl Desktop {
         if self.lock == Lock::Starting {
             return centre(canvas, h / 2, "Starting Oceans...", Font::Body, WHITE);
         }
-        let avatar = Rect::new((w - 72) / 2, h / 2 - 130, 72, 72);
-        app_icon(canvas, avatar, &self.user_name);
-        centre(canvas, h / 2 - 44, &self.user_name, Font::Strong, WHITE);
+        // One account: its picture and name. Several (ADR-0115): each
+        // one's picture in a row, the chosen one ringed, its name below.
+        let count = self.users.len().max(1);
+        let chosen = self.chosen_user.min(count - 1);
+        let name = self
+            .users
+            .get(chosen)
+            .map_or(self.user_name.as_str(), |(_, name)| name.as_str());
+        for i in 0..count {
+            let avatar = lock_avatar(w, h, i, count);
+            let shown = self
+                .users
+                .get(i)
+                .map_or(self.user_name.as_str(), |(_, n)| n.as_str());
+            if count > 1 && i == chosen {
+                canvas.round_fill(inset(avatar, -4), 20, WHITE);
+            }
+            app_icon(canvas, avatar, shown);
+            if count > 1 && i != chosen {
+                canvas.tint(avatar, 16, BLACK, 90);
+            }
+        }
+        centre(canvas, h / 2 - 44, name, Font::Strong, WHITE);
         let field = lock_field(w, h);
         canvas.round_fill(field, 12, colour::accent());
         let inner = inset(field, 2);
@@ -1328,10 +1367,12 @@ impl Desktop {
                 canvas.circle(inner.x + 18 + i * 14, inner.y + inner.h / 2, 4, INK);
             }
         }
-        let note = if self.lock_note.is_empty() {
-            "Type your password, then Enter"
-        } else {
+        let note = if !self.lock_note.is_empty() {
             self.lock_note.as_str()
+        } else if count > 1 {
+            "Choose with the arrows or a click; type the password, then Enter"
+        } else {
+            "Type your password, then Enter"
         };
         centre(canvas, field.y + field.h + 16, note, Font::Body, WHITE);
     }

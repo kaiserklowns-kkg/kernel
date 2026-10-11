@@ -297,6 +297,8 @@ impl Shell {
              \x20 user [name NAME]           the user's account; its name\r\n\
              \x20 user password PW | --remove  the password that locks the screen\r\n\
              \x20 user lock-after [MIN | never]  lock after a while without input\r\n\
+             \x20 user list | remove LOGIN   the accounts; one goes (its files stay)\r\n\
+             \x20 user add LOGIN PW NAME     another account, its Home /users/LOGIN\r\n\
              \x20 appearance [light | dark] [ACCENT]  the theme; ACCENT: blue, purple, ...\r\n\
              \x20 shutdown | reboot          stop the system, then switch off or restart\r\n\
              \x20 clear                      clear the screen\r\n\

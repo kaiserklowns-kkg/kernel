@@ -121,5 +121,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0112](0112-locking-after-a-while.md) | Locking after a while without input, chosen in Settings; Lock in the apps panel | Accepted |
 | [0113](0113-dark-appearance-and-accent.md) | The dark appearance and the accent: one set of design values, kept by Core, every window told (`kind::THEME`) | Accepted |
 | [0114](0114-typing-thai.md) | Typing Thai: Kedmanee beside English, Super+Space or the menu bar to switch, characters to the focused window (`kind::TEXT`) | Accepted |
+| [0115](0115-several-users.md) | Several users: accounts kept by Core, each with its own Home; the lock screen signs one in, Settings and the shell administer | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

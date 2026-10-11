@@ -347,10 +347,12 @@ struct Core {
     next_proposal: u32,
     /// Services started at boot (ADR-0049), kept in `/system/services`.
     enabled: BTreeSet<String>,
-    /// The user's account (ADR-0110), from `/system/user`; `None` if the
-    /// file is damaged (the screen then stays locked), and the wait after
-    /// wrong passwords.
-    account: Option<oceans_account::Record>,
+    /// The users' accounts (ADR-0110, ADR-0115), from `/system/user`;
+    /// `None` if the file is damaged (the screen then stays locked); the
+    /// one in use (its index; the first at boot), and the wait after wrong
+    /// passwords.
+    users: Option<oceans_account::Users>,
+    current: usize,
     throttle: oceans_account::Throttle,
     /// Restarts so far this boot, and those waiting for their time.
     restarts: BTreeMap<String, u32>,
@@ -372,6 +374,8 @@ impl Core {
         let system_dir = dir("system").ok_or("cannot open /system")?;
         // The user's files, handed to apps allowed `files`.
         dir("home").ok_or("cannot open /home")?.close();
+        // The Homes of the accounts after the first (ADR-0115).
+        dir("users").ok_or("cannot open /users")?.close();
 
         let trust_text = directory
             .find("module", "trust.keys")
@@ -440,7 +444,8 @@ impl Core {
             restarts: BTreeMap::new(),
             pending_restarts: Vec::new(),
             stale: 0,
-            account: Some(oceans_account::Record::default()),
+            users: Some(oceans_account::Users::default()),
+            current: 0,
             throttle: oceans_account::Throttle::default(),
         };
         core.load_apps();
@@ -625,7 +630,7 @@ impl Core {
         if query.trim().is_empty() || query.len() > oceans_search::MAX_QUERY {
             return Err(Status::BadRequest.into());
         }
-        let (home, _) = self.root.open("home", 0).map_err(io)?;
+        let (home, _) = self.root.walk(&self.home(), 0).map_err(io)?;
         let mut found: Vec<(oceans_search::Rank, String)> = Vec::new();
         let mut visited = 0;
         let mut pending = alloc::vec![(home, String::new(), 0)];
@@ -757,15 +762,17 @@ impl Core {
         }
     }
 
-    /// At boot: the user's account (ADR-0110). None kept: no password.
+    /// At boot: the users' accounts (ADR-0110, ADR-0115). None kept: one,
+    /// with no password. The first is in use until another signs in.
     fn load_account(&mut self) {
-        self.account = match read_path(&self.system_dir, USER_FILE) {
-            Err(_) => Some(oceans_account::Record::default()),
+        self.users = match read_path(&self.system_dir, USER_FILE) {
+            Err(_) => Some(oceans_account::Users::default()),
             Ok(bytes) => core::str::from_utf8(&bytes)
                 .ok()
-                .and_then(oceans_account::Record::decode),
+                .and_then(oceans_account::Users::decode),
         };
-        match &self.account {
+        self.current = 0;
+        match self.account() {
             Some(account) if account.secret.is_some() => {
                 say(
                     self.log,
@@ -778,12 +785,173 @@ impl Core {
                 format_args!("core: user: /system/user is damaged; the screen stays locked"),
             ),
         }
+        let others = self.users.as_ref().map_or(0, |u| u.accounts.len() - 1);
+        if others > 0 {
+            say(
+                self.log,
+                format_args!("core: user: {} other account{}", others, plural(others)),
+            );
+        }
     }
 
+    /// The account in use; `None` if `/system/user` is damaged.
+    fn account(&self) -> Option<&oceans_account::Record> {
+        self.users.as_ref()?.accounts.get(self.current)
+    }
+
+    /// The Home of the account in use (ADR-0115), from the root.
+    fn home(&self) -> String {
+        self.account()
+            .map_or_else(|| String::from("home"), oceans_account::Record::home)
+    }
+
+    /// `account` kept as the one in use.
     fn save_account(&mut self, account: oceans_account::Record) -> Result<(), Refusal> {
-        write_file(&self.system_dir, USER_FILE, account.encode().as_bytes()).map_err(io)?;
-        self.account = Some(account);
+        let mut users = self.users.clone().unwrap_or_default();
+        match users.accounts.get_mut(self.current) {
+            Some(slot) => *slot = account,
+            None => return Err(Status::IoError.into()),
+        }
+        self.save_users(users)
+    }
+
+    fn save_users(&mut self, users: oceans_account::Users) -> Result<(), Refusal> {
+        write_file(&self.system_dir, USER_FILE, users.encode().as_bytes()).map_err(io)?;
+        self.users = Some(users);
         Ok(())
+    }
+
+    /// `USERS` (ADR-0115).
+    fn users_reply(&self, reply: &mut Vec<u8>) {
+        let Some(users) = &self.users else {
+            return;
+        };
+        for (index, account) in users.accounts.iter().enumerate() {
+            let mut line = alloc::format!("{}\t{}\t", account.id, account.name);
+            if account.admin() {
+                line.push('a');
+            }
+            if account.secret.is_some() {
+                line.push('p');
+            }
+            if index == self.current {
+                line.push('c');
+            }
+            line.push('\n');
+            reply.extend_from_slice(line.as_bytes());
+        }
+    }
+
+    /// Only the administrator adds and removes accounts, and only once a
+    /// password keeps others from being them.
+    fn administering(&self) -> Result<oceans_account::Users, Refusal> {
+        match (self.account(), &self.users) {
+            (Some(account), Some(users)) if account.admin() && account.secret.is_some() => {
+                Ok(users.clone())
+            }
+            _ => Err(Status::NotAdministrator.into()),
+        }
+    }
+
+    /// `ADD_USER` (ADR-0115): an account with a password, and its Home.
+    fn add_user(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let mut users = self.administering()?;
+        let (id, rest) = counted(data).ok_or(Status::BadRequest)?;
+        let (name, password) = counted(rest).ok_or(Status::BadRequest)?;
+        let text = |bytes| core::str::from_utf8(bytes).map_err(|_| Status::BadRequest);
+        let (id, name, password) = (text(id)?, text(name)?, text(password)?);
+        if !oceans_account::valid_id(id)
+            || !oceans_account::valid_name(name)
+            || !oceans_account::valid_password(password)
+            || users.get(id).is_some()
+            || users.accounts.len() >= oceans_account::MAX_USERS
+        {
+            return Err(Status::BadRequest.into());
+        }
+        let mut salt = [0u8; oceans_account::SALT_LEN];
+        oceans_rt::random(&mut salt).map_err(|_| Status::IoError)?;
+        let secret = oceans_account::Secret::new(password, salt, oceans_account::DEFAULT)
+            .ok_or(Status::IoError)?;
+        let account = oceans_account::Record {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            secret: Some(secret),
+            lock_after: oceans_account::DEFAULT_LOCK_AFTER,
+        };
+        // Its Home first: an account without one would be given none.
+        let (home, _) = self
+            .root
+            .walk(&account.home(), flags::CREATE_DIRECTORY | flags::WRITE)
+            .map_err(io)?;
+        home.close();
+        users.accounts.push(account);
+        self.save_users(users)?;
+        self.record(format_args!("added the account {id} ({name})"));
+        Ok(())
+    }
+
+    /// `REMOVE_USER` (ADR-0115): the account goes, its files stay.
+    fn remove_user(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let mut users = self.administering()?;
+        let id = core::str::from_utf8(data).map_err(|_| Status::BadRequest)?;
+        let index = users.index(id).ok_or(Status::NotFound)?;
+        if index == 0 || index == self.current {
+            return Err(Status::BadRequest.into());
+        }
+        users.accounts.remove(index);
+        if index < self.current {
+            self.current -= 1;
+        }
+        self.save_users(users)?;
+        self.record(format_args!("removed the account {id}; its files stay"));
+        Ok(())
+    }
+
+    /// `SIGN_IN` (ADR-0115): the password of account `id`; another one
+    /// than in use stops the apps, which hold its Home and what it chose.
+    fn sign_in(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let (id, password) = counted(data).ok_or(Status::BadRequest)?;
+        let id = core::str::from_utf8(id).map_err(|_| Status::BadRequest)?;
+        let index = self
+            .users
+            .as_ref()
+            .and_then(|users| users.index(id))
+            .ok_or(Status::NotFound)?;
+        self.check_password(index, password)?;
+        if index == self.current {
+            say(self.log, format_args!("core: user: unlocked"));
+            return Ok(());
+        }
+        self.stop_for_another_user();
+        self.current = index;
+        say(self.log, format_args!("core: user: {id} signed in"));
+        Ok(())
+    }
+
+    /// Before another account is in use: the apps stop, and the services
+    /// given Home start again with the new one's.
+    fn stop_for_another_user(&mut self) {
+        let ids: Vec<(String, bool)> = self
+            .running
+            .iter()
+            .flatten()
+            .filter(|r| !self.enabled.contains(&r.id) || r.granted.contains(&Permission::Files))
+            .map(|r| (r.id.clone(), self.enabled.contains(&r.id)))
+            .collect();
+        for (id, _) in &ids {
+            self.stop(id, "another user signed in");
+        }
+        for (id, _) in ids.iter().filter(|(_, service)| *service) {
+            if let Err(refusal) = self.start_service(id) {
+                say(
+                    self.log,
+                    format_args!(
+                        "core: service {id} not started: {}",
+                        refusal.status.message()
+                    ),
+                );
+            }
+        }
     }
 
     /// `SET_PASSWORD` (ADR-0110): hashed with Argon2id and a new salt;
@@ -801,8 +969,13 @@ impl Core {
     /// set now.
     fn apply_password(&mut self, data: &[u8]) -> Result<bool, Refusal> {
         let password = core::str::from_utf8(data).map_err(|_| Status::BadRequest)?;
-        let mut account = self.account.clone().unwrap_or_default();
+        let mut account = self.account().cloned().unwrap_or_default();
         if password.is_empty() {
+            // With other accounts, every one has a password (ADR-0115):
+            // one without could be signed in as by anyone.
+            if self.users.as_ref().is_some_and(|u| u.accounts.len() > 1) {
+                return Err(Status::BadRequest.into());
+            }
             account.secret = None;
         } else {
             if !oceans_account::valid_password(password) {
@@ -837,7 +1010,7 @@ impl Core {
                 text: Some(alloc::format!("{}", wait_ms.div_ceil(1000))),
             });
         }
-        let right = match &self.account {
+        let right = match self.account() {
             Some(account) => match &account.secret {
                 Some(secret) => secret.verify(current),
                 None => current.is_empty(),
@@ -866,7 +1039,7 @@ impl Core {
         if !oceans_account::valid_name(name) {
             return Err(Status::BadRequest.into());
         }
-        let mut account = self.account.clone().unwrap_or_default();
+        let mut account = self.account().cloned().unwrap_or_default();
         account.name = name.to_owned();
         self.save_account(account)?;
         say(self.log, format_args!("core: user: named {name}"));
@@ -876,6 +1049,14 @@ impl Core {
     /// `UNLOCK` (ADR-0110): the password checked against its hash; after a
     /// few wrong ones, a wait before the next try.
     fn unlock(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        self.check_password(self.current, data)?;
+        say(self.log, format_args!("core: user: unlocked"));
+        Ok(())
+    }
+
+    /// The password of account `index`, checked against its hash; after a
+    /// few wrong ones (to any account), a wait before the next try.
+    fn check_password(&mut self, index: usize, data: &[u8]) -> Result<(), Refusal> {
         let now = oceans_rt::clock_ms();
         if let Err(wait_ms) = self.throttle.check(now) {
             return Err(Refusal {
@@ -884,13 +1065,16 @@ impl Core {
             });
         }
         let password = core::str::from_utf8(data).unwrap_or("");
-        let right = match &self.account {
+        let account = self
+            .users
+            .as_ref()
+            .and_then(|users| users.accounts.get(index));
+        let right = match account {
             Some(account) => account.secret.as_ref().is_none_or(|s| s.verify(password)),
             None => false,
         };
         if right {
             self.throttle.succeeded();
-            say(self.log, format_args!("core: user: unlocked"));
             return Ok(());
         }
         self.throttle.failed(now);
@@ -1331,7 +1515,7 @@ impl Core {
                     }
                     op::PIN => self.pin(data, reply),
                     op::USER => {
-                        let (set, name) = match &self.account {
+                        let (set, name) = match self.account() {
                             Some(account) => (account.secret.is_some(), account.name.as_str()),
                             // Damaged: as if a password were set.
                             None => (true, oceans_account::DEFAULT_NAME),
@@ -1344,6 +1528,13 @@ impl Core {
                     op::SET_NAME => self.set_name(data),
                     op::UNLOCK => self.unlock(data),
                     op::CHANGE_PASSWORD => self.change_password(data),
+                    op::USERS => {
+                        self.users_reply(reply);
+                        Ok(())
+                    }
+                    op::ADD_USER => self.add_user(data),
+                    op::REMOVE_USER => self.remove_user(data),
+                    op::SIGN_IN => self.sign_in(data),
                     op::APPEARANCE => {
                         reply.extend_from_slice(&self.appearance());
                         Ok(())
@@ -1368,8 +1559,7 @@ impl Core {
                     },
                     op::LOCK_AFTER => {
                         let minutes = self
-                            .account
-                            .as_ref()
+                            .account()
                             .map_or(oceans_account::DEFAULT_LOCK_AFTER, |account| {
                                 account.lock_after
                             });
@@ -1378,7 +1568,7 @@ impl Core {
                     }
                     op::SET_LOCK_AFTER => match data {
                         &[minutes] if oceans_account::LOCK_CHOICES.contains(&minutes) => {
-                            let mut account = self.account.clone().unwrap_or_default();
+                            let mut account = self.account().cloned().unwrap_or_default();
                             account.lock_after = minutes;
                             self.save_account(account)?;
                             say(
@@ -2199,7 +2389,7 @@ impl Core {
                     .map(|(node, _)| (node.0, "use", "storage")),
                 Permission::Files => self
                     .root
-                    .open("home", flags::WRITE)
+                    .walk(&self.home(), flags::WRITE)
                     .ok()
                     .map(|(node, _)| (node.0, "use", "files")),
                 Permission::SystemInfo => self
@@ -2386,6 +2576,17 @@ fn permission_index(permission: Permission) -> u8 {
         .iter()
         .position(|&p| p == permission)
         .unwrap_or(0) as u8
+}
+
+/// `[length u8][that many bytes][the rest]` → the bytes and the rest.
+fn counted(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (&len, rest) = data.split_first()?;
+    let len = usize::from(len);
+    Some((rest.get(..len)?, rest.get(len..)?))
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 fn id_of(bytes: &[u8]) -> Result<&str, Refusal> {
