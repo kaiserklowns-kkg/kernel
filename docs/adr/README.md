@@ -118,5 +118,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0109](0109-apps-kept-in-the-dock.md) | Apps kept in the dock: a right click keeps or takes out, Core keeps them across reboots | Accepted |
 | [0110](0110-lock-screen-and-password.md) | The lock screen and the user's password: Argon2id kept by Core, Super+L, waits after wrong passwords | Accepted |
 | [0111](0111-the-account-in-settings.md) | The account in Settings: changing the password needs the current one (`CHANGE_PASSWORD`), a password field | Accepted |
+| [0112](0112-locking-after-a-while.md) | Locking after a while without input, chosen in Settings; Lock in the apps panel | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

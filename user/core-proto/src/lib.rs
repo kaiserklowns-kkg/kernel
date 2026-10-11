@@ -136,7 +136,16 @@ pub mod op {
     /// set), checked and slowed after wrong ones as `UNLOCK` is: for apps
     /// such as Settings, whose user may not be the account's.
     pub const CHANGE_PASSWORD: u64 = 31;
+    /// → `[minutes u8]` (ADR-0112): how long without input before the
+    /// screen locks, if a password is set; 0: never.
+    pub const LOCK_AFTER: u64 = 32;
+    /// data = `[minutes u8]`, one of [`crate::LOCK_CHOICES`].
+    pub const SET_LOCK_AFTER: u64 = 33;
 }
+
+/// The times the screen may lock after (ADR-0112), in minutes; 0 is never
+/// (`oceans_account::LOCK_CHOICES` keeps the same).
+pub const LOCK_CHOICES: [u8; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
 pub mod access {
@@ -189,7 +198,8 @@ pub mod access {
             | op::FIND
             | op::PINNED
             | op::USER
-            | op::UNLOCK => QUERY,
+            | op::UNLOCK
+            | op::LOCK_AFTER => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -205,7 +215,8 @@ pub mod access {
             | op::PIN
             | op::SET_PASSWORD
             | op::CHANGE_PASSWORD
-            | op::SET_NAME => DECIDE,
+            | op::SET_NAME
+            | op::SET_LOCK_AFTER => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

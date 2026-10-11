@@ -329,7 +329,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Line("  hw-sata.txt"),
     // Only the app the image brings (ADR-0080), signed with its key.
     Expect::Contains("app.oceans.calculator  1.0.0  Calculator"),
-    Expect::Contains("app.oceans.settings  1.2.0  Settings"),
+    Expect::Contains("app.oceans.settings  1.3.0  Settings"),
     Expect::Contains("app.oceans.files  1.0.3  Files"),
     Expect::Contains("app.oceans.activity  1.0.1  Activity Monitor"),
     Expect::Contains("app.oceans.editor  1.0.3  Text Editor"),

@@ -139,6 +139,11 @@ struct Service {
     pending_args: String,
     /// The sound panel's slider is held (ADR-0100).
     volume_drag: bool,
+    /// When the last key or pointer event came (ms since boot), and how
+    /// long without one before the screen locks (ADR-0112; minutes, 0:
+    /// never), as Core keeps it.
+    last_input_ms: u64,
+    lock_after: u8,
 }
 
 fn main(start: Start) -> i64 {
@@ -232,6 +237,8 @@ fn main(start: Start) -> i64 {
         last_press: None,
         pending_args: String::new(),
         volume_drag: false,
+        last_input_ms: oceans_rt::clock_ms(),
+        lock_after: 0,
         text_capacity: 16 + info.cols as usize * info.rows as usize,
         console,
         windows: Manager::new(area, 2 * screen_pixels),
@@ -321,9 +328,22 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_user();
             }
             dirty |= service.refresh_terminal();
+            // A while without input (ADR-0112): the screen locks.
+            if service.desktop.lock == desktop::Lock::Open
+                && oceans_account::lock_due(
+                    service.desktop.password_set,
+                    service.lock_after,
+                    service.last_input_ms,
+                    now,
+                )
+            {
+                service.lock_idle();
+                dirty = true;
+            }
             if now.saturating_sub(last_apps) >= APPS_EVERY_MS {
                 last_apps = now;
                 dirty |= service.refresh_apps();
+                dirty |= service.refresh_user();
                 dirty |= service.refresh_volume();
                 dirty |= service.refresh_pending();
             }
@@ -390,6 +410,7 @@ impl Service {
 
     /// A pointer event; `true` if the screen must change.
     fn pointer(&mut self, kind: Kind, time_ms: u64, canvas: &Canvas) -> bool {
+        self.last_input_ms = oceans_rt::clock_ms();
         let (w, h) = (canvas.width, canvas.height);
         let (x, y) = self.desktop.pointer;
         match kind {
@@ -545,6 +566,8 @@ impl Service {
                 Ok(0) | Err(_) => return dirty,
                 Ok(count) => count,
             };
+            // Input: the time to lock after starts again (ADR-0112).
+            self.last_input_ms = oceans_rt::clock_ms();
             let mut terminal = Vec::new();
             for &byte in &keys[..count] {
                 // Locked (ADR-0110): the keys are the lock screen's, but for
@@ -679,6 +702,11 @@ impl Service {
                 self.desktop.start_open = false;
                 let id = self.desktop.apps[index].id.clone();
                 self.launch(&id, "");
+                true
+            }
+            // Lock (ADR-0112), as Super+L.
+            Hit::Lock => {
+                self.lock_screen();
                 true
             }
             Hit::Restart | Hit::ShutDown => {
@@ -816,9 +844,17 @@ impl Service {
         if got.len < 1 {
             return false;
         }
-        self.desktop.user_name =
-            String::from(core::str::from_utf8(&reply[1..got.len]).unwrap_or("?"));
+        let name = String::from(core::str::from_utf8(&reply[1..got.len]).unwrap_or("?"));
         let password = reply[0] != 0;
+        let mut minutes = [0u8; 1];
+        if let Ok(got) = core.call(op::LOCK_AFTER, &[], &[], &mut minutes)
+            && got.len == 1
+        {
+            self.lock_after = minutes[0];
+        }
+        let changed = name != self.desktop.user_name || password != self.desktop.password_set;
+        self.desktop.user_name = name;
+        self.desktop.password_set = password;
         if self.desktop.lock == desktop::Lock::Starting {
             self.desktop.lock = if password {
                 say(self.log, format_args!("desktop: locked at start"));
@@ -826,8 +862,24 @@ impl Service {
             } else {
                 desktop::Lock::Open
             };
+            return true;
         }
-        true
+        changed
+    }
+
+    /// No input for the time the user chose (ADR-0112): the screen locks.
+    fn lock_idle(&mut self) {
+        self.lock_screen();
+        if self.desktop.lock == desktop::Lock::Locked {
+            say(
+                self.log,
+                format_args!(
+                    "desktop: locked after {} minute{} without input",
+                    self.lock_after,
+                    if self.lock_after == 1 { "" } else { "s" }
+                ),
+            );
+        }
     }
 
     /// Super+L (ADR-0110): with a password, the screen locks; the windows

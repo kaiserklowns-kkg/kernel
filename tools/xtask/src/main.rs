@@ -695,6 +695,16 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@keys waves2026\r",
     b"@wait core: audit: changed the user's password, with the current one",
     b"app stop app.oceans.settings\r\n",
+    // Lock in the apps panel (ADR-0112), left of Restart (from 568,676):
+    // Super opens the panel, a click locks; the new password opens.
+    b"@monitor sendkey meta_l",
+    b"@monitor mouse_move -3000 -3000",
+    b"@monitor mouse_move 620 691",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: locked",
+    b"@keys waves2026\r",
+    b"@wait desktop: unlocked",
     b"@monitor device_del deskmouse",
     // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
     // Down goes back to 75%, Mute mutes again.
@@ -848,6 +858,14 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     // The previous boot's log, kept on disk (ADR-0074): the crasher test
     // service's faults of the first boot are in it.
     b"run diag out logs use:fs -- previous 5\r\n",
+    // Locking after a while (ADR-0112): one minute; the screen, locked at
+    // start, is opened (the desktop has had a moment to ask Core), and
+    // without input it locks again.
+    b"user lock-after 1\r\n",
+    b"@monitor info status",
+    b"@keys waves2026\r",
+    b"@wait desktop: unlocked",
+    b"@wait desktop: locked after 1 minute without input",
     b"app run app.example.counter\r\n",
     b"cat /keep/note.txt\r\n",
     b"ls /keep\r\n",
@@ -883,6 +901,10 @@ const REBOOT_EXPECT: &[Expect] = &[
     // The password the first boot set (ADR-0110): the desktop starts locked.
     Expect::Contains("core: user: Kai, with a password"),
     Expect::Contains("desktop: locked at start"),
+    // Locking after a while without input (ADR-0112).
+    Expect::Line("user: the screen locks after 1 minute without input"),
+    Expect::Contains("core: user: the screen locks after 1 minute without input"),
+    Expect::Contains("desktop: locked after 1 minute without input"),
     Expect::Contains("hda: volume 70%"),
     // Switching off (ADR-0085): the system stopped in order.
     Expect::Line("Stopping the system, then switching off..."),
@@ -1091,7 +1113,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed settings.opk from the system image"),
     // `system-settings` (ADR-0096), with the system's own rights, unasked.
     Expect::Contains(
-        "core: audit: started app.oceans.settings 1.2.0 with window, system-info, manage-apps, system-settings",
+        "core: audit: started app.oceans.settings 1.3.0 with window, system-info, manage-apps, system-settings",
     ),
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),

@@ -320,6 +320,7 @@ name = "display"
 version = "0.1.0"
 dependencies = [
  "noto-sans-mono-bitmap",
+ "oceans-account",
  "oceans-core-proto",
  "oceans-draw",
  "oceans-input-proto",

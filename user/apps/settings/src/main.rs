@@ -49,6 +49,8 @@ const CONFIRM_FIELD: u32 = 13;
 struct Account {
     name: String,
     password_set: bool,
+    /// Minutes without input before the screen locks (ADR-0112); 0: never.
+    lock_after: u8,
     new_name: String,
     current: String,
     new: String,
@@ -118,6 +120,11 @@ impl Settings {
             self.account.name =
                 String::from(core::str::from_utf8(&reply[1..got.len]).unwrap_or("?"));
         }
+        if let Ok(got) = core.call(op::LOCK_AFTER, &[], &[], &mut reply)
+            && got.len == 1
+        {
+            self.account.lock_after = reply[0];
+        }
         self.chosen = self.chosen.filter(|&i| i < self.apps.len());
         self.detail = self
             .chosen
@@ -153,6 +160,23 @@ impl Settings {
                 alloc::format!("Named {name}.")
             }
             Err(_) => String::from("A name has 1 to 32 characters."),
+        };
+        self.stale = true;
+    }
+
+    /// `SET_LOCK_AFTER` (ADR-0112).
+    fn set_lock_after(&mut self, minutes: u8) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 8];
+        self.account.message = match core.call(op::SET_LOCK_AFTER, &[minutes], &[], &mut reply) {
+            Ok(_) if minutes == 0 => String::from("The screen never locks by itself."),
+            Ok(_) => alloc::format!(
+                "The screen locks after {minutes} minute{} without input.",
+                if minutes == 1 { "" } else { "s" }
+            ),
+            Err((error, _)) => alloc::format!("Not saved: {}", error.message()),
         };
         self.stale = true;
     }
@@ -432,8 +456,39 @@ fn account(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     } else {
         "Set Password"
     };
-    let change = ui.primary_button(label) || entered;
-    let remove = account.password_set && ui.button("Remove Password");
+    // Change and Remove side by side, to fit the window.
+    let y = ui.y;
+    let x = ui.area.x;
+    let change_w = ui.measure(label, Style::Strong) + 28;
+    let change = ui.button_in(Rect::new(x, y, change_w, 30), label, true) || entered;
+    let remove_w = ui.measure("Remove Password", Style::Strong) + 28;
+    let remove = account.password_set
+        && ui.button_in(
+            Rect::new(x + change_w + 8, y, remove_w, 30),
+            "Remove Password",
+            false,
+        );
+    ui.y = y + 38;
+    // Locking after a while without input (ADR-0112), with a password.
+    let mut lock_after = None;
+    if account.password_set {
+        ui.label("Lock the screen after this many minutes without input:");
+        let y = ui.y;
+        let mut x = ui.area.x;
+        for &minutes in &oceans_core_proto::LOCK_CHOICES {
+            let text = if minutes == 0 {
+                String::from("Never")
+            } else {
+                alloc::format!("{minutes}")
+            };
+            let w = if minutes == 0 { 68 } else { 44 };
+            if ui.button_in(Rect::new(x, y, w, 30), &text, minutes == account.lock_after) {
+                lock_after = Some(minutes);
+            }
+            x += w + 6;
+        }
+        ui.y = y + 38;
+    }
     if !account.message.is_empty() {
         let message = account.message.clone();
         ui.muted(&message);
@@ -445,6 +500,9 @@ fn account(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         settings.change_password(false);
     } else if remove {
         settings.change_password(true);
+    }
+    if let Some(minutes) = lock_after {
+        settings.set_lock_after(minutes);
     }
 }
 

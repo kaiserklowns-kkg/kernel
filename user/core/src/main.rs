@@ -1326,6 +1326,32 @@ impl Core {
                     op::SET_NAME => self.set_name(data),
                     op::UNLOCK => self.unlock(data),
                     op::CHANGE_PASSWORD => self.change_password(data),
+                    op::LOCK_AFTER => {
+                        let minutes = self
+                            .account
+                            .as_ref()
+                            .map_or(oceans_account::DEFAULT_LOCK_AFTER, |account| {
+                                account.lock_after
+                            });
+                        reply.push(minutes);
+                        Ok(())
+                    }
+                    op::SET_LOCK_AFTER => match data {
+                        &[minutes] if oceans_account::LOCK_CHOICES.contains(&minutes) => {
+                            let mut account = self.account.clone().unwrap_or_default();
+                            account.lock_after = minutes;
+                            self.save_account(account)?;
+                            say(
+                                self.log,
+                                format_args!(
+                                    "core: user: the screen locks after {minutes} minute{} without input",
+                                    if minutes == 1 { "" } else { "s" }
+                                ),
+                            );
+                            Ok(())
+                        }
+                        _ => Err(Status::BadRequest.into()),
+                    },
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;

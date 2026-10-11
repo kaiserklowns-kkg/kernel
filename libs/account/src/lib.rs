@@ -102,18 +102,36 @@ pub struct Record {
     pub name: String,
     /// `None`: no password; the screen is never locked.
     pub secret: Option<Secret>,
+    /// Minutes without input before the screen locks (ADR-0112), one of
+    /// [`LOCK_CHOICES`]; 0: never. Only with a password.
+    pub lock_after: u8,
 }
 
 /// The name of an account no one has named.
 pub const DEFAULT_NAME: &str = "Oceans user";
+
+/// The choices for locking after a while (ADR-0112), in minutes; 0 is
+/// never.
+pub const LOCK_CHOICES: [u8; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
+/// Until the user chooses: ten minutes, as other systems roughly do.
+pub const DEFAULT_LOCK_AFTER: u8 = 10;
 
 impl Default for Record {
     fn default() -> Self {
         Self {
             name: String::from(DEFAULT_NAME),
             secret: None,
+            lock_after: DEFAULT_LOCK_AFTER,
         }
     }
+}
+
+/// Whether the screen locks now (ADR-0112): a password is set, the user
+/// chose a time, and there has been no input for that long.
+pub fn lock_due(password_set: bool, lock_after: u8, last_input_ms: u64, now_ms: u64) -> bool {
+    password_set
+        && lock_after != 0
+        && now_ms.saturating_sub(last_input_ms) >= u64::from(lock_after) * 60_000
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -140,6 +158,9 @@ impl Record {
     /// `name NAME` and `password argon2id m=KIB t=PASSES p=LANES SALT HASH`.
     pub fn encode(&self) -> String {
         let mut out = alloc::format!("name {}\n", self.name);
+        if self.lock_after != DEFAULT_LOCK_AFTER {
+            let _ = writeln!(out, "lock-after {}", self.lock_after);
+        }
         if let Some(s) = &self.secret {
             let _ = writeln!(
                 out,
@@ -167,6 +188,12 @@ impl Record {
                 record.name = String::from(name);
             } else if let Some(rest) = line.strip_prefix("password ") {
                 record.secret = Some(secret_of(rest)?);
+            } else if let Some(minutes) = line.strip_prefix("lock-after ") {
+                let minutes = minutes.parse::<u8>().ok()?;
+                if !LOCK_CHOICES.contains(&minutes) {
+                    return None;
+                }
+                record.lock_after = minutes;
             } else if !line.trim().is_empty() {
                 return None;
             }
@@ -273,11 +300,20 @@ mod tests {
         let record = Record {
             name: String::from("Kai"),
             secret: Some(secret),
+            lock_after: DEFAULT_LOCK_AFTER,
         };
         let text = record.encode();
         assert!(text.starts_with("name Kai\npassword argon2id m=64 t=1 p=1 0101"));
-        assert_eq!(Record::decode(&text), Some(record));
+        assert_eq!(Record::decode(&text), Some(record.clone()));
         assert_eq!(Record::decode(""), Some(Record::default()));
+        // Another time to lock after: kept; one not among the choices: damage.
+        let five = Record {
+            lock_after: 5,
+            ..record
+        };
+        assert!(five.encode().contains("\nlock-after 5\n"));
+        assert_eq!(Record::decode(&five.encode()), Some(five));
+        assert_eq!(Record::decode("lock-after 7\n"), None);
         assert_eq!(
             Record::decode("name Kai\npassword argon2id m=64 t=1 p=1 zz yy\n"),
             None
@@ -298,6 +334,20 @@ mod tests {
         assert!(!valid_name(""));
         assert!(!valid_name(" Kai"));
         assert!(!valid_name(&"n".repeat(33)));
+    }
+
+    #[test]
+    fn the_screen_locks_after_the_time_without_input() {
+        let minute = 60_000;
+        assert!(!lock_due(true, 5, 0, 5 * minute - 1));
+        assert!(lock_due(true, 5, 0, 5 * minute));
+        assert!(lock_due(true, 1, 10 * minute, 11 * minute));
+        assert!(!lock_due(true, 0, 0, 1000 * minute), "never");
+        assert!(
+            !lock_due(false, 1, 0, 1000 * minute),
+            "no password, no lock"
+        );
+        assert!(!lock_due(true, 1, 5 * minute, 0), "input after now");
     }
 
     #[test]

@@ -541,6 +541,45 @@ impl Shell {
                     .map(|_| self.print(format_args!("user: named {name}\r\n")))
                     .map_err(|(error, _)| error)
             }
+            // How long without input before the screen locks (ADR-0112).
+            ["lock-after"] => match core.call(op::LOCK_AFTER, &[], &[], &mut reply) {
+                Ok(got) if got.len == 1 && reply[0] == 0 => {
+                    return self.print(format_args!("user: the screen never locks by itself\r\n"));
+                }
+                Ok(got) if got.len == 1 => {
+                    return self.print(format_args!(
+                        "user: the screen locks after {} minute{} without input\r\n",
+                        reply[0],
+                        if reply[0] == 1 { "" } else { "s" }
+                    ));
+                }
+                Ok(_) => return self.print(format_args!("user: no answer\r\n")),
+                Err((error, _)) => Err(error),
+            },
+            ["lock-after", minutes] => {
+                let minutes = match *minutes {
+                    "never" => Some(0),
+                    text => text.parse::<u8>().ok(),
+                };
+                let Some(minutes) = minutes.filter(|m| oceans_core_proto::LOCK_CHOICES.contains(m))
+                else {
+                    return self.print(format_args!(
+                        "user: lock-after takes never, 1, 2, 5, 10, 15, 30 or 60\r\n"
+                    ));
+                };
+                core.call(op::SET_LOCK_AFTER, &[minutes], &[], &mut reply)
+                    .map(|_| {
+                        if minutes == 0 {
+                            self.print(format_args!("user: the screen never locks by itself\r\n"));
+                        } else {
+                            self.print(format_args!(
+                                "user: the screen locks after {minutes} minute{} without input\r\n",
+                                if minutes == 1 { "" } else { "s" }
+                            ));
+                        }
+                    })
+                    .map_err(|(error, _)| error)
+            }
             ["password", "--remove"] => core
                 .call(op::SET_PASSWORD, &[], &[], &mut reply)
                 .map(|_| {
@@ -566,7 +605,8 @@ impl Shell {
             }
             _ => {
                 return self.print(format_args!(
-                    "usage: user [name NAME | password PASSWORD | password --remove]\r\n"
+                    "usage: user [name NAME | password PASSWORD | password --remove |\r\n\
+                     \x20 lock-after [MINUTES | never]]\r\n"
                 ));
             }
         };

@@ -193,6 +193,8 @@ pub struct Desktop {
     pub lock_note: String,
     /// The user's name, as Core keeps it.
     pub user_name: String,
+    /// A password is set: the apps panel offers Lock (ADR-0112).
+    pub password_set: bool,
 }
 
 /// Whether the screen is locked (ADR-0110).
@@ -240,6 +242,8 @@ pub enum Hit {
     StartApp(usize),
     /// A search result in the apps panel (ADR-0108).
     Found(usize),
+    /// Lock, in the apps panel (ADR-0112).
+    Lock,
     /// Restart and Shut Down, in the apps panel.
     Restart,
     ShutDown,
@@ -429,6 +433,13 @@ pub fn tile(width: i32, height: i32, index: usize) -> Rect {
         TILE_WIDTH,
         TILE_HEIGHT,
     )
+}
+
+/// Lock, in the apps panel's footer (ADR-0112): left of Restart, or where
+/// Restart would be on a desktop that cannot switch the machine off.
+pub fn lock_button(width: i32, height: i32, can_power: bool) -> Rect {
+    let first = power_button(width, height, if can_power { -1 } else { 1 });
+    Rect::new(first.x, first.y, first.w, first.h)
 }
 
 /// The lock screen's password field (ADR-0110), in the middle.
@@ -641,6 +652,9 @@ impl Desktop {
             if start_menu(width, height).contains(x, y) {
                 if tile(width, height, 0).contains(x, y) {
                     return Hit::StartTerminal;
+                }
+                if self.password_set && lock_button(width, height, self.can_power).contains(x, y) {
+                    return Hit::Lock;
                 }
                 if self.can_power {
                     if power_button(width, height, 0).contains(x, y) {
@@ -1044,19 +1058,25 @@ impl Desktop {
             )
         };
         canvas.text(panel.x + 24, footer_y + 16, &note, Font::Body, MUTED, panel);
+        let mut buttons: Vec<(Rect, &str)> = Vec::new();
+        // Lock (ADR-0112), with a password set.
+        if self.password_set {
+            buttons.push((lock_button(w, h, self.can_power), "Lock"));
+        }
         if self.can_power {
-            for (index, label) in [(0, "Restart"), (1, "Shut Down")] {
-                let button = power_button(w, h, index);
-                let hovered = button.contains(pointer.0, pointer.1) && self.dialog.is_none();
-                let fill = if hovered {
-                    Rgb(0xd5_d5_db)
-                } else {
-                    BUTTON_SECONDARY
-                };
-                canvas.round_fill(button, 8, fill);
-                let tx = button.x + (button.w - canvas.measure(label, Font::Body)) / 2;
-                canvas.text(tx, button.y + 6, label, Font::Body, TEXT, button);
-            }
+            buttons.push((power_button(w, h, 0), "Restart"));
+            buttons.push((power_button(w, h, 1), "Shut Down"));
+        }
+        for (button, label) in buttons {
+            let hovered = button.contains(pointer.0, pointer.1) && self.dialog.is_none();
+            let fill = if hovered {
+                Rgb(0xd5_d5_db)
+            } else {
+                BUTTON_SECONDARY
+            };
+            canvas.round_fill(button, 8, fill);
+            let tx = button.x + (button.w - canvas.measure(label, Font::Body)) / 2;
+            canvas.text(tx, button.y + 6, label, Font::Body, TEXT, button);
         }
     }
 
