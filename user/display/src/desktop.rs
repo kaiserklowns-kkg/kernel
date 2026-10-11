@@ -156,6 +156,14 @@ pub struct App {
     pub running: bool,
 }
 
+/// The network as the desktop shows it (ADR-0118): connected (an address
+/// is configured), and the address.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Network {
+    pub connected: bool,
+    pub address: String,
+}
+
 /// A short message in the corner.
 pub struct Toast {
     pub text: String,
@@ -264,9 +272,44 @@ pub struct Desktop {
     /// Wave is open (ADR-0117): its icons stand over the button while the
     /// pointer is there.
     pub wave_open: bool,
+    /// The network (ADR-0118), if the desktop can read it.
+    pub network: Option<Network>,
+    /// The notifications (ADR-0119), newest first, at most
+    /// [`MAX_NOTICES`]; how many came since they were last looked at;
+    /// whether their panel is open.
+    pub notices: Vec<Notice>,
+    pub unread: usize,
+    pub notices_open: bool,
+    /// The desktop's icon chosen by a click (ADR-0120); a second click
+    /// on it opens it.
+    pub icon_chosen: Option<usize>,
+    /// The user's menu under its icon is open (ADR-0121).
+    pub user_menu_open: bool,
+    /// The time and the date in words, for the notifications' panel.
+    pub clock_time: String,
+    pub clock_date: String,
     /// The keyboard layout typed letters follow (ADR-0114).
     pub layout: oceans_window::layout::Layout,
 }
+
+/// An app's notification (ADR-0065, ADR-0119), kept for its panel: the
+/// app's verified name, what it said, and when (milliseconds since boot).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub app: String,
+    pub text: String,
+    pub at_ms: u64,
+}
+
+/// The notifications kept (ADR-0119); older ones go.
+pub const MAX_NOTICES: usize = 30;
+
+/// The app Home opens in, on the desktop (ADR-0120).
+const FILES_APP: &str = "app.oceans.files";
+/// The desktop's icons, at most: one column under the top bar.
+const MAX_DESKTOP_ITEMS: usize = 6;
+/// The cards the panel shows, newest first.
+const NOTICE_CARDS: usize = 6;
 
 /// Whether the screen is locked (ADR-0110).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -302,6 +345,18 @@ pub struct WindowView<'a> {
     pub focused: bool,
 }
 
+/// What the user's menu does (ADR-0121), as macOS's Fast User Switching
+/// menu does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserAction {
+    /// The screen locks.
+    Lock,
+    /// The lock screen, to choose another account.
+    Switch,
+    /// Settings, where the accounts are.
+    Settings,
+}
+
 /// What a click landed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
@@ -330,16 +385,34 @@ pub enum Hit {
     TerminalMinimize,
     /// The Terminal itself.
     Terminal,
-    /// The keyboard layout in the menu bar (ADR-0114).
+    /// The keyboard layout, in the top bar (ADR-0114) or Control Center's
+    /// tile (ADR-0118).
     Layout,
-    /// The speaker in the menu bar (ADR-0100).
+    /// A status icon in the top bar (ADR-0118): Control Center opens or
+    /// closes.
     Volume,
-    /// The sound panel's slider, at that level.
+    /// Control Center's slider, at that level (ADR-0100).
     VolumeLevel(u8),
     VolumeMute,
     /// A button of what plays (ADR-0103): the media key it presses.
     Media(u8),
-    /// Somewhere else in the sound panel.
+    /// A round toggle in Control Center (ADR-0118): 0 the network, 1 dark,
+    /// 2 lock, 3 Settings.
+    Toggle(u8),
+    /// Control Center's accent tile: the next accent.
+    Accent,
+    /// The bell (ADR-0119): the notifications' panel opens or closes.
+    Clock,
+    /// The panel's Clear, and anywhere else in it.
+    ClearNotices,
+    NoticePanel,
+    /// An icon on the desktop (ADR-0120), by its place.
+    DesktopIcon(usize),
+    /// The user's icon (ADR-0121): the user's menu opens or closes.
+    User,
+    /// An item of the user's menu.
+    UserItem(UserAction),
+    /// Somewhere else in Control Center.
     VolumePanel,
     Allow,
     Deny,
@@ -363,18 +436,22 @@ fn bar_end(width: i32) -> i32 {
     width - 14
 }
 
-/// What the system's state takes in the top bar, at most: the speaker
-/// stays in one place left of it (ADR-0100).
-const STATUS_SLOT: i32 = 76;
+/// The status icons at the top bar's right (ADR-0118, ADR-0121), as
+/// macOS shows them, from the end in: the bell ([`ICON_BELL`]), Control
+/// Center's, the network, the user, the speaker.
+pub fn status_icon(width: i32, index: i32) -> Rect {
+    Rect::new(bar_end(width) - 28 - index * 32, 2, 28, MENU_HEIGHT - 4)
+}
 
-/// The speaker in the top bar (ADR-0100), left of the system's state.
+pub const ICON_BELL: i32 = 0;
+pub const ICON_CONTROL: i32 = 1;
+pub const ICON_NETWORK: i32 = 2;
+pub const ICON_USER: i32 = 3;
+pub const ICON_SPEAKER: i32 = 4;
+
+/// The speaker in the top bar (ADR-0100).
 pub fn volume_button(width: i32) -> Rect {
-    Rect::new(
-        bar_end(width) - STATUS_SLOT - 12 - 28,
-        2,
-        28,
-        MENU_HEIGHT - 4,
-    )
+    status_icon(width, ICON_SPEAKER)
 }
 
 /// The keyboard layout's name in the menu bar (ADR-0114), left of the
@@ -384,59 +461,141 @@ pub fn layout_button(width: i32) -> Rect {
     Rect::new(speaker.x - 8 - 32, 2, 32, MENU_HEIGHT - 4)
 }
 
-/// The sound panel, below the speaker.
-pub fn volume_panel(width: i32) -> Rect {
-    let button = volume_button(width);
-    Rect::new(button.x + button.w - 260, MENU_HEIGHT + 6, 260, 106)
+/// The bell at the top bar's right end (ADR-0119, ADR-0121): it opens the
+/// notifications, its count of new ones on it.
+pub fn bell_button(width: i32) -> Rect {
+    status_icon(width, ICON_BELL)
 }
 
-/// The whole sound panel: the volume, and below it what plays when a
-/// player says (ADR-0103).
-pub fn sound_panel(width: i32, media: bool) -> Rect {
-    let top = volume_panel(width);
+/// The user's menu (ADR-0121), under the user's icon: the account's name,
+/// then its items.
+pub fn user_menu(width: i32, items: usize) -> Rect {
+    let icon = status_icon(width, ICON_USER);
+    let w = 220;
     Rect::new(
-        top.x,
-        top.y,
-        top.w,
-        if media { top.h + MEDIA_HEIGHT } else { top.h },
+        (icon.x + icon.w - w).min(width - 12 - w),
+        MENU_HEIGHT + 6,
+        w,
+        44 + items as i32 * 32 + 8,
     )
 }
 
-/// The media keys the panel's buttons press: Previous, Play/Pause, Next.
+/// Item `index` of the user's menu.
+pub fn user_menu_item(width: i32, items: usize, index: usize) -> Rect {
+    let menu = user_menu(width, items);
+    Rect::new(menu.x + 6, menu.y + 44 + index as i32 * 32, menu.w - 12, 30)
+}
+
+/// Icon `index` on the desktop (ADR-0120), in a column down its right
+/// side under the top bar: a 48-pixel picture and its name under it.
+pub fn desktop_icon(width: i32, index: usize) -> Rect {
+    Rect::new(
+        width - 16 - 96,
+        MENU_HEIGHT + 14 + index as i32 * 100,
+        96,
+        92,
+    )
+}
+
+/// The notifications' panel (ADR-0119) under the bell, at the right as
+/// macOS has it, as tall as the cards it shows (`count` notifications
+/// kept; one row says there are none).
+pub fn notice_panel(width: i32, count: usize) -> Rect {
+    let cards = count.clamp(1, NOTICE_CARDS) as i32;
+    // Room under the cards to say how many more there are.
+    let foot = if count > NOTICE_CARDS { 26 } else { 8 };
+    Rect::new(
+        width - 12 - 360,
+        MENU_HEIGHT + 6,
+        360,
+        140 + cards * 68 + foot,
+    )
+}
+
+/// Card `index` in the panel, newest first.
+pub fn notice_card(width: i32, count: usize, index: usize) -> Rect {
+    let panel = notice_panel(width, count);
+    Rect::new(
+        panel.x + 12,
+        panel.y + 140 + index as i32 * 68,
+        panel.w - 24,
+        60,
+    )
+}
+
+/// Clear, which lets every notification go.
+pub fn notice_clear(width: i32, count: usize) -> Rect {
+    let panel = notice_panel(width, count);
+    Rect::new(panel.x + panel.w - 12 - 72, panel.y + 106, 72, 26)
+}
+
+/// Control Center (ADR-0118), under the top bar's right end: modules on
+/// a panel, as phones have them. The whole of it.
+pub fn control_center(width: i32) -> Rect {
+    Rect::new(width - 12 - CC_WIDTH, MENU_HEIGHT + 6, CC_WIDTH, CC_HEIGHT)
+}
+
+const CC_WIDTH: i32 = 340;
+const CC_HEIGHT: i32 = 318;
+/// A half-width module, and the gap between modules.
+const CC_HALF: i32 = 153;
+const CC_GAP: i32 = 10;
+
+/// Control Center's modules: 0 the round toggles, 1 what plays, 2 the
+/// keyboard, 3 the accent, 4 the sound.
+pub fn cc_module(width: i32, which: usize) -> Rect {
+    let cc = control_center(width);
+    let (x0, y0) = (cc.x + 12, cc.y + 12);
+    let right = x0 + CC_HALF + CC_GAP;
+    match which {
+        0 => Rect::new(x0, y0, CC_HALF, 140),
+        1 => Rect::new(right, y0, CC_HALF, 140),
+        2 => Rect::new(x0, y0 + 150, CC_HALF, 56),
+        3 => Rect::new(right, y0 + 150, CC_HALF, 56),
+        _ => Rect::new(x0, y0 + 216, 2 * CC_HALF + CC_GAP, 52),
+    }
+}
+
+/// The round toggles (ADR-0118): 0 the network, 1 dark, 2 lock, 3
+/// Settings; 44 pixels each, two by two.
+pub fn cc_toggle(width: i32, index: usize) -> Rect {
+    let m = cc_module(width, 0);
+    let (col, row) = ((index % 2) as i32, (index / 2) as i32);
+    let cx = m.x + m.w / 4 + col * m.w / 2;
+    let cy = m.y + 34 + row * 66;
+    Rect::new(cx - 22, cy - 22, 44, 44)
+}
+
+/// The media keys the buttons press: Previous, Play/Pause, Next.
 const MEDIA_KEYS: [u8; 3] = [
     oceans_window::proto::KEY_PREVIOUS,
     oceans_window::proto::KEY_PLAY_PAUSE,
     oceans_window::proto::KEY_NEXT,
 ];
 
-/// Height the panel grows by for what plays.
-const MEDIA_HEIGHT: i32 = 76;
-
-/// The panel's Previous, Play/Pause and Next buttons (0, 1, 2).
+/// What plays: Previous, Play/Pause, Next (0, 1, 2), across the module's
+/// foot.
 pub fn media_button(width: i32, which: usize) -> Rect {
-    let top = volume_panel(width);
-    let y = top.y + top.h + 40;
-    match which {
-        0 => Rect::new(top.x + 16, y, 60, 26),
-        1 => Rect::new(top.x + 84, y, 92, 26),
-        _ => Rect::new(top.x + 184, y, 60, 26),
-    }
+    let m = cc_module(width, 1);
+    let step = (m.w - 24) / 3;
+    Rect::new(m.x + 12 + which as i32 * step, m.y + m.h - 44, step, 34)
 }
 
-/// The panel's slider: its track, and the strip a click on it takes.
+/// The sound module's slider: a thick track right of the speaker.
 pub fn volume_track(width: i32) -> Rect {
-    let panel = volume_panel(width);
-    Rect::new(panel.x + 16, panel.y + 50, panel.w - 32, 6)
+    let m = cc_module(width, 4);
+    Rect::new(m.x + 54, m.y + 15, m.w - 68, 22)
 }
 
 fn volume_track_target(width: i32) -> Rect {
     let track = volume_track(width);
-    Rect::new(track.x - 8, track.y - 12, track.w + 16, track.h + 24)
+    Rect::new(track.x - 8, track.y - 8, track.w + 16, track.h + 16)
 }
 
+/// The speaker at the sound module's left: it mutes and unmutes.
 pub fn volume_mute(width: i32) -> Rect {
-    let panel = volume_panel(width);
-    Rect::new(panel.x + 16, panel.y + 70, 96, 26)
+    let m = cc_module(width, 4);
+    Rect::new(m.x + 8, m.y + 8, 38, 36)
 }
 
 /// The level (0 to 100) at `x` along the slider.
@@ -611,6 +770,56 @@ pub fn taskbar_windows<'a>(windows: &'a [WindowView<'a>]) -> Vec<&'a WindowView<
     shown
 }
 
+/// The time and the date in words (ADR-0119): ("01:14", "Tuesday 6
+/// October"), from milliseconds since 1970 (UTC).
+pub fn clock_long(unix_ms: u64) -> (String, String) {
+    const DAY_NAMES: [&str; 7] = [
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+    ];
+    const MONTH_NAMES: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let days = (unix_ms / 86_400_000) as u32;
+    let minutes = unix_ms / 60_000;
+    let (_, month, day) = oceans_package::date::civil(days);
+    (
+        alloc::format!("{:02}:{:02}", minutes / 60 % 24, minutes % 60),
+        alloc::format!(
+            "{} {day} {}",
+            DAY_NAMES[days as usize % 7],
+            MONTH_NAMES[(month as usize).saturating_sub(1) % 12]
+        ),
+    )
+}
+
+/// How long ago, as a notification's card says it: "now", "5 min ago",
+/// "2 h ago".
+pub fn ago(then_ms: u64, now_ms: u64) -> String {
+    let minutes = now_ms.saturating_sub(then_ms) / 60_000;
+    match minutes {
+        0 => String::from("now"),
+        1..=59 => alloc::format!("{minutes} min ago"),
+        _ => alloc::format!("{} h ago", minutes / 60),
+    }
+}
+
 /// The menu bar's clock: "Tue 6 Oct  01:14", from milliseconds since 1970
 /// (UTC).
 pub fn clock_text(unix_ms: u64) -> String {
@@ -731,11 +940,8 @@ fn drawn_wallpaper(width: i32, height: i32) -> Vec<u32> {
 }
 
 impl Desktop {
-    /// What a click on the desktop (the menu bar, Wave, Launchpad,
-    /// dialogs, the Terminal: everything but app windows) hits, on a
-    /// `width × height` screen; `windows` as Wave shows them.
-    /// The apps kept in the dock that are installed (ADR-0109): id and
-    /// name, in their order.
+    /// The apps kept in Wave that are installed (ADR-0109): id and name,
+    /// in their order.
     pub fn kept(&self) -> Vec<(&str, &str)> {
         self.pinned
             .iter()
@@ -746,6 +952,37 @@ impl Desktop {
                     .map(|a| (a.id.as_str(), a.name.as_str()))
             })
             .collect()
+    }
+
+    /// The user's menu (ADR-0121): Lock Screen with a password, Switch User
+    /// with other accounts, and Settings.
+    pub fn user_items(&self) -> Vec<(&'static str, UserAction)> {
+        let mut items = Vec::new();
+        if self.password_set {
+            items.push(("Lock Screen", UserAction::Lock));
+        }
+        if self.users.len() > 1 {
+            items.push(("Switch User...", UserAction::Switch));
+        }
+        items.push(("Users & Accounts...", UserAction::Settings));
+        items
+    }
+
+    /// What the desktop holds (ADR-0120), in a column at its right: Home
+    /// (it opens in Files), then the apps kept in Wave; each a label and
+    /// the app it opens.
+    pub fn desktop_items(&self) -> Vec<(String, String)> {
+        let mut items = Vec::new();
+        if self.apps.iter().any(|a| a.id == FILES_APP) {
+            items.push((String::from("Home"), String::from(FILES_APP)));
+        }
+        for (id, name) in self.kept() {
+            if id != FILES_APP {
+                items.push((String::from(name), String::from(id)));
+            }
+        }
+        items.truncate(MAX_DESKTOP_ITEMS);
+        items
     }
 
     /// Wave opens when the pointer reaches its button and stays open while
@@ -773,6 +1010,10 @@ impl Desktop {
         dock::entries(&kept, &windows)
     }
 
+    /// What a click on the desktop (the top bar, Wave, Launchpad, the
+    /// panels, dialogs, the Terminal, the desktop's icons: everything but
+    /// app windows) hits, on a `width × height` screen; `windows` as Wave
+    /// shows them.
     pub fn hit(&self, x: i32, y: i32, width: i32, height: i32, windows: &[DockWindow]) -> Hit {
         if self.dialog.is_some() {
             // A modal question: only its buttons answer.
@@ -811,19 +1052,50 @@ impl Desktop {
         if layout_button(width).contains(x, y) {
             return Hit::Layout;
         }
-        // The speaker and its panel (ADR-0100).
-        if self.volume.is_some() && volume_button(width).contains(x, y) {
+        // The bell and its notifications (ADR-0119).
+        if bell_button(width).contains(x, y) {
+            return Hit::Clock;
+        }
+        let count = self.notices.len();
+        if self.notices_open && notice_panel(width, count).contains(x, y) {
+            return if count > 0 && notice_clear(width, count).contains(x, y) {
+                Hit::ClearNotices
+            } else {
+                Hit::NoticePanel
+            };
+        }
+        // The user's icon and menu (ADR-0121).
+        if status_icon(width, ICON_USER).contains(x, y) {
+            return Hit::User;
+        }
+        let items = self.user_items();
+        if self.user_menu_open && user_menu(width, items.len()).contains(x, y) {
+            return (0..items.len())
+                .find(|&i| user_menu_item(width, items.len(), i).contains(x, y))
+                .map_or(Hit::NoticePanel, |i| Hit::UserItem(items[i].1));
+        }
+        // The other status icons open Control Center (ADR-0118).
+        if [ICON_CONTROL, ICON_NETWORK, ICON_SPEAKER]
+            .iter()
+            .any(|&i| status_icon(width, i).contains(x, y))
+        {
             return Hit::Volume;
         }
-        let media = self.now_playing.is_some();
-        if self.volume_open && sound_panel(width, media).contains(x, y) {
-            return if let Some(which) =
+        if self.volume_open && control_center(width).contains(x, y) {
+            let media = self.now_playing.is_some();
+            return if let Some(i) = (0..4).find(|&i| cc_toggle(width, i).contains(x, y)) {
+                Hit::Toggle(i as u8)
+            } else if let Some(which) =
                 (0..3).find(|&i| media && media_button(width, i).contains(x, y))
             {
                 Hit::Media(MEDIA_KEYS[which])
-            } else if volume_track_target(width).contains(x, y) {
+            } else if cc_module(width, 2).contains(x, y) {
+                Hit::Layout
+            } else if cc_module(width, 3).contains(x, y) {
+                Hit::Accent
+            } else if self.volume.is_some() && volume_track_target(width).contains(x, y) {
                 Hit::VolumeLevel(volume_at(width, x))
-            } else if volume_mute(width).contains(x, y) {
+            } else if self.volume.is_some() && volume_mute(width).contains(x, y) {
                 Hit::VolumeMute
             } else {
                 Hit::VolumePanel
@@ -869,6 +1141,11 @@ impl Desktop {
                 return Hit::Terminal;
             }
         }
+        // The desktop's icons (ADR-0120), under everything else.
+        let items = self.desktop_items().len();
+        if let Some(index) = (0..items).find(|&i| desktop_icon(width, i).contains(x, y)) {
+            return Hit::DesktopIcon(index);
+        }
         Hit::Nothing
     }
 
@@ -879,6 +1156,9 @@ impl Desktop {
         if self.lock != Lock::Open {
             return self.draw_lock_screen(canvas);
         }
+
+        // The desktop's icons (ADR-0120), on the wallpaper under it all.
+        self.draw_desktop_icons(canvas);
 
         if !self.terminal_hidden {
             self.draw_terminal(canvas);
@@ -903,10 +1183,17 @@ impl Desktop {
             self.draw_menu_bar(canvas, windows);
             self.draw_dock(canvas, windows);
         }
-        if self.volume_open
-            && let Some(volume) = self.volume
-        {
-            self.draw_volume_panel(canvas, volume);
+        // Control Center (ADR-0118), with or without a sound device.
+        if self.volume_open {
+            self.draw_control_center(canvas);
+        }
+        // The notifications (ADR-0119), under the bell.
+        if self.notices_open {
+            self.draw_notices(canvas, now_ms);
+        }
+        // The user's menu (ADR-0121).
+        if self.user_menu_open {
+            self.draw_user_menu(canvas);
         }
         if self.volume_shown_until > now_ms
             && let Some(volume) = self.volume
@@ -1004,128 +1291,424 @@ impl Desktop {
             canvas.tint(Rect::new(0, row, w, 1), 0, BLACK, alpha);
         }
         let hover = |r: Rect| r.contains(self.pointer.0, self.pointer.1);
-        // The time, where phones show it.
-        canvas.text(14, 6, &self.clock, Font::Strong, WHITE, bar);
-
-        // The system's state, right-aligned at the bar's end.
-        let status_x = bar_end(w) - canvas.measure(&self.status, Font::Body);
-        canvas.text(status_x, 6, &self.status, Font::Body, WHITE, bar);
-        // The speaker (ADR-0100), in one place left of it.
-        if let Some((level, muted)) = self.volume {
-            let button = volume_button(w);
-            if self.volume_open || hover(button) {
-                canvas.tint(button, 6, WHITE, 45);
+        let lit = |canvas: &mut Canvas, r: Rect, open: bool| {
+            if open || hover(r) {
+                canvas.tint(r, 6, WHITE, 45);
             }
-            speaker(canvas, button, level, muted, WHITE);
-        }
-        // The keyboard layout (ADR-0114), left of the speaker.
-        let r = layout_button(w);
-        if hover(r) {
-            canvas.tint(r, 6, WHITE, 45);
-        }
-        let name = self.layout.short_name();
-        let x = r.x + (r.w - canvas.measure(name, Font::Strong)) / 2;
-        canvas.text(x, 6, name, Font::Strong, WHITE, bar);
-        // The app in use, last, right-aligned left of the layout.
+        };
+        // The left (ADR-0121): the time and date, then the app in use,
+        // bold, as macOS names it.
+        let end = canvas.text(14, 6, &self.clock, Font::Strong, WHITE, bar);
         let current = windows
             .iter()
             .find(|view| view.focused && !view.frame.minimized)
             .map(|view| view.frame.app.as_str())
             .or((self.terminal_focused && !self.terminal_hidden).then_some("Terminal"))
             .unwrap_or("Oceans");
-        let app_x = r.x - 16 - canvas.measure(current, Font::Strong);
-        canvas.text(app_x, 6, current, Font::Strong, WHITE, bar);
+        canvas.text(end + 22, 6, current, Font::Strong, WHITE, bar);
+
+        // The right, from the end in, as macOS has it: the bell (ADR-0119)
+        // with how many came since in red, Control Center (ADR-0118), the
+        // network, the user (ADR-0121), the speaker, the keyboard layout.
+        let bell = bell_button(w);
+        lit(canvas, bell, self.notices_open);
+        bell_icon(canvas, bell.x + bell.w / 2, bell.y + bell.h / 2, WHITE);
+        if self.unread > 0 {
+            let count = alloc::format!("{}", self.unread.min(99));
+            let cw = canvas.measure(&count, Font::Body);
+            // On the bell's top right, kept on the screen at the bar's end.
+            let bw = (cw + 8).max(16);
+            let badge = Rect::new((bell.x + bell.w - 12).min(w - 2 - bw), 1, bw, 16);
+            canvas.round_fill(badge, 8, CLOSE);
+            canvas.text(
+                badge.x + (badge.w - cw) / 2,
+                0,
+                &count,
+                Font::Body,
+                WHITE,
+                badge,
+            );
+        }
+        let cc = status_icon(w, ICON_CONTROL);
+        lit(canvas, cc, self.volume_open);
+        control_icon(canvas, cc.x + cc.w / 2, cc.y + cc.h / 2, WHITE);
+        if let Some(network) = &self.network {
+            let r = status_icon(w, ICON_NETWORK);
+            lit(canvas, r, false);
+            network_icon(canvas, r.x + r.w / 2, r.y + r.h / 2, WHITE);
+            if !network.connected {
+                // Not connected: struck through.
+                for i in 0..14 {
+                    canvas.fill(Rect::new(r.x + 7 + i, r.y + 5 + i, 2, 1), WHITE);
+                }
+            }
+        }
+        let user = status_icon(w, ICON_USER);
+        lit(canvas, user, self.user_menu_open);
+        user_icon(canvas, user.x + user.w / 2, user.y + user.h / 2, WHITE);
+        if let Some((level, muted)) = self.volume {
+            let button = volume_button(w);
+            lit(canvas, button, false);
+            speaker(canvas, button, level, muted, WHITE);
+        }
+        let r = layout_button(w);
+        lit(canvas, r, false);
+        let name = self.layout.short_name();
+        let x = r.x + (r.w - canvas.measure(name, Font::Strong)) / 2;
+        canvas.text(x, 6, name, Font::Strong, WHITE, bar);
     }
 
-    /// The sound panel (ADR-0100): the level, a slider and Mute.
-    fn draw_volume_panel(&self, canvas: &mut Canvas, (level, muted): (u8, bool)) {
+    /// The user's menu (ADR-0121): the account's name, then Lock Screen,
+    /// Switch User and Users & Accounts.
+    fn draw_user_menu(&self, canvas: &mut Canvas) {
         let w = canvas.width;
-        let whole = sound_panel(w, self.now_playing.is_some());
-        canvas.shadow(whole, 12, 70);
-        canvas.round_fill(whole, 12, colour::dialog_surface());
-        let panel = volume_panel(w);
+        let items = self.user_items();
+        let menu = user_menu(w, items.len());
+        canvas.shadow(menu, 12, 70);
+        canvas.round_fill(menu, 12, colour::panel());
+        let clip = Rect::new(menu.x + 14, menu.y, menu.w - 28, menu.h);
         canvas.text(
-            panel.x + 16,
-            panel.y + 12,
-            "Sound",
+            menu.x + 14,
+            menu.y + 12,
+            &self.user_name,
             Font::Strong,
             colour::text(),
-            panel,
+            clip,
         );
-        let shown = if muted {
-            String::from("Muted")
-        } else {
-            alloc::format!("{level}%")
-        };
-        let x = panel.x + panel.w - 16 - canvas.measure(&shown, Font::Body);
-        canvas.text(x, panel.y + 12, &shown, Font::Body, colour::muted(), panel);
-        let track = volume_track(w);
-        canvas.round_fill(track, 3, colour::button_secondary());
-        let filled = track.w * i32::from(level) / 100;
-        let ink = if muted {
-            colour::muted()
-        } else {
-            colour::accent()
-        };
-        canvas.round_fill(Rect::new(track.x, track.y, filled, track.h), 3, ink);
-        canvas.circle(
-            track.x + filled,
-            track.y + track.h / 2,
-            8,
-            colour::window_border(),
+        canvas.fill(
+            Rect::new(menu.x + 10, menu.y + 38, menu.w - 20, 1),
+            colour::button_secondary(),
         );
-        canvas.circle(track.x + filled, track.y + track.h / 2, 7, WHITE);
-        let mute = volume_mute(w);
+        for (i, (label, _)) in items.iter().enumerate() {
+            let r = user_menu_item(w, items.len(), i);
+            if r.contains(self.pointer.0, self.pointer.1) {
+                canvas.round_fill(r, 6, colour::accent());
+                canvas.text(r.x + 8, r.y + 6, label, Font::Body, WHITE, r);
+            } else {
+                canvas.text(r.x + 8, r.y + 6, label, Font::Body, colour::text(), r);
+            }
+        }
+    }
+
+    /// The desktop's icons (ADR-0120): Home as a folder, the kept apps as
+    /// their icons, each name in white on a soft shade; the chosen one
+    /// lit.
+    fn draw_desktop_icons(&self, canvas: &mut Canvas) {
+        let w = canvas.width;
+        for (i, (label, id)) in self.desktop_items().iter().enumerate() {
+            let tile = desktop_icon(w, i);
+            if self.icon_chosen == Some(i) {
+                canvas.tint(tile, 12, WHITE, 60);
+            } else if tile.contains(self.pointer.0, self.pointer.1) {
+                canvas.tint(tile, 12, WHITE, 30);
+            }
+            let icon = Rect::new(tile.x + (tile.w - ICON) / 2, tile.y + 6, ICON, ICON);
+            if id == FILES_APP && label == "Home" {
+                folder_icon(canvas, icon);
+            } else {
+                app_icon(canvas, icon, label);
+            }
+            let lw = canvas.measure(label, Font::Body).min(tile.w - 8);
+            let shade = Rect::new(tile.x + (tile.w - lw) / 2 - 6, tile.y + 60, lw + 12, 22);
+            canvas.tint(shade, 8, BLACK, 90);
+            canvas.text(shade.x + 6, shade.y + 2, label, Font::Body, WHITE, shade);
+        }
+    }
+
+    /// The notifications (ADR-0119), as phones show them: the time large
+    /// and the date, then a card for each, newest first: the app, how long
+    /// ago, and what it said.
+    fn draw_notices(&self, canvas: &mut Canvas, now_ms: u64) {
+        let count = self.notices.len();
+        let panel = notice_panel(canvas.width, count);
+        canvas.shadow(panel, 16, 80);
+        canvas.round_fill(panel, 18, colour::panel());
+        let clip = Rect::new(panel.x + 18, panel.y, panel.w - 36, panel.h);
+        canvas.text(
+            panel.x + 18,
+            panel.y + 6,
+            &self.clock_time,
+            Font::Display,
+            colour::text(),
+            clip,
+        );
+        canvas.text(
+            panel.x + 18,
+            panel.y + 70,
+            &self.clock_date,
+            Font::Body,
+            colour::muted(),
+            clip,
+        );
+        canvas.text(
+            panel.x + 18,
+            panel.y + 110,
+            "Notifications",
+            Font::Strong,
+            colour::text(),
+            clip,
+        );
+        if count == 0 {
+            let card = notice_card(canvas.width, 1, 0);
+            canvas.round_fill(card, 14, colour::surface());
+            canvas.text(
+                card.x + 14,
+                card.y + 20,
+                "No notifications",
+                Font::Body,
+                colour::muted(),
+                card,
+            );
+            return;
+        }
+        let clear = notice_clear(canvas.width, count);
+        let hovered = clear.contains(self.pointer.0, self.pointer.1);
         canvas.round_fill(
-            mute,
-            7,
-            if muted {
-                colour::accent()
+            clear,
+            13,
+            if hovered {
+                Rgb(0xd5_d5_db)
             } else {
                 colour::button_secondary()
             },
         );
-        let label = if muted { "Unmute" } else { "Mute" };
-        let ink = if muted { WHITE } else { colour::text() };
-        let lx = mute.x + (mute.w - canvas.measure(label, Font::Body)) / 2;
-        canvas.text(lx, mute.y + 4, label, Font::Body, ink, mute);
-        // What plays (ADR-0103): the title, the app, and its buttons.
-        if let Some((app, state, title)) = &self.now_playing {
-            canvas.fill(
-                Rect::new(panel.x + 16, panel.y + panel.h, panel.w - 32, 1),
-                colour::button_secondary(),
-            );
-            let row = Rect::new(panel.x + 16, panel.y + panel.h + 10, panel.w - 32, 22);
-            let app_x = row.x + row.w - canvas.measure(app, Font::Body);
-            canvas.text(app_x, row.y, app, Font::Body, colour::muted(), row);
-            let title_clip = Rect::new(row.x, row.y, app_x - row.x - 8, row.h);
+        let cw = canvas.measure("Clear", Font::Body);
+        canvas.text(
+            clear.x + (clear.w - cw) / 2,
+            clear.y + 4,
+            "Clear",
+            Font::Body,
+            colour::text(),
+            clear,
+        );
+        for (i, notice) in self.notices.iter().take(NOTICE_CARDS).enumerate() {
+            let card = notice_card(canvas.width, count, i);
+            canvas.round_fill(card, 14, colour::surface());
+            let icon = Rect::new(card.x + 10, card.y + 12, 36, 36);
+            app_icon(canvas, icon, &notice.app);
+            let text = Rect::new(card.x + 56, card.y, card.w - 66, card.h);
+            let when = ago(notice.at_ms, now_ms);
+            let ww = canvas.measure(&when, Font::Body);
             canvas.text(
-                row.x,
-                row.y,
-                title,
+                text.x + text.w - ww,
+                card.y + 9,
+                &when,
+                Font::Body,
+                colour::muted(),
+                text,
+            );
+            let head = Rect::new(text.x, text.y, text.w - ww - 8, text.h);
+            canvas.text(
+                text.x,
+                card.y + 9,
+                &notice.app,
+                Font::Body,
+                colour::muted(),
+                head,
+            );
+            canvas.text(
+                text.x,
+                card.y + 31,
+                &notice.text,
                 Font::Strong,
                 colour::text(),
-                title_clip,
+                text,
             );
-            let playing = *state == oceans_window::proto::playing::PLAYING;
-            let labels = ["Prev", if playing { "Pause" } else { "Play" }, "Next"];
-            for (which, label) in labels.iter().enumerate() {
-                let button = media_button(w, which);
-                let primary = which == 1;
-                canvas.round_fill(
-                    button,
-                    7,
-                    if primary {
-                        colour::accent()
-                    } else {
-                        colour::button_secondary()
-                    },
+        }
+        if count > NOTICE_CARDS {
+            let more = alloc::format!("and {} more", count - NOTICE_CARDS);
+            let last = notice_card(canvas.width, count, NOTICE_CARDS - 1);
+            canvas.text(
+                last.x + 4,
+                last.y + last.h + 2,
+                &more,
+                Font::Body,
+                colour::muted(),
+                panel,
+            );
+        }
+    }
+
+    /// Control Center (ADR-0118): the round toggles, what plays, the
+    /// keyboard and the accent, the sound, and a line of the system's
+    /// state, each module on its own surface.
+    fn draw_control_center(&self, canvas: &mut Canvas) {
+        let w = canvas.width;
+        let cc = control_center(w);
+        canvas.shadow(cc, 16, 80);
+        canvas.round_fill(cc, 18, colour::panel());
+        for which in 0..5 {
+            canvas.round_fill(cc_module(w, which), 14, colour::surface());
+        }
+        let pointer = self.pointer;
+        let (dark, accent) = oceans_draw::theme::bytes();
+
+        // The round toggles, each with its name under it.
+        let connected = self.network.as_ref().is_some_and(|n| n.connected);
+        let toggles: [(&str, bool); 4] = [
+            ("Network", connected),
+            ("Dark", dark == 1),
+            ("Lock", false),
+            ("Settings", false),
+        ];
+        for (i, (name, on)) in toggles.iter().enumerate() {
+            let r = cc_toggle(w, i);
+            let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+            let fill = if *on {
+                colour::accent()
+            } else if r.contains(pointer.0, pointer.1) {
+                Rgb(0xd5_d5_db)
+            } else {
+                colour::button_secondary()
+            };
+            canvas.circle(cx, cy, r.w / 2, fill);
+            let ink = if *on { WHITE } else { colour::text() };
+            match i {
+                0 => network_icon(canvas, cx, cy, ink),
+                1 => moon_icon(canvas, cx, cy, ink, fill),
+                2 => lock_icon(canvas, cx, cy, ink, fill),
+                _ => gear_icon(canvas, cx, cy, ink, fill),
+            }
+            let lw = canvas.measure(name, Font::Body);
+            let label = Rect::new(cx - 40, r.y + r.h + 2, 80, 18);
+            canvas.text(
+                cx - lw / 2,
+                label.y,
+                name,
+                Font::Body,
+                colour::muted(),
+                label,
+            );
+        }
+
+        // What plays (ADR-0103), or that nothing does.
+        let m = cc_module(w, 1);
+        let clip = Rect::new(m.x + 12, m.y, m.w - 24, m.h);
+        canvas.text(
+            m.x + 12,
+            m.y + 12,
+            "Now playing",
+            Font::Body,
+            colour::muted(),
+            clip,
+        );
+        match &self.now_playing {
+            Some((app, state, title)) => {
+                canvas.text(
+                    m.x + 12,
+                    m.y + 34,
+                    title,
+                    Font::Strong,
+                    colour::text(),
+                    clip,
                 );
-                let ink = if primary { WHITE } else { colour::text() };
-                let lx = button.x + (button.w - canvas.measure(label, Font::Body)) / 2;
-                canvas.text(lx, button.y + 4, label, Font::Body, ink, button);
+                canvas.text(m.x + 12, m.y + 56, app, Font::Body, colour::muted(), clip);
+                let playing = *state == oceans_window::proto::playing::PLAYING;
+                for which in 0..3 {
+                    let b = media_button(w, which);
+                    if b.contains(pointer.0, pointer.1) {
+                        canvas.tint(b, 8, BLACK, 20);
+                    }
+                    let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2);
+                    match which {
+                        0 => skip_icon(canvas, cx, cy, false),
+                        1 if playing => pause_icon(canvas, cx, cy),
+                        1 => play_icon(canvas, cx, cy),
+                        _ => skip_icon(canvas, cx, cy, true),
+                    }
+                }
+            }
+            None => {
+                canvas.text(
+                    m.x + 12,
+                    m.y + 34,
+                    "Nothing",
+                    Font::Strong,
+                    colour::text(),
+                    clip,
+                );
             }
         }
+
+        // The keyboard layout (ADR-0114) and the accent (ADR-0113).
+        let accents = oceans_draw::theme::ACCENTS;
+        let (accent_name, accent_colour) = accents[usize::from(accent) % accents.len()];
+        let tiles: [(usize, &str, &str); 2] = [
+            (2, self.layout.name(), "Keyboard"),
+            (3, accent_name, "Accent"),
+        ];
+        for (which, value, what) in tiles {
+            let t = cc_module(w, which);
+            if t.contains(pointer.0, pointer.1) {
+                canvas.tint(t, 14, BLACK, 14);
+            }
+            let (cx, cy) = (t.x + 28, t.y + t.h / 2);
+            if which == 2 {
+                canvas.circle(cx, cy, 16, colour::button_secondary());
+                let short = self.layout.short_name();
+                let sw = canvas.measure(short, Font::Strong);
+                canvas.text(cx - sw / 2, cy - 9, short, Font::Strong, colour::text(), t);
+            } else {
+                canvas.circle(cx, cy, 16, Rgb(accent_colour.0));
+            }
+            let clip = Rect::new(t.x + 52, t.y, t.w - 60, t.h);
+            canvas.text(t.x + 52, t.y + 9, value, Font::Strong, colour::text(), clip);
+            canvas.text(t.x + 52, t.y + 29, what, Font::Body, colour::muted(), clip);
+        }
+
+        // The sound (ADR-0100): the speaker mutes, the slider sets.
+        if let Some((level, muted)) = self.volume {
+            let button = volume_mute(w);
+            if button.contains(pointer.0, pointer.1) {
+                canvas.tint(button, 8, BLACK, 20);
+            }
+            speaker(
+                canvas,
+                Rect::new(button.x + 5, button.y + 6, 28, 24),
+                level,
+                muted,
+                colour::text(),
+            );
+            let track = volume_track(w);
+            canvas.round_fill(track, track.h / 2, colour::button_secondary());
+            let filled = (track.w * i32::from(level) / 100).max(track.h);
+            let ink = if muted {
+                colour::muted()
+            } else {
+                colour::accent()
+            };
+            canvas.round_fill(
+                Rect::new(track.x, track.y, filled, track.h),
+                track.h / 2,
+                ink,
+            );
+        } else {
+            let m = cc_module(w, 4);
+            canvas.text(
+                m.x + 16,
+                m.y + 16,
+                "No sound device",
+                Font::Body,
+                colour::muted(),
+                m,
+            );
+        }
+
+        // The system's state: memory and where the network is.
+        let mut line = self.status.clone();
+        match &self.network {
+            Some(n) if n.connected => line.push_str(&alloc::format!("  ·  Ethernet {}", n.address)),
+            Some(_) => line.push_str("  ·  Not connected"),
+            None => {}
+        }
+        canvas.text(
+            cc.x + 18,
+            cc.y + cc.h - 30,
+            &line,
+            Font::Body,
+            colour::muted(),
+            cc,
+        );
     }
 
     /// Wave (ADR-0117): closed, one round glass button with the Oceans logo
@@ -1430,7 +2013,14 @@ impl Desktop {
                 Rect::new(0, 0, w, h),
             );
         };
-        centre(canvas, h / 2 - 190, &self.clock, Font::Title, WHITE);
+        // The time large and the date (ADR-0119), as phones show them;
+        // the short clock while the time is not set.
+        if self.clock_time.is_empty() {
+            centre(canvas, h / 2 - 190, &self.clock, Font::Title, WHITE);
+        } else {
+            centre(canvas, h / 2 - 262, &self.clock_time, Font::Display, WHITE);
+            centre(canvas, h / 2 - 196, &self.clock_date, Font::Strong, WHITE);
+        }
         if self.lock == Lock::Starting {
             return centre(canvas, h / 2, "Starting Oceans...", Font::Body, WHITE);
         }
@@ -1706,6 +2296,98 @@ fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool, ink: Rgb) {
     for i in 0..bars {
         let h = 4 + 3 * i;
         canvas.fill(Rect::new(cx + 7 + 3 * i, cy - h / 2, 2, h), ink);
+    }
+}
+
+/// The network (ADR-0118): three nodes joined, about 18 pixels.
+fn network_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    canvas.round_fill(Rect::new(cx - 3, cy - 9, 7, 6), 1, ink);
+    canvas.round_fill(Rect::new(cx - 9, cy + 3, 7, 6), 1, ink);
+    canvas.round_fill(Rect::new(cx + 3, cy + 3, 7, 6), 1, ink);
+    canvas.fill(Rect::new(cx, cy - 3, 1, 3), ink);
+    canvas.fill(Rect::new(cx - 6, cy, 13, 1), ink);
+    canvas.fill(Rect::new(cx - 6, cy, 1, 3), ink);
+    canvas.fill(Rect::new(cx + 6, cy, 1, 3), ink);
+}
+
+/// Dark (ADR-0118): a crescent, cut from a circle by one in `bg`.
+fn moon_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb, bg: Rgb) {
+    canvas.circle(cx, cy, 9, ink);
+    canvas.circle(cx + 5, cy - 4, 8, bg);
+}
+
+/// Lock (ADR-0118): a padlock.
+fn lock_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb, bg: Rgb) {
+    canvas.circle(cx, cy - 4, 6, ink);
+    canvas.circle(cx, cy - 4, 4, bg);
+    canvas.round_fill(Rect::new(cx - 8, cy - 2, 17, 12), 3, ink);
+    canvas.circle(cx, cy + 3, 2, bg);
+}
+
+/// Settings (ADR-0118): a gear.
+fn gear_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb, bg: Rgb) {
+    canvas.fill(Rect::new(cx - 10, cy - 2, 21, 5), ink);
+    canvas.fill(Rect::new(cx - 2, cy - 10, 5, 21), ink);
+    for (dx, dy) in [(-6, -6), (6, -6), (-6, 6), (6, 6)] {
+        canvas.circle(cx + dx, cy + dy, 3, ink);
+    }
+    canvas.circle(cx, cy, 8, ink);
+    canvas.circle(cx, cy, 3, bg);
+}
+
+/// Play: a triangle pointing right, about 14 pixels.
+fn play_icon(canvas: &mut Canvas, cx: i32, cy: i32) {
+    for row in -7i32..=7 {
+        let len = 13 - row.abs() * 13 / 7;
+        canvas.fill(Rect::new(cx - 5, cy + row, len, 1), colour::text());
+    }
+}
+
+fn pause_icon(canvas: &mut Canvas, cx: i32, cy: i32) {
+    canvas.fill(Rect::new(cx - 6, cy - 7, 4, 15), colour::text());
+    canvas.fill(Rect::new(cx + 2, cy - 7, 4, 15), colour::text());
+}
+
+/// Next (`forward`) or Previous: a triangle and a bar.
+fn skip_icon(canvas: &mut Canvas, cx: i32, cy: i32, forward: bool) {
+    for row in -6i32..=6 {
+        let len = 10 - row.abs() * 10 / 6;
+        let x = if forward { cx - 6 } else { cx + 4 - len };
+        canvas.fill(Rect::new(x, cy + row, len, 1), colour::text());
+    }
+    let bar = if forward { cx + 4 } else { cx - 7 };
+    canvas.fill(Rect::new(bar, cy - 6, 3, 13), colour::text());
+}
+
+/// Home on the desktop (ADR-0120): a blue folder.
+fn folder_icon(canvas: &mut Canvas, r: Rect) {
+    let tab = Rect::new(r.x + 4, r.y + 8, r.w / 2 - 4, 10);
+    canvas.round_fill(tab, 3, Rgb(0x2f_8f_e8));
+    let body = Rect::new(r.x + 2, r.y + 13, r.w - 4, r.h - 18);
+    canvas.round_fill(body, 6, Rgb(0x4a_a8_f8));
+    canvas.tint(Rect::new(body.x, body.y, body.w, 6), 6, WHITE, 40);
+}
+
+/// The user (ADR-0121): a head and shoulders.
+fn user_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    canvas.circle(cx, cy - 4, 4, ink);
+    canvas.round_fill(Rect::new(cx - 7, cy + 2, 15, 7), 4, ink);
+}
+
+/// The notifications (ADR-0119): a bell.
+fn bell_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    canvas.circle(cx, cy - 2, 6, ink);
+    canvas.fill(Rect::new(cx - 6, cy - 2, 13, 6), ink);
+    canvas.round_fill(Rect::new(cx - 8, cy + 3, 17, 3), 1, ink);
+    canvas.circle(cx, cy + 7, 2, ink);
+    canvas.fill(Rect::new(cx, cy - 10, 1, 3), ink);
+}
+
+/// Control Center's icon in the top bar (ADR-0118): two switches.
+fn control_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    for (dy, knob) in [(-4, -4), (4, 4)] {
+        canvas.round_fill(Rect::new(cx - 9, cy + dy - 3, 18, 7), 3, ink);
+        canvas.circle(cx + knob, cy + dy, 2, BLACK);
     }
 }
 

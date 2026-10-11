@@ -496,9 +496,24 @@ impl Service {
             return (Status::TooMany, false);
         }
         owner.notified_ms = Some(now);
-        let shown = alloc::format!("{}: {text}", owner.app);
+        let app = owner.app.clone();
+        let shown = alloc::format!("{app}: {text}");
         say(log, format_args!("desktop: notification: {shown}"));
         self.toast(shown, false);
+        // Kept for the clock's panel (ADR-0119), newest first.
+        let notices = &mut self.desktop.notices;
+        notices.insert(
+            0,
+            super::desktop::Notice {
+                app,
+                text: String::from(text),
+                at_ms: now,
+            },
+        );
+        notices.truncate(super::desktop::MAX_NOTICES);
+        if !self.desktop.notices_open {
+            self.desktop.unread += 1;
+        }
         (Status::Ok, true)
     }
 

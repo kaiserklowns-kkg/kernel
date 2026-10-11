@@ -131,6 +131,8 @@ struct Service {
     pixels: BTreeMap<u32, Pixels>,
     /// Asking init to switch off or restart (ADR-0085).
     power: Option<Handle>,
+    /// A reader end of the network stack (ADR-0118), from Core.
+    net_reader: Option<Handle>,
     /// The last press of the main button: when and where (a double click
     /// maximizes, ADR-0097).
     last_press: Option<(u64, i32, i32)>,
@@ -247,6 +249,7 @@ fn main(start: Start) -> i64 {
         owners: BTreeMap::new(),
         pixels: BTreeMap::new(),
         power: directory.find("power", "power"),
+        net_reader: None,
     };
     // Full screen covers all of it (ADR-0107).
     service
@@ -275,6 +278,7 @@ fn main(start: Start) -> i64 {
     service.refresh_appearance();
     service.refresh_layout();
     service.refresh_volume();
+    service.refresh_network();
     service.refresh_clock();
     service.refresh_terminal();
     service.draw(&mut canvas);
@@ -350,6 +354,7 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_user();
                 dirty |= service.refresh_appearance();
                 dirty |= service.refresh_volume();
+                dirty |= service.refresh_network();
                 dirty |= service.refresh_pending();
             }
             if service
@@ -470,9 +475,11 @@ impl Service {
                     || (bars && y < desktop::MENU_HEIGHT)
                     || (bars && y >= h - desktop::DOCK_RESERVE)
                     || (bars && wave)
-                    || (self.desktop.volume_open
-                        && desktop::sound_panel(w, self.desktop.now_playing.is_some())
-                            .contains(x, y));
+                    || (self.desktop.volume_open && desktop::control_center(w).contains(x, y))
+                    || (self.desktop.notices_open
+                        && desktop::notice_panel(w, self.desktop.notices.len()).contains(x, y))
+                    || (self.desktop.user_menu_open
+                        && desktop::user_menu(w, self.desktop.user_items().len()).contains(x, y));
                 // A second press of the main button soon after the first,
                 // where it was: a double click (ADR-0097). Timed when the
                 // input service read them, not when they are handled here
@@ -488,13 +495,36 @@ impl Service {
                 if button == 1 && pressed {
                     self.last_press = (!double).then_some((now, x, y));
                 }
-                // A press away from the sound panel closes it.
+                // A press away from Control Center closes it (ADR-0118).
                 if pressed
                     && self.desktop.volume_open
-                    && !desktop::sound_panel(w, self.desktop.now_playing.is_some()).contains(x, y)
-                    && !desktop::volume_button(w).contains(x, y)
+                    && !desktop::control_center(w).contains(x, y)
+                    && ![
+                        desktop::ICON_CONTROL,
+                        desktop::ICON_NETWORK,
+                        desktop::ICON_SPEAKER,
+                    ]
+                    .iter()
+                    .any(|&i| desktop::status_icon(w, i).contains(x, y))
                 {
                     self.desktop.volume_open = false;
+                }
+                // And from the user's menu (ADR-0121).
+                let items = self.desktop.user_items().len();
+                if pressed
+                    && self.desktop.user_menu_open
+                    && !desktop::user_menu(w, items).contains(x, y)
+                    && !desktop::status_icon(w, desktop::ICON_USER).contains(x, y)
+                {
+                    self.desktop.user_menu_open = false;
+                }
+                // And from the notifications' panel (ADR-0119).
+                if pressed
+                    && self.desktop.notices_open
+                    && !desktop::notice_panel(w, self.desktop.notices.len()).contains(x, y)
+                    && !desktop::bell_button(w).contains(x, y)
+                {
+                    self.desktop.notices_open = false;
                 }
                 if self.desktop.dialog.is_none()
                     && (!pressed || !over)
@@ -509,7 +539,7 @@ impl Service {
                 if button == 2 && pressed && self.desktop.dialog.is_none() {
                     return self.right_click(x, y, w, h);
                 }
-                return button == 1 && pressed && self.click(x, y, w, h);
+                return button == 1 && pressed && self.click(x, y, w, h, double);
             }
             _ => return false,
         }
@@ -546,9 +576,6 @@ impl Service {
         });
         let changed = volume != self.desktop.volume;
         self.desktop.volume = volume;
-        if volume.is_none() {
-            self.desktop.volume_open = false;
-        }
         changed
     }
 
@@ -695,17 +722,79 @@ impl Service {
         }
     }
 
-    fn click(&mut self, x: i32, y: i32, width: i32, height: i32) -> bool {
+    fn click(&mut self, x: i32, y: i32, width: i32, height: i32, double: bool) -> bool {
         let windows = self.dock_windows();
         let hit = self.desktop.hit(x, y, width, height, &windows);
         match hit {
             Hit::Layout => {
                 self.next_layout();
+                // Control Center's tile (ADR-0118), which stays open.
+                if self.desktop.volume_open {
+                    let name = self.desktop.layout.name();
+                    say(
+                        self.log,
+                        format_args!("desktop: keyboard {name}, from Control Center"),
+                    );
+                }
                 true
             }
-            // The speaker and its panel (ADR-0100).
+            // The user's menu (ADR-0121).
+            Hit::User => {
+                self.desktop.user_menu_open = !self.desktop.user_menu_open;
+                self.desktop.volume_open = false;
+                self.desktop.notices_open = false;
+                self.desktop.start_open = false;
+                true
+            }
+            Hit::UserItem(action) => {
+                self.desktop.user_menu_open = false;
+                match action {
+                    desktop::UserAction::Lock => self.lock_screen(),
+                    // The lock screen chooses among the accounts.
+                    desktop::UserAction::Switch => {
+                        say(self.log, format_args!("desktop: switching user"));
+                        self.lock_screen();
+                    }
+                    desktop::UserAction::Settings => self.launch("app.oceans.settings", ""),
+                }
+                true
+            }
+            // The bell (ADR-0119): the notifications, looked at.
+            Hit::Clock => {
+                self.desktop.notices_open = !self.desktop.notices_open;
+                self.desktop.volume_open = false;
+                self.desktop.user_menu_open = false;
+                self.desktop.start_open = false;
+                if self.desktop.notices_open {
+                    self.desktop.unread = 0;
+                    let count = self.desktop.notices.len();
+                    say(
+                        self.log,
+                        format_args!(
+                            "desktop: notifications shown: {count} kept, the newest from {}",
+                            self.desktop
+                                .notices
+                                .first()
+                                .map_or("no app", |n| n.app.as_str())
+                        ),
+                    );
+                }
+                true
+            }
+            Hit::ClearNotices => {
+                let count = self.desktop.notices.len();
+                self.desktop.notices.clear();
+                say(
+                    self.log,
+                    format_args!("desktop: notifications cleared ({count})"),
+                );
+                true
+            }
+            Hit::NoticePanel => false,
             Hit::Volume => {
                 self.desktop.volume_open = !self.desktop.volume_open;
+                self.desktop.notices_open = false;
+                self.desktop.user_menu_open = false;
                 self.desktop.start_open = false;
                 self.refresh_volume();
                 true
@@ -729,12 +818,34 @@ impl Service {
                     let name = media_key_name(byte).unwrap_or("?");
                     say(
                         self.log,
-                        format_args!("desktop: {name} for {app}, from the sound panel"),
+                        format_args!("desktop: {name} for {app}, from Control Center"),
                     );
                 }
                 true
             }
             Hit::VolumePanel => false,
+            // Control Center's toggles (ADR-0118).
+            Hit::Toggle(which) => {
+                // Dark is seen at once in the open panel; the others leave
+                // it.
+                self.desktop.volume_open = which == 1;
+                match which {
+                    // The network and Settings: Settings, which shows them.
+                    0 | 3 => self.launch("app.oceans.settings", ""),
+                    1 => {
+                        let (dark, accent) = oceans_draw::theme::bytes();
+                        self.set_appearance(1 - dark.min(1), accent);
+                    }
+                    _ => self.lock_screen(),
+                }
+                true
+            }
+            Hit::Accent => {
+                let (dark, accent) = oceans_draw::theme::bytes();
+                let next = (accent + 1) % oceans_core_proto::ACCENT_COUNT;
+                self.set_appearance(dark, next);
+                true
+            }
             Hit::Start => {
                 self.toggle_panel();
                 true
@@ -835,7 +946,25 @@ impl Service {
                 self.answer(false);
                 true
             }
-            Hit::Nothing => false,
+            // The desktop's icons (ADR-0120): a click chooses one, a
+            // double click opens it.
+            Hit::DesktopIcon(index) => {
+                if double && self.desktop.icon_chosen == Some(index) {
+                    self.desktop.icon_chosen = None;
+                    if let Some((label, id)) = self.desktop.desktop_items().get(index).cloned() {
+                        say(
+                            self.log,
+                            format_args!("desktop: opening {label}, from the desktop"),
+                        );
+                        self.launch(&id, "");
+                    }
+                } else {
+                    self.desktop.icon_chosen = Some(index);
+                }
+                true
+            }
+            // A click on the wallpaper lets the chosen icon go.
+            Hit::Nothing => self.desktop.icon_chosen.take().is_some(),
         }
     }
 
@@ -974,6 +1103,57 @@ impl Service {
         true
     }
 
+    /// From Control Center (ADR-0118): Core keeps the appearance for the
+    /// account in use, and the desktop and every window follow at once.
+    fn set_appearance(&mut self, dark: u8, accent: u8) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 8];
+        if core
+            .call(op::SET_APPEARANCE, &[dark, accent], &[], &mut reply)
+            .is_ok()
+        {
+            self.refresh_appearance();
+        }
+    }
+
+    /// The network from the reader end Core gave (ADR-0118), asked for
+    /// once if not yet; `true` if what shows changed.
+    fn refresh_network(&mut self) -> bool {
+        if self.net_reader.is_none()
+            && let Some(core) = self.core
+        {
+            let mut reply = [0u8; 8];
+            self.net_reader = core
+                .call(op::NET_READER, &[], &[], &mut reply)
+                .ok()
+                .and_then(|got| got.handle);
+        }
+        let network = self
+            .net_reader
+            .map(|reader| match oceans_net_proto::info(reader) {
+                Ok(info) if info.configured => desktop::Network {
+                    connected: true,
+                    address: alloc::format!("{}", oceans_net_proto::Dotted(info.address)),
+                },
+                _ => desktop::Network::default(),
+            });
+        let changed = network != self.desktop.network;
+        if changed && let Some(network) = &network {
+            if network.connected {
+                say(
+                    self.log,
+                    format_args!("desktop: network connected, {}", network.address),
+                );
+            } else {
+                say(self.log, format_args!("desktop: network not connected"));
+            }
+        }
+        self.desktop.network = network;
+        changed
+    }
+
     /// No input for the time the user chose (ADR-0112): the screen locks.
     fn lock_idle(&mut self) {
         self.lock_screen();
@@ -1007,6 +1187,8 @@ impl Service {
         self.desktop.lock = desktop::Lock::Locked;
         self.desktop.start_open = false;
         self.desktop.volume_open = false;
+        self.desktop.notices_open = false;
+        self.desktop.user_menu_open = false;
         self.desktop.lock_input.clear();
         self.desktop.lock_note.clear();
         self.desktop.chosen_user = self.desktop.current_user;
@@ -1047,6 +1229,9 @@ impl Service {
     /// was copied, the search and the Terminal are not the new user's.
     fn signed_in(&mut self) {
         self.windows.clear_clipboard();
+        // The last user's notifications are not the new one's (ADR-0119).
+        self.desktop.notices.clear();
+        self.desktop.unread = 0;
         self.refresh_user();
         self.refresh_pinned();
         self.refresh_appearance();
@@ -1218,6 +1403,8 @@ impl Service {
     fn toggle_panel(&mut self) {
         self.desktop.start_open = !self.desktop.start_open;
         self.desktop.wave_open = false;
+        self.desktop.notices_open = false;
+        self.desktop.user_menu_open = false;
         self.desktop.volume_open = false;
         self.desktop.search.clear();
         self.desktop.found.clear();
@@ -1655,6 +1842,12 @@ impl Service {
         let changed = clock != self.desktop.clock || status != self.desktop.status;
         self.desktop.clock = clock;
         self.desktop.status = status;
+        // In words, for the notifications' panel (ADR-0119).
+        if let Some(unix_ms) = oceans_rt::unix_time_ms() {
+            let (time, date) = desktop::clock_long(unix_ms);
+            self.desktop.clock_time = time;
+            self.desktop.clock_date = date;
+        }
         changed
     }
 

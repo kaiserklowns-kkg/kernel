@@ -1504,6 +1504,13 @@ impl Core {
                     op::WINDOW_OWNER => self.window_owner(data, reply),
                     op::PENDING => self.pending(reply),
                     op::WEB_BUNDLE => self.web_bundle(data, reply, reply_handle),
+                    // The network, read only, for the desktop (ADR-0118).
+                    op::NET_READER => {
+                        let net = self.net.ok_or(Status::NotFound)?;
+                        let reader = oceans_net_proto::reader(net).map_err(|_| Status::NotFound)?;
+                        *reply_handle = Some(reader);
+                        Ok(())
+                    }
                     op::TRUST => self.change_trust(data),
                     op::TRUSTED => {
                         let index = u32_at(data)? as usize;

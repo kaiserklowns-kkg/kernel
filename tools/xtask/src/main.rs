@@ -568,22 +568,22 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 342 225 d8d8de Music at the end of its list",
     // The media keys (ADR-0102): Music asks for them. (QEMU's USB keyboard
     // sends no media keys; the sound panel's buttons press them below.)
-    // What plays, in the sound panel (ADR-0103): the speaker (1164,14)
-    // opens it with Music's song under the volume (Play blue at 1008,184),
-    // and Next (1132,193) reaches Music (one song: nothing else plays, as
-    // the recording must not hold more of it). The mouse is where Text
-    // Editor left it, 1014,400, and goes back there.
-    b"@monitor mouse_move 150 -386",
+    // What plays, in Control Center (ADR-0103, ADR-0118): the speaker in
+    // the top bar (1124,14) opens it, Music's song in its module (white at
+    // 1240,60), and Next (1222,159) reaches Music (one song: nothing else
+    // plays, as the recording must not hold more of it). The mouse is
+    // where Text Editor left it, 1014,400, and goes back there.
+    b"@monitor mouse_move 110 -386",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1008 184 2f7cf6 Music's song in the sound panel",
-    b"@monitor mouse_move -32 179",
+    b"@screen 1240 60 ffffff Music's song in Control Center",
+    b"@monitor mouse_move 98 145",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move 32 -179",
+    b"@monitor mouse_move -98 -145",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -150 386",
+    b"@monitor mouse_move -110 386",
     b"app stop app.oceans.music\r\n",
     // Opening files (ADR-0099): Files, the tenth window (content from
     // 292,169), lists Home: notes.txt, picture.png, tone.wav,
@@ -639,23 +639,40 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey meta_l-spc",
     b"@wait desktop: keyboard layout English",
     // The system volume (ADR-0100), after every sound this boot records:
-    // set from the shell, then in the menu bar's sound panel. The speaker
-    // is at 1164,14; its panel (918,34, 260 by 106) has the slider from
-    // 934,84, 228 wide (75% at 1105,87), and Mute at 982,117.
+    // set from the shell, then in Control Center (ADR-0118). The speaker
+    // in the top bar (1124,14) opens it (its own colour at 1098,100,
+    // between modules); its sound module has the slider from 994,277, 248
+    // wide (75% at 1180,288), and the speaker that mutes at 967,288: muted,
+    // the slider's fill is grey. A click on the speaker in the bar closes
+    // it.
     b"volume\r\n",
     b"volume 40\r\n",
-    b"@monitor mouse_move 362 -312",
+    b"@monitor mouse_move 322 -312",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1152 130 f9f9fb the sound panel",
-    b"@monitor mouse_move -59 73",
+    b"@screen 1098 100 f2f2f7 Control Center",
+    b"@monitor mouse_move 56 274",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -123 30",
+    b"@monitor mouse_move -213 0",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 942 112 2f7cf6 the sound panel, muted",
-    b"@monitor mouse_move 182 -103",
+    b"@screen 1000 288 6e6e73 Control Center's slider, muted",
+    b"@monitor mouse_move 157 -274",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    // Its keyboard tile (from 940,196) goes to the next layout, as
+    // Super+Space does; twice, back to English.
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move -108 210",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: keyboard Thai, from Control Center",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: keyboard English, from Control Center",
+    b"@monitor mouse_move 108 -210",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // Keeping apps in Wave (ADR-0109, ADR-0117): Super and "calc"; a right
@@ -677,6 +694,15 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@wait desktop: started app.oceans.calculator",
+    b"app stop app.oceans.calculator\r\n",
+    // The desktop's icons (ADR-0120), down its right side: Home, a blue
+    // folder (its body at 1216,80), then the kept Calculator (at
+    // 1216,172), which a double click starts.
+    b"@screen 1216 80 4aa8f8 Home on the desktop",
+    b"@monitor mouse_move 545 -516",
+    b"@doubleclick",
+    b"@wait desktop: opening Calculator, from the desktop",
+    b"@wait display: windows for app.oceans.calculator",
     b"app stop app.oceans.calculator\r\n",
     // The lock screen (ADR-0110): a name and a password, then Super+L
     // locks; its field (from 480,400, 320 by 44) is white. A wrong
@@ -729,17 +755,27 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey meta_l",
     b"@screen 1200 400 262629 Launchpad, dark",
     b"@monitor sendkey esc",
-    // Several users (ADR-0115): the administrator adds Kim. Super+L, Right
+    // Several users (ADR-0115): the administrator adds Kim. The user's menu
+    // (ADR-0121), from its icon in the top bar (1156,14), has Switch
+    // User (its second item, at 1060,125): the lock screen, where Right
     // chooses her, her password signs her in: the apps stop, and her Home
     // is her own (the search finds no picture.png in it). Left and Kai's
-    // password go back; Kim goes.
+    // password go back; Kim goes. The mouse goes back where Lock in
+    // Launchpad left it (972,767).
     b"user add kim seashell9 Kim\r\n",
     b"@wait core: audit: added the account kim (Kim)",
     b"user list\r\n",
     b"app start app.oceans.calculator\r\n",
     b"@wait display: windows for app.oceans.calculator",
-    b"@monitor sendkey meta_l-l",
+    b"@monitor mouse_move 184 -753",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move -96 111",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: switching user",
     b"@wait desktop: locked",
+    b"@monitor mouse_move -88 642",
     b"@monitor sendkey right",
     b"@wait desktop: Kim chosen at the lock screen",
     b"@keys seashell9\r",
@@ -764,7 +800,6 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey esc",
     b"user remove kim\r\n",
     b"@wait core: audit: removed the account kim",
-    b"@monitor device_del deskmouse",
     // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
     // Down goes back to 75%, Mute mutes again.
     b"@monitor sendkey volumeup",
@@ -793,6 +828,24 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app run app.example.counter\r\n",
     b"y\r\n",
     b"app run app.example.counter\r\n",
+    // The notifications at the bell (ADR-0119): the mouse, still where Lock in
+    // Launchpad left it (972,767), clicks the bell (1252,14), at the right end: its panel
+    // (from 908,34, Kai's dark) has Counter's; Clear (1220,153) lets it go,
+    // and the bell closes the panel. Then the mouse goes.
+    b"@wait desktop: notification: Counter",
+    b"@monitor mouse_move 280 -753",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait the newest from Counter",
+    b"@screen 914 150 262629 the notifications' panel, dark",
+    b"@monitor mouse_move -32 139",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait notifications cleared",
+    b"@monitor mouse_move 32 -139",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor device_del deskmouse",
     b"app install /keep/hello-go.opk\r\n",
     b"app run app.example.hello one two\r\n",
     // A SvelteKit web app (ADR-0064): installed like any app, served by
@@ -1249,8 +1302,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("hda: volume 80%"),
     // The media keys (ADR-0102), to the player that asked for them.
     Expect::Contains("display: media keys go to Music"),
-    // What plays (ADR-0103): pressed in the sound panel.
-    Expect::Contains("desktop: Next for Music, from the sound panel"),
+    // What plays (ADR-0103): pressed in Control Center (ADR-0118).
+    Expect::Contains("desktop: Next for Music, from Control Center"),
+    // Control Center (ADR-0118): the network through its reader end, and
+    // the keyboard from its tile.
+    Expect::Contains("desktop: network connected, 10.0.2.15"),
+    Expect::Contains("desktop: keyboard Thai, from Control Center"),
     Expect::Line("volume: 75%, muted"),
     Expect::Line("volume: 70%"),
     Expect::Line("pasted edited in oceans"),
@@ -1286,6 +1343,13 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("app: trust: that date has passed"),
     Expect::Contains("added by you, until 2099-12-31"),
     Expect::Contains("desktop: notification: Counter: ran 1 times"),
+    // Kept for the clock's panel (ADR-0119), and cleared there.
+    Expect::Contains("kept, the newest from Counter"),
+    // The desktop's icons (ADR-0120).
+    Expect::Contains("desktop: opening Calculator, from the desktop"),
+    // The user's menu (ADR-0121).
+    Expect::Contains("desktop: switching user"),
+    Expect::Contains("desktop: notifications cleared ("),
     Expect::Contains("app: trust: another key is trusted for that publisher name"),
     Expect::Contains("  Oceans Examples  "),
     Expect::Contains("from the system image"),

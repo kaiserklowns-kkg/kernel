@@ -124,5 +124,9 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0115](0115-several-users.md) | Several users: accounts kept by Core, each with its own Home; the lock screen signs one in, Settings and the shell administer | Accepted |
 | [0116](0116-each-users-own-settings.md) | Each user's own settings: the dock, the appearance and the keyboard layout kept per account; the layout kept across restarts | Accepted |
 | [0117](0117-wave-and-launchpad.md) | Wave, Oceans' own taskbar (one button that rises into a crest of icons), and Launchpad (the apps across the screen, with search) | Accepted |
+| [0118](0118-control-center.md) | Control Center and the status icons: round toggles, what plays, keyboard, accent and sound; the network read through a reader end (`NET_READER`) | Accepted |
+| [0119](0119-notifications-at-the-bell.md) | The notifications at the bell: kept, newest first, a count of new ones, a phone-like panel with Clear | Accepted |
+| [0120](0120-icons-on-the-desktop.md) | Icons on the desktop: Home and the apps kept in Wave, down its right side; a double click opens | Accepted |
+| [0121](0121-top-bar-as-macos.md) | The top bar as macOS has it: the time and the app at the left; the layout, speaker, user, network, Control Center and bell at the right; the user's menu | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

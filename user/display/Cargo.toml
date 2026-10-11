@@ -23,4 +23,6 @@ oceans-account.workspace = true
 oceans-draw.workspace = true
 # The wallpaper photograph (ADR-0117), a PNG.
 oceans-image.workspace = true
+# The network, read only, for Control Center (ADR-0118).
+oceans-net-proto.workspace = true
 noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "bold", "size_16", "size_20", "unicode-basic-latin"] }

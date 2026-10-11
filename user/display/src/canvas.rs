@@ -17,17 +17,21 @@ pub enum Font {
     Body,
     Strong,
     Title,
+    /// The time, large (ADR-0119).
+    Display,
     /// The Terminal's: a fixed cell per character, Basic Latin.
     Mono,
 }
 
 impl Font {
-    /// The bitmap font: the Terminal's, and the interface's fallback.
+    /// The bitmap font: the Terminal's, and the interface's fallback (for
+    /// the large time too: its largest).
     fn spec(self) -> (FontWeight, RasterHeight, i32) {
         match self {
             Self::Body | Self::Mono => (FontWeight::Regular, RasterHeight::Size16, 16),
             Self::Strong => (FontWeight::Bold, RasterHeight::Size16, 16),
             Self::Title => (FontWeight::Bold, RasterHeight::Size20, 20),
+            Self::Display => (FontWeight::Regular, RasterHeight::Size20, 56),
         }
     }
 
@@ -36,6 +40,7 @@ impl Font {
             Self::Body => Some(Style::Body),
             Self::Strong => Some(Style::Strong),
             Self::Title => Some(Style::Title),
+            Self::Display => Some(Style::Display),
             Self::Mono => None,
         }
     }

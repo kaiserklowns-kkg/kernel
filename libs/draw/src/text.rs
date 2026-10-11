@@ -19,11 +19,14 @@ pub enum Style {
     Body,
     Strong,
     Title,
+    /// The time, large (ADR-0119): the notifications' panel and the lock
+    /// screen, in the regular weight, as phones and Big Sur show a clock.
+    Display,
 }
 
 impl Style {
     fn bold(self) -> bool {
-        !matches!(self, Self::Body)
+        !matches!(self, Self::Body | Self::Display)
     }
 
     /// The scale: the font's height in pixels.
@@ -31,6 +34,7 @@ impl Style {
         match self {
             Self::Body | Self::Strong => 16.0,
             Self::Title => 21.0,
+            Self::Display => 48.0,
         }
     }
 }

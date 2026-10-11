@@ -167,6 +167,10 @@ pub mod op {
     pub const LAYOUT: u64 = 40;
     /// data = `[layout u8]`, kept across reboots.
     pub const SET_LAYOUT: u64 = 41;
+    /// → a reader end of the network stack (ADR-0096, ADR-0118), as the
+    /// reply's handle: the desktop's Control Center and top bar show the
+    /// network with it, and can open nothing. `NotFound` without one.
+    pub const NET_READER: u64 = 42;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -240,7 +244,8 @@ pub mod access {
             | op::ENABLE
             | op::DISABLE
             | op::WINDOWS
-            | op::TRUST => MANAGE,
+            | op::TRUST
+            | op::NET_READER => MANAGE,
             // The user's setting, as a decision is (ADR-0100).
             op::DECIDE
             | op::ACCEPT
