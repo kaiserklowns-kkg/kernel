@@ -136,33 +136,33 @@ impl Frame {
         Rect::new(self.x, self.y, self.width + 2, TITLE_HEIGHT)
     }
 
-    /// At the left of the title bar (ADR-0078). Empty in full screen, as
-    /// are the other buttons.
+    /// At the right end of the title bar (ADR-0117), where a PC's user
+    /// looks for it. Empty in full screen, as are the other buttons.
     pub fn close_button(&self) -> Rect {
         if self.full_screen() {
             return Rect::new(self.x, self.y, 0, 0);
         }
         Rect::new(
-            self.x + 6,
+            self.x + self.width + 2 - 6 - CLOSE_SIZE,
             self.y + (TITLE_HEIGHT - CLOSE_SIZE) / 2,
             CLOSE_SIZE,
             CLOSE_SIZE,
         )
     }
 
-    /// Right of the close button.
+    /// Left of the close button.
     pub fn minimize_button(&self) -> Rect {
         let close = self.close_button();
         let size = close.w;
-        Rect::new(close.x + BUTTON_STEP, close.y, size, size)
+        Rect::new(close.x - BUTTON_STEP, close.y, size, size)
     }
 
-    /// Right of the minimize button: maximizes and restores a window that
+    /// Left of the minimize button: maximizes and restores a window that
     /// can be resized (ADR-0097); drawn disabled on one that cannot.
     pub fn zoom_button(&self) -> Rect {
         let minimize = self.minimize_button();
         let size = minimize.w;
-        Rect::new(minimize.x + BUTTON_STEP, minimize.y, size, size)
+        Rect::new(minimize.x - BUTTON_STEP, minimize.y, size, size)
     }
 
     /// Where the app's pixels go.

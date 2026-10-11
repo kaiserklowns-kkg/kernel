@@ -462,9 +462,14 @@ impl Service {
                 // drag).
                 // Full screen (ADR-0107), the menu bar and the dock give way.
                 let bars = self.windows.full_screen().is_none();
+                let wave = self.desktop.wave_open && {
+                    let count = 1 + self.desktop.dock_entries(&self.dock_windows()).len();
+                    desktop::wave_zone(w, h, count).contains(x, y)
+                };
                 let over = self.desktop.start_open
                     || (bars && y < desktop::MENU_HEIGHT)
                     || (bars && y >= h - desktop::DOCK_RESERVE)
+                    || (bars && wave)
                     || (self.desktop.volume_open
                         && desktop::sound_panel(w, self.desktop.now_playing.is_some())
                             .contains(x, y));
@@ -516,6 +521,10 @@ impl Service {
             self.desktop.volume = Some((level, muted));
             return true;
         }
+        // Wave opens at its button and closes once the pointer leaves it
+        // (ADR-0117).
+        let windows = self.dock_windows();
+        self.desktop.track_wave(w, h, &windows);
         if self.desktop.dialog.is_none() && self.desktop.lock == desktop::Lock::Open {
             let (x, y) = self.desktop.pointer;
             self.windows.pointer_moved(x, y);
@@ -626,7 +635,7 @@ impl Service {
                 if self.desktop.dialog.is_some() && VolumeKey::of(byte).is_none() {
                     continue;
                 }
-                // The apps panel open: typing searches, and no window or
+                // Launchpad open: typing searches, and no window or
                 // the Terminal gets the keys (the volume and media keys
                 // still work).
                 if self.desktop.start_open
@@ -1167,10 +1176,7 @@ impl Service {
         };
         let keep = !self.desktop.pinned.contains(&id);
         if keep && self.desktop.pinned.len() >= oceans_window::dock::MAX_PINNED {
-            self.toast(
-                String::from("The dock is full: take an app out first."),
-                true,
-            );
+            self.toast(String::from("Wave is full: take an app out first."), true);
             return true;
         }
         let Some(core) = self.core else {
@@ -1186,8 +1192,8 @@ impl Service {
                 let text = core::str::from_utf8(&reply[..got.len]).unwrap_or("");
                 self.desktop.pinned = oceans_window::dock::decode(text);
                 let what = if keep { "kept in" } else { "taken out of" };
-                say(self.log, format_args!("desktop: {name} {what} the dock"));
-                self.toast(alloc::format!("{name} {what} the dock"), false);
+                say(self.log, format_args!("desktop: {name} {what} Wave"));
+                self.toast(alloc::format!("{name} {what} Wave"), false);
             }
             Err((error, _)) => {
                 self.toast(alloc::format!("{name}: {}", error.message()), true);
@@ -1208,9 +1214,10 @@ impl Service {
         }
     }
 
-    /// Opens the apps panel with an empty search, or closes it.
+    /// Opens Launchpad with an empty search, or closes it.
     fn toggle_panel(&mut self) {
         self.desktop.start_open = !self.desktop.start_open;
+        self.desktop.wave_open = false;
         self.desktop.volume_open = false;
         self.desktop.search.clear();
         self.desktop.found.clear();
@@ -1255,7 +1262,7 @@ impl Service {
         }
     }
 
-    /// A key while the apps panel is open (ADR-0108): typed into the
+    /// A key while Launchpad is open (ADR-0108): typed into the
     /// search; the arrows choose a result, Enter opens it, Escape closes
     /// the panel. `true` if the screen changes.
     fn search_key(&mut self, byte: u8) -> bool {
@@ -1621,7 +1628,7 @@ impl Service {
                 say(
                     self.log,
                     format_args!(
-                        "desktop: {kept} app{} kept in the dock",
+                        "desktop: {kept} app{} kept in Wave",
                         if kept == 1 { "" } else { "s" }
                     ),
                 );

@@ -323,6 +323,7 @@ dependencies = [
  "oceans-account",
  "oceans-core-proto",
  "oceans-draw",
+ "oceans-image",
  "oceans-input-proto",
  "oceans-package",
  "oceans-rt",

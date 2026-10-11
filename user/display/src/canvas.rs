@@ -152,6 +152,40 @@ impl Canvas {
         }
     }
 
+    /// Draws a picture of `size × size` pixels from (`x`, `y`): `rgba` is
+    /// its rows, four bytes a pixel with straight alpha, blended over what
+    /// is there and clipped to the screen (ADR-0117: the Oceans logo).
+    pub fn image(&mut self, x: i32, y: i32, size: i32, rgba: &[u8]) {
+        if rgba.len() != (size * size * 4) as usize {
+            return;
+        }
+        for row in 0..size {
+            let sy = y + row;
+            if !(0..self.height).contains(&sy) {
+                continue;
+            }
+            for col in 0..size {
+                let sx = x + col;
+                if !(0..self.width).contains(&sx) {
+                    continue;
+                }
+                let at = ((row * size + col) * 4) as usize;
+                let alpha = u32::from(rgba[at + 3]);
+                if alpha == 0 {
+                    continue;
+                }
+                let pixel = &mut self.pixels[(sy * self.width + sx) as usize];
+                let mut out = 0;
+                for (channel, shift) in [(0, 16), (1, 8), (2, 0)] {
+                    let under = (*pixel >> shift) & 0xff;
+                    let over = u32::from(rgba[at + channel]);
+                    out |= ((over * alpha + under * (255 - alpha)) / 255) << shift;
+                }
+                *pixel = out;
+            }
+        }
+    }
+
     /// Keeps `pixels` (the whole screen) as the wallpaper: drawn once,
     /// copied on every frame.
     pub fn set_wallpaper(&mut self, pixels: Vec<u32>) {

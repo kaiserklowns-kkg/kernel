@@ -347,16 +347,16 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"ai ask how much memory is free?\r\n",
     b"ai model https://models.oceans.test:$MODELS/v1 oceans-test --dns 10.0.2.2:$DNS --ca /keep/models-ca.pem\r\n",
     b"ai ask how much memory is free?\r\n",
-    // The desktop (ADR-0057, ADR-0078): with a mouse plugged in, the apps
-    // button (first in the dock) opens the apps panel, and Hello is clicked
-    // there; it needs a decision, so the desktop's own permission dialog
-    // asks, and Allow is clicked. The screen is captured for the host to
-    // check. Positions follow the layout on a 1280x800 screen
-    // (user/display/src/desktop.rs): the apps button at 612,760 with no
-    // windows open; tiles from 384,360, 102 by 100, the Terminal first,
-    // then the apps by id, Activity Monitor, Calculator and Text Editor
-    // among them (ADR-0080): Hello is the ninth tile; Music comes next, so
-    // Notes is the eleventh, the first of the third row; Allow at 776,448.
+    // The desktop (ADR-0057, ADR-0078, ADR-0117): with a mouse plugged in,
+    // Wave's button opens Launchpad, and Hello is clicked there; it needs
+    // a decision, so the desktop's own permission dialog asks, and Allow
+    // is clicked. The screen is captured for the host to check. Positions
+    // follow the layout on a 1280x800 screen (user/display/src/desktop.rs):
+    // Wave's button at 640,764; Launchpad's tiles from 220,140, 120 by
+    // 112, seven a row, the Terminal first, then the apps by id, Activity
+    // Monitor, Calculator and Text Editor among them (ADR-0080): Hello is
+    // the ninth tile (at 400,308); Music comes next, so Notes is the
+    // eleventh (at 640,308); Allow at 836,466.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
@@ -365,37 +365,37 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait usb-hid: port 6.3: mouse, boot protocol, pointer 2",
     b"@monitor screendump build/smoke-desktop.ppm",
     b"@monitor mouse_move -3000 -3000",
-    b"@monitor mouse_move 612 760",
+    b"@monitor mouse_move 640 764",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    // The panel (from 360,296), its search field (ADR-0108) white from
-    // 482,312 to 894,342.
-    b"@screen 905 330 f2f2f7 the apps panel",
-    b"@screen 800 330 ffffff the apps panel's search field",
-    b"@monitor mouse_move 129 -250",
+    // Launchpad, across the screen (empty at 1200,400), its search field
+    // (ADR-0108) white from 422,66 to 858,98.
+    b"@screen 1200 400 f2f2f7 Launchpad",
+    b"@screen 800 82 ffffff Launchpad's search field",
+    b"@monitor mouse_move -240 -456",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-dialog.ppm",
-    b"@monitor mouse_move 95 -44",
+    b"@monitor mouse_move 436 158",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // App windows and the keyboard focus (ADR-0059): Notes is started from
-    // the apps panel and opens a window in the middle of the screen, which
+    // Launchpad and opens a window in the middle of the screen, which
     // takes the focus; what the USB keyboard types goes to it, not to the
     // shell, and Enter keeps the line in its storage. Ctrl+Tab gives the
-    // keyboard back to the Terminal; the close button ends Notes. The
-    // screen is captured with each focus.
-    b"@monitor mouse_move -224 294",
+    // keyboard back to the Terminal; the close button (at 865,253, ADR-0117) ends
+    // Notes. The screen is captured with each focus.
+    b"@monitor mouse_move -196 298",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -177 -150",
+    b"@monitor mouse_move 0 -456",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor screendump build/smoke-window.ppm",
     b"@keys note\r",
     b"@monitor sendkey ctrl-tab",
     b"@monitor screendump build/smoke-focus.ppm",
-    b"@monitor mouse_move -20 -357",
+    b"@monitor mouse_move 225 -55",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
@@ -499,17 +499,18 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey ret",
     b"@monitor sendkey ctrl-v",
     // Resizing (ADR-0097): the window is at 451,171 (content 760x520).
-    // Its zoom button (511,185) maximizes it to the area (1278x663 at
-    // 0,28, ADR-0107): the page then covers 200,400, and 1150,175 is page, not
-    // title bar. A double click on the title bar puts it back; then its
-    // right edge, caught outside the frame at 1214,400, is dragged 200
-    // to the left: the page, laid out again, ends at 1012.
-    b"@monitor mouse_move -177 -114",
+    // Its zoom button (at the right since ADR-0117: 1153,185) maximizes
+    // it to the area (1278x663 at 0,28, ADR-0107): the page then covers
+    // 200,400, and 1150,175 is page, not title bar. A double click on the
+    // title bar puts it back; then its right edge, caught outside the
+    // frame at 1214,400, is dragged 200 to the left: the page, laid out
+    // again, ends at 1012.
+    b"@monitor mouse_move 465 -114",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@screen 200 400 ffffff Text Editor maximized, its page laid out again",
     b"@screen 1150 175 ffffff Text Editor maximized, over its old title bar",
-    b"@monitor mouse_move 129 -145",
+    b"@monitor mouse_move -513 -145",
     b"@doubleclick",
     b"@screen 1150 175 e3e3e8 Text Editor restored, its title bar back",
     b"@monitor mouse_move 574 360",
@@ -567,22 +568,22 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 342 225 d8d8de Music at the end of its list",
     // The media keys (ADR-0102): Music asks for them. (QEMU's USB keyboard
     // sends no media keys; the sound panel's buttons press them below.)
-    // What plays, in the sound panel (ADR-0103): the speaker (1012,14)
-    // opens it with Music's song under the volume (Play blue at 856,184),
-    // and Next (980,193) reaches Music (one song: nothing else plays, as
+    // What plays, in the sound panel (ADR-0103): the speaker (1164,14)
+    // opens it with Music's song under the volume (Play blue at 1008,184),
+    // and Next (1132,193) reaches Music (one song: nothing else plays, as
     // the recording must not hold more of it). The mouse is where Text
     // Editor left it, 1014,400, and goes back there.
-    b"@monitor mouse_move -2 -386",
+    b"@monitor mouse_move 150 -386",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 856 184 2f7cf6 Music's song in the sound panel",
+    b"@screen 1008 184 2f7cf6 Music's song in the sound panel",
     b"@monitor mouse_move -32 179",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor mouse_move 32 -179",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move 2 386",
+    b"@monitor mouse_move -150 386",
     b"app stop app.oceans.music\r\n",
     // Opening files (ADR-0099): Files, the tenth window (content from
     // 292,169), lists Home: notes.txt, picture.png, tone.wav,
@@ -611,7 +612,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 672 451 e8613c picture.png opened with Image Viewer, chosen",
     b"app stop app.oceans.viewer\r\n",
     b"app stop app.oceans.files\r\n",
-    // Search (ADR-0108): Super alone opens the apps panel's search, which
+    // Search (ADR-0108): Super alone opens Launchpad's search, which
     // takes the keys. "calc" finds Calculator and Enter starts it; "pict"
     // finds picture.png in Home and Enter opens it in Image Viewer.
     b"@monitor sendkey meta_l",
@@ -639,37 +640,40 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: keyboard layout English",
     // The system volume (ADR-0100), after every sound this boot records:
     // set from the shell, then in the menu bar's sound panel. The speaker
-    // is at 1012,14; its panel (766,34, 260 by 106) has the slider from
-    // 782,84, 228 wide (75% at 953,87), and Mute at 830,117.
+    // is at 1164,14; its panel (918,34, 260 by 106) has the slider from
+    // 934,84, 228 wide (75% at 1105,87), and Mute at 982,117.
     b"volume\r\n",
     b"volume 40\r\n",
-    b"@monitor mouse_move 210 -312",
+    b"@monitor mouse_move 362 -312",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1000 130 f9f9fb the sound panel",
+    b"@screen 1152 130 f9f9fb the sound panel",
     b"@monitor mouse_move -59 73",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor mouse_move -123 30",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 790 112 2f7cf6 the sound panel, muted",
+    b"@screen 942 112 2f7cf6 the sound panel, muted",
     b"@monitor mouse_move 182 -103",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    // Keeping apps in the dock (ADR-0109): Super and "calc"; a right click
-    // on the first result (its row from 376,360) keeps Calculator; Escape.
-    // With no window open its icon is the dock's third (from 672,736); a
-    // click there starts it. Core keeps it: the next boot shows it.
+    // Keeping apps in Wave (ADR-0109, ADR-0117): Super and "calc"; a right
+    // click on the first result (its row from 340,124) keeps Calculator;
+    // Escape. With no window open Wave holds the Terminal and Calculator:
+    // the pointer on its button opens it, and Calculator's icon (from
+    // 647,664) is clicked: it starts. Core keeps it: the next boot shows
+    // it.
     b"@monitor sendkey meta_l",
     b"@keys calc",
     b"@monitor mouse_move -3000 -3000",
-    b"@monitor mouse_move 500 376",
+    b"@monitor mouse_move 500 140",
     b"@monitor mouse_button 2",
     b"@monitor mouse_button 0",
-    b"@wait desktop: Calculator kept in the dock",
+    b"@wait desktop: Calculator kept in Wave",
     b"@monitor sendkey esc",
-    b"@monitor mouse_move 196 384",
+    b"@monitor mouse_move 140 624",
+    b"@monitor mouse_move 31 -76",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@wait desktop: started app.oceans.calculator",
@@ -707,23 +711,23 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@keys waves2026\r",
     b"@wait core: audit: changed the user's password, with the current one",
     b"app stop app.oceans.settings\r\n",
-    // Lock in the apps panel (ADR-0112), left of Restart (from 568,676):
-    // Super opens the panel, a click locks; the new password opens.
+    // Lock in Launchpad (ADR-0112, ADR-0117), left of Restart (from
+    // 920,750): Super opens it, a click locks; the new password opens.
     b"@monitor sendkey meta_l",
     b"@monitor mouse_move -3000 -3000",
-    b"@monitor mouse_move 620 691",
+    b"@monitor mouse_move 972 767",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@wait desktop: locked",
     b"@keys waves2026\r",
     b"@wait desktop: unlocked",
     // Dark (ADR-0113): chosen in the shell, kept by Core; the desktop
-    // follows, its apps panel (at 905,330) dark. It stays for the next
+    // follows, Launchpad (at 1200,400) dark. It stays for the next
     // boot.
     b"appearance dark\r\n",
     b"@wait desktop: appearance dark, accent 0",
     b"@monitor sendkey meta_l",
-    b"@screen 905 330 262629 the apps panel, dark",
+    b"@screen 1200 400 262629 Launchpad, dark",
     b"@monitor sendkey esc",
     // Several users (ADR-0115): the administrator adds Kim. Super+L, Right
     // chooses her, her password signs her in: the apps stop, and her Home
@@ -744,7 +748,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // Kai's stay dark.
     b"@wait desktop: appearance light, accent 0",
     b"@monitor sendkey meta_l",
-    b"@screen 905 330 f2f2f7 Kim's apps panel, light",
+    b"@screen 1200 400 f2f2f7 Kim's Launchpad, light",
     b"@keys pict",
     b"@monitor sendkey ret",
     b"@wait desktop: nothing found for pict",
@@ -756,7 +760,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@keys waves2026\r",
     b"@wait desktop: Kai signed in",
     b"@monitor sendkey meta_l",
-    b"@screen 905 330 262629 Kai's apps panel, dark again",
+    b"@screen 1200 400 262629 Kai's Launchpad, dark again",
     b"@monitor sendkey esc",
     b"user remove kim\r\n",
     b"@wait core: audit: removed the account kim",
@@ -952,7 +956,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // The volume the first boot left (ADR-0100), set again by Core.
     Expect::Contains("core: volume 70%, kept from before"),
     // The dock the first boot left (ADR-0109).
-    Expect::Contains("desktop: 1 app kept in the dock"),
+    Expect::Contains("desktop: 1 app kept in Wave"),
     // The password the first boot set (ADR-0110): the desktop starts locked.
     Expect::Contains("core: user: Kai, with a password"),
     Expect::Contains("desktop: locked at start"),
@@ -2975,22 +2979,29 @@ fn check_smoke_screens() -> Result {
     };
     const TERMINAL: u32 = 0x1c_1c_1e;
     const DIALOG: u32 = 0xf9_f9_fb;
-    // Every channel at least `min` (light), or at most `max` (dark).
+    // Every channel at least `min`: light.
     let light = |colour: u32, min: u32| [16, 8, 0].iter().all(|s| (colour >> s) & 0xff >= min);
-    let dark = |colour: u32, max: u32| [16, 8, 0].iter().all(|s| (colour >> s) & 0xff <= max);
     let desktop = read_ppm(&root().join("build/smoke-desktop.ppm"))?;
-    // The Terminal is 960 x 596 at 160,76 on a 1280 x 800 screen; the
-    // translucent menu bar is light over a dark sky (ADR-0078).
+    // The Terminal is 960 x 596 at 160,76 on a 1280 x 800 screen; the top
+    // bar is clear, the photograph's pale sky under a shade that darkens
+    // to its top (ADR-0117).
     let terminal = pixel(&desktop, 1100, 668);
     if terminal != TERMINAL {
         return Err(format!(
             "desktop capture: the Terminal at 1100,668 is {terminal:06x}, not {TERMINAL:06x}"
         ));
     }
-    let (menu, sky) = (pixel(&desktop, 640, 14), pixel(&desktop, 5, 40));
-    if !light(menu, 0xb0) || !dark(sky, 0x70) {
+    let (menu, shaded, sky) = (
+        pixel(&desktop, 640, 14),
+        pixel(&desktop, 640, 3),
+        pixel(&desktop, 640, 40),
+    );
+    let darker = [16, 8, 0]
+        .iter()
+        .all(|s| (shaded >> s) & 0xff < (sky >> s) & 0xff);
+    if !darker || !light(sky, 0xa0) {
         return Err(format!(
-            "desktop capture: the menu bar ({menu:06x}) is not light, or the sky ({sky:06x}) not dark"
+            "desktop capture: the top bar ({shaded:06x}) is not shaded over the photograph, or its sky ({sky:06x}) not pale"
         ));
     }
     let dialog = read_ppm(&root().join("build/smoke-dialog.ppm"))?;

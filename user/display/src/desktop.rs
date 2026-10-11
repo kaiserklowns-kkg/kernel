@@ -3,15 +3,17 @@
 //!
 //! The look (ADR-0078): light, translucent and rounded, after the macOS
 //! Big Sur design language, drawn in Oceans' own shapes and colours:
-//! - an ocean wallpaper (a deep-to-shallow gradient with waves);
-//! - the **menu bar** along the top: the Oceans mark (it opens the apps),
-//!   the app in use, the system's state and the date and time;
-//! - the **dock**, a floating translucent shelf at the bottom: the apps
-//!   button, the Terminal and the open windows, with a dot under what is
-//!   open and the name in a label over the one pointed at;
-//! - the **apps** panel above the dock: the Terminal and the installed
-//!   apps as tiles, and Restart and Shut Down (ADR-0085), each confirmed
-//!   in a system dialog;
+//! - an ocean wallpaper, a photograph (ADR-0117);
+//! - the **top bar** (ADR-0117), clear over the wallpaper: the time at the
+//!   left; the app in use, the layout, the speaker and the state at the right;
+//! - **Wave** (ADR-0117), Oceans' own taskbar: one round button at the
+//!   bottom's middle, a dot for each open app; with the pointer on it the
+//!   Terminal, the kept apps and the windows rise over it along a crest,
+//!   a bar under what is open and the name over the one pointed at;
+//! - **Launchpad** (ADR-0117), from Wave's button or Super: the
+//!   Terminal and the installed apps in a grid across the screen, the
+//!   search at the top, and Lock, Restart and Shut Down (ADR-0085) in the
+//!   corner, each confirmed in a system dialog;
 //! - **windows** (the Terminal's too) with light title bars, the title in
 //!   the middle and round buttons at the left: close, minimize and
 //!   resize (not yet available, drawn disabled);
@@ -82,7 +84,7 @@ pub mod colour {
     pub fn window_border() -> Rgb {
         theme().border
     }
-    /// The apps panel.
+    /// Launchpad.
     pub fn panel() -> Rgb {
         theme().panel
     }
@@ -118,19 +120,25 @@ const ICON_COLOURS: [Rgb; 6] = [
 pub const MENU_HEIGHT: i32 = 28;
 /// A dock icon: square.
 pub const ICON: i32 = 48;
-const DOCK_PADDING: i32 = 8;
-const DOCK_GAP: i32 = 8;
-const DOCK_HEIGHT: i32 = ICON + 2 * DOCK_PADDING;
-const DOCK_MARGIN: i32 = 8;
-/// The screen's bottom band the dock keeps for itself.
-pub const DOCK_RESERVE: i32 = DOCK_HEIGHT + 2 * DOCK_MARGIN;
-const PANEL_WIDTH: i32 = 560;
-const PANEL_HEIGHT: i32 = 420;
-const TILE_COLUMNS: usize = 5;
-const TILE_WIDTH: i32 = 102;
-const TILE_HEIGHT: i32 = 100;
-/// Tiles shown: the Terminal and up to 14 apps (three rows).
-const MAX_TILES: usize = 15;
+/// Wave (ADR-0117): the button, how far it sits from the bottom, the gap
+/// between icons when open, how far above the button they float, and how
+/// much higher the middle rises.
+const WAVE_BUTTON: i32 = 48;
+const WAVE_MARGIN: i32 = 12;
+const WAVE_GAP: i32 = 14;
+const WAVE_LIFT: i32 = 14;
+const WAVE_CREST: i32 = 18;
+/// The screen's bottom band windows leave to Wave's button.
+pub const DOCK_RESERVE: i32 = 80;
+/// Launchpad (ADR-0117): the grid of apps across the screen.
+const TILE_COLUMNS: usize = 7;
+const TILE_WIDTH: i32 = 120;
+const TILE_HEIGHT: i32 = 112;
+/// Tiles shown: the Terminal and up to 20 apps (three rows).
+const MAX_TILES: usize = 21;
+/// Launchpad's search field and its results.
+const SEARCH_WIDTH: i32 = 440;
+const FOUND_WIDTH: i32 = 600;
 const DIALOG_WIDTH: i32 = 560;
 const DIALOG_HEIGHT: i32 = 260;
 const BUTTON_WIDTH: i32 = 120;
@@ -140,7 +148,7 @@ const MONTHS: [&str; 12] = [
 ];
 const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
 
-/// An installed app, as the apps panel shows it.
+/// An installed app, as Launchpad shows it.
 pub struct App {
     pub id: String,
     pub name: String,
@@ -207,7 +215,7 @@ pub struct Desktop {
     pub terminal_focused: bool,
     /// The Terminal is minimized to the dock.
     pub terminal_hidden: bool,
-    /// The apps panel is open.
+    /// Launchpad is open.
     pub start_open: bool,
     /// This desktop may switch the machine off (`grant = power`): the apps
     /// panel shows Restart and Shut Down.
@@ -228,7 +236,7 @@ pub struct Desktop {
     /// A window with the focus covers the screen (ADR-0107): no menu bar
     /// or dock.
     pub full_screen: bool,
-    /// What is typed into the apps panel's search (ADR-0108); empty: the
+    /// What is typed into Launchpad's search (ADR-0108); empty: the
     /// tiles show.
     pub search: String,
     /// What it found, best first, and the one Enter opens.
@@ -243,7 +251,7 @@ pub struct Desktop {
     pub lock_note: String,
     /// The user's name, as Core keeps it.
     pub user_name: String,
-    /// A password is set: the apps panel offers Lock (ADR-0112).
+    /// A password is set: Launchpad offers Lock (ADR-0112).
     pub password_set: bool,
     /// The accounts (ADR-0115), by id and name, the first first; the one
     /// chosen at the lock screen, and the one in use.
@@ -253,6 +261,9 @@ pub struct Desktop {
     /// The account in use administers: the Terminal (the system's console)
     /// is its alone.
     pub admin: bool,
+    /// Wave is open (ADR-0117): its icons stand over the button while the
+    /// pointer is there.
+    pub wave_open: bool,
     /// The keyboard layout typed letters follow (ADR-0114).
     pub layout: oceans_window::layout::Layout,
 }
@@ -294,20 +305,20 @@ pub struct WindowView<'a> {
 /// What a click landed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
-    /// The apps button (in the dock) or the Oceans mark (in the menu bar).
+    /// Wave's button (ADR-0117): it opens Launchpad.
     Start,
-    /// The Terminal's tile in the apps panel.
+    /// The Terminal's tile in Launchpad.
     StartTerminal,
-    /// An app's tile in the apps panel.
+    /// An app's tile in Launchpad.
     StartApp(usize),
-    /// A search result in the apps panel (ADR-0108).
+    /// A search result in Launchpad (ADR-0108).
     Found(usize),
-    /// Lock, in the apps panel (ADR-0112).
+    /// Lock, in Launchpad (ADR-0112).
     Lock,
-    /// Restart and Shut Down, in the apps panel.
+    /// Restart and Shut Down, in Launchpad.
     Restart,
     ShutDown,
-    /// Somewhere else while the apps panel is open: it closes.
+    /// Somewhere else while Launchpad is open: it closes.
     Outside,
     /// The Terminal in the dock.
     TaskbarTerminal,
@@ -346,20 +357,20 @@ pub fn menu_bar(width: i32) -> Rect {
     Rect::new(0, 0, width, MENU_HEIGHT)
 }
 
-/// The Oceans mark at the menu bar's left: it opens the apps panel.
-pub fn menu_mark() -> Rect {
-    Rect::new(8, 0, 36, MENU_HEIGHT)
+/// Where the top bar's right side ends (ADR-0117): its last item's right
+/// edge. The Oceans logo is Wave's, not the bar's.
+fn bar_end(width: i32) -> i32 {
+    width - 14
 }
 
-/// What the clock and the system's state take at the menu bar's right,
-/// at most: the speaker stays in one place left of them (ADR-0100).
-const CLOCK_SLOT: i32 = 128;
+/// What the system's state takes in the top bar, at most: the speaker
+/// stays in one place left of it (ADR-0100).
 const STATUS_SLOT: i32 = 76;
 
-/// The speaker in the menu bar (ADR-0100).
+/// The speaker in the top bar (ADR-0100), left of the system's state.
 pub fn volume_button(width: i32) -> Rect {
     Rect::new(
-        width - 14 - CLOCK_SLOT - 20 - STATUS_SLOT - 16 - 28,
+        bar_end(width) - STATUS_SLOT - 12 - 28,
         2,
         28,
         MENU_HEIGHT - 4,
@@ -434,28 +445,46 @@ pub fn volume_at(width: i32, x: i32) -> u8 {
     ((x - track.x) * 100 / track.w.max(1)).clamp(0, 100) as u8
 }
 
-/// The dock holding `count` icons, centred over the bottom edge.
-pub fn dock(width: i32, height: i32, count: usize) -> Rect {
-    let count = count as i32;
-    let w = count * ICON + (count - 1).max(0) * DOCK_GAP + 2 * (DOCK_PADDING + 4);
+/// Wave (ADR-0117): the one round button at the bottom's middle, all the
+/// desktop shows of its taskbar until the pointer comes to it.
+pub fn wave_button(width: i32, height: i32) -> Rect {
     Rect::new(
-        (width - w) / 2,
-        height - DOCK_MARGIN - DOCK_HEIGHT,
-        w,
-        DOCK_HEIGHT,
+        (width - WAVE_BUTTON) / 2,
+        height - WAVE_MARGIN - WAVE_BUTTON,
+        WAVE_BUTTON,
+        WAVE_BUTTON,
     )
 }
 
-/// Dock icon `index` of `count` (the apps button, the Terminal, then the
-/// windows).
-pub fn dock_item(width: i32, height: i32, index: usize, count: usize) -> Rect {
-    let d = dock(width, height, count);
-    Rect::new(
-        d.x + DOCK_PADDING + 4 + index as i32 * (ICON + DOCK_GAP),
-        d.y + DOCK_PADDING,
-        ICON,
-        ICON,
-    )
+/// Icon `index` of `count` when Wave is open (the Terminal, then the kept
+/// apps and the windows): in a row over the button that rises to its
+/// middle like a wave's crest.
+pub fn wave_item(width: i32, height: i32, index: usize, count: usize) -> Rect {
+    let button = wave_button(width, height);
+    let step = ICON + WAVE_GAP;
+    // From the middle, in halves of a step: -(count - 1) .. count - 1.
+    let half = 2 * index as i32 - (count as i32 - 1);
+    let x = width / 2 + half * step / 2 - ICON / 2;
+    // The crest: the middle highest, falling off as a parabola.
+    let reach = (count as i32).max(2);
+    let rise = WAVE_CREST - WAVE_CREST * half * half / (reach * reach);
+    let y = button.y - WAVE_LIFT - ICON - rise;
+    Rect::new(x, y, ICON, ICON)
+}
+
+/// Where the pointer keeps Wave open: its icons and the button, with room
+/// to move between them.
+pub fn wave_zone(width: i32, height: i32, count: usize) -> Rect {
+    let button = wave_button(width, height);
+    let first = wave_item(width, height, 0, count.max(1));
+    let last = wave_item(width, height, count.max(1) - 1, count.max(1));
+    let top = (0..count.max(1))
+        .map(|i| wave_item(width, height, i, count.max(1)).y)
+        .min()
+        .unwrap_or(first.y);
+    let left = first.x.min(button.x) - 24;
+    let right = (last.x + last.w).max(button.x + button.w) + 24;
+    Rect::new(left, top - 40, right - left, height - (top - 40))
 }
 
 /// The Terminal window, in the middle of the area.
@@ -466,12 +495,12 @@ pub fn terminal(width: i32, height: i32) -> Rect {
     Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h)
 }
 
-/// The Terminal's title bar buttons: close (disabled: the shell stays),
-/// minimize, resize (disabled).
+/// The Terminal's title bar buttons, from the right end (ADR-0117):
+/// close (disabled: the shell stays), minimize, resize (disabled).
 fn terminal_button(width: i32, height: i32, index: i32) -> Rect {
     let window = terminal(width, height);
     Rect::new(
-        window.x + 6 + index * BUTTON_STEP,
+        window.x + window.w - 6 - CLOSE_SIZE - index * BUTTON_STEP,
         window.y + (TITLE_HEIGHT - CLOSE_SIZE) / 2,
         CLOSE_SIZE,
         CLOSE_SIZE,
@@ -482,29 +511,27 @@ pub fn terminal_minimize(width: i32, height: i32) -> Rect {
     terminal_button(width, height, 1)
 }
 
-/// The apps panel, above the dock.
+/// Launchpad (ADR-0117): the apps across the whole screen under the top
+/// bar, over the windows.
 pub fn start_menu(width: i32, height: i32) -> Rect {
-    Rect::new(
-        (width - PANEL_WIDTH) / 2,
-        height - DOCK_RESERVE - 4 - PANEL_HEIGHT,
-        PANEL_WIDTH,
-        PANEL_HEIGHT,
-    )
+    Rect::new(0, MENU_HEIGHT, width, height - MENU_HEIGHT)
 }
 
-/// Tile `index` of the apps panel (0: the Terminal; then the apps).
+/// Tile `index` of Launchpad (0: the Terminal; then the apps), in a grid
+/// centred under the search field.
 pub fn tile(width: i32, height: i32, index: usize) -> Rect {
-    let panel = start_menu(width, height);
+    let field = search_field(width, height);
+    let grid = TILE_COLUMNS as i32 * TILE_WIDTH;
     let (col, row) = (index % TILE_COLUMNS, index / TILE_COLUMNS);
     Rect::new(
-        panel.x + 24 + col as i32 * TILE_WIDTH,
-        panel.y + 64 + row as i32 * TILE_HEIGHT,
+        (width - grid) / 2 + col as i32 * TILE_WIDTH,
+        field.y + field.h + 40 + row as i32 * TILE_HEIGHT,
         TILE_WIDTH,
         TILE_HEIGHT,
     )
 }
 
-/// Lock, in the apps panel's footer (ADR-0112): left of Restart, or where
+/// Lock, in Launchpad's corner (ADR-0112): left of Restart, or where
 /// Restart would be on a desktop that cannot switch the machine off.
 pub fn lock_button(width: i32, height: i32, can_power: bool) -> Rect {
     let first = power_button(width, height, if can_power { -1 } else { 1 });
@@ -527,33 +554,32 @@ pub fn lock_avatar(width: i32, height: i32, index: usize, count: usize) -> Rect 
     Rect::new(x, height / 2 - 130, SIZE, SIZE)
 }
 
-/// The apps panel's search field (ADR-0108), right of its title.
+/// Launchpad's search field (ADR-0108), at the top in the middle.
 pub fn search_field(width: i32, height: i32) -> Rect {
-    let panel = start_menu(width, height);
-    Rect::new(panel.x + 120, panel.y + 14, panel.w - 144, 34)
+    let sheet = start_menu(width, height);
+    Rect::new((width - SEARCH_WIDTH) / 2, sheet.y + 36, SEARCH_WIDTH, 36)
 }
 
-/// Search result `index`, a row across the panel where the tiles are.
+/// Search result `index`, a row under the field where the tiles are.
 pub fn found_row(width: i32, height: i32, index: usize) -> Rect {
-    let panel = start_menu(width, height);
+    let field = search_field(width, height);
     Rect::new(
-        panel.x + 16,
-        panel.y + 64 + index as i32 * 34,
-        panel.w - 32,
-        32,
+        (width - FOUND_WIDTH) / 2,
+        field.y + field.h + 24 + index as i32 * 38,
+        FOUND_WIDTH,
+        34,
     )
 }
 
-/// Restart (0) and Shut Down (1), at the right of the apps panel's
-/// footer.
+/// Restart (0) and Shut Down (1), at Launchpad's bottom right (Lock, at
+/// -1, before them).
 pub fn power_button(width: i32, height: i32, index: i32) -> Rect {
-    let panel = start_menu(width, height);
     let (w, gap) = (104, 8);
     Rect::new(
-        panel.x + panel.w - 24 - 2 * w - gap + index * (w + gap),
-        panel.y + panel.h - 40,
+        width - 32 - 2 * w - gap + index * (w + gap),
+        height - WAVE_MARGIN - 38,
         w,
-        30,
+        34,
     )
 }
 
@@ -618,9 +644,44 @@ fn mix(from: Rgb, to: Rgb, t: f32) -> Rgb {
     to.over(from, (t.clamp(0.0, 1.0) * 255.0) as u32)
 }
 
-/// The ocean wallpaper (ADR-0078): night sky to shallow water, and three
-/// waves rolling in, nearer ones darker. Drawn once.
+/// The wallpaper (ADR-0117): a photograph of the ocean, cut to the
+/// screen's shape from its middle and scaled to fill it. Made once; the
+/// drawn one if the picture cannot be read.
 pub fn wallpaper(width: i32, height: i32) -> Vec<u32> {
+    const PHOTO: &[u8] = include_bytes!("../assets/wallpaper-ocean.png");
+    let (w, h) = (width.max(1) as u32, height.max(1) as u32);
+    let Ok((_, photo)) = oceans_image::decode(PHOTO) else {
+        return drawn_wallpaper(width, height);
+    };
+    // The largest part of the photograph with the screen's shape.
+    let (pw, ph) = (u64::from(photo.width), u64::from(photo.height));
+    let (cw, ch) = if pw * u64::from(h) > ph * u64::from(w) {
+        (ph * u64::from(w) / u64::from(h), ph)
+    } else {
+        (pw, pw * u64::from(h) / u64::from(w))
+    };
+    let (cx, cy) = ((pw - cw) / 2, (ph - ch) / 2);
+    let mut pixels = Vec::with_capacity((cw * ch) as usize);
+    for row in cy..cy + ch {
+        let start = (row * pw + cx) as usize;
+        pixels.extend_from_slice(&photo.pixels[start..start + cw as usize]);
+    }
+    drop(photo);
+    let cut = oceans_image::Image {
+        width: cw as u32,
+        height: ch as u32,
+        pixels,
+    };
+    let mut out = oceans_image::scale(&cut, w, h);
+    for pixel in &mut out {
+        *pixel &= 0x00ff_ffff;
+    }
+    out
+}
+
+/// The drawn ocean (ADR-0078): night sky to shallow water, and three
+/// waves rolling in, nearer ones darker.
+fn drawn_wallpaper(width: i32, height: i32) -> Vec<u32> {
     const STOPS: [(f32, Rgb); 4] = [
         (0.0, Rgb(0x16_1f_5c)),
         (0.42, Rgb(0x3a_5f_c8)),
@@ -670,9 +731,9 @@ pub fn wallpaper(width: i32, height: i32) -> Vec<u32> {
 }
 
 impl Desktop {
-    /// What a click on the desktop (the menu bar, the dock, the apps panel,
+    /// What a click on the desktop (the menu bar, Wave, Launchpad,
     /// dialogs, the Terminal: everything but app windows) hits, on a
-    /// `width × height` screen; `windows` as the dock shows them.
+    /// `width × height` screen; `windows` as Wave shows them.
     /// The apps kept in the dock that are installed (ADR-0109): id and
     /// name, in their order.
     pub fn kept(&self) -> Vec<(&str, &str)> {
@@ -687,7 +748,25 @@ impl Desktop {
             .collect()
     }
 
-    /// The dock's icons after the apps button and the Terminal (ADR-0109).
+    /// Wave opens when the pointer reaches its button and stays open while
+    /// the pointer is over it or its icons (ADR-0117); Launchpad, a dialog
+    /// or the lock screen close it. `true` if that changed.
+    pub fn track_wave(&mut self, width: i32, height: i32, windows: &[DockWindow]) -> bool {
+        let (x, y) = self.pointer;
+        let count = 1 + self.dock_entries(windows).len();
+        let open = if self.start_open || self.dialog.is_some() || self.lock != Lock::Open {
+            false
+        } else if wave_button(width, height).contains(x, y) {
+            true
+        } else {
+            self.wave_open && wave_zone(width, height, count).contains(x, y)
+        };
+        let changed = open != self.wave_open;
+        self.wave_open = open;
+        changed
+    }
+
+    /// Wave's icons after the Terminal (ADR-0109, ADR-0117).
     pub fn dock_entries(&self, windows: &[DockWindow]) -> Vec<dock::Entry> {
         let kept: Vec<&str> = self.kept().into_iter().map(|(_, name)| name).collect();
         let windows: Vec<(u32, &str)> = windows.iter().map(|(id, a)| (*id, a.as_str())).collect();
@@ -706,9 +785,28 @@ impl Desktop {
             };
         }
         let entries = self.dock_entries(windows);
-        let count = 2 + entries.len();
-        if dock_item(width, height, 0, count).contains(x, y) || menu_mark().contains(x, y) {
+        // Wave (ADR-0117): its button opens Launchpad, as Super
+        // does; its icons, while it is open, are the Terminal's, the kept
+        // apps' and the windows'.
+        let count = 1 + entries.len();
+        if wave_button(width, height).contains(x, y) {
             return Hit::Start;
+        }
+        if self.wave_open && !self.start_open {
+            if wave_item(width, height, 0, count).contains(x, y) {
+                return Hit::TaskbarTerminal;
+            }
+            if let Some(&entry) = entries
+                .iter()
+                .enumerate()
+                .find(|&(i, _)| wave_item(width, height, i + 1, count).contains(x, y))
+                .map(|(_, entry)| entry)
+            {
+                return match entry {
+                    dock::Entry::Pinned(index) => Hit::DockPinned(index),
+                    dock::Entry::Window(id) => Hit::TaskbarWindow(id),
+                };
+            }
         }
         if layout_button(width).contains(x, y) {
             return Hit::Layout;
@@ -752,26 +850,16 @@ impl Desktop {
                         .find(|&i| found_row(width, height, i).contains(x, y))
                         .map_or(Hit::Nothing, Hit::Found);
                 }
+                if search_field(width, height).contains(x, y) {
+                    return Hit::Nothing;
+                }
+                // As Launchpad does: a click between the icons closes it.
                 let shown = self.apps.len().min(MAX_TILES - 1);
                 return (0..shown)
                     .find(|&i| tile(width, height, i + 1).contains(x, y))
-                    .map_or(Hit::Nothing, Hit::StartApp);
+                    .map_or(Hit::Outside, Hit::StartApp);
             }
             return Hit::Outside;
-        }
-        if dock_item(width, height, 1, count).contains(x, y) {
-            return Hit::TaskbarTerminal;
-        }
-        if let Some(&entry) = entries
-            .iter()
-            .enumerate()
-            .find(|&(i, _)| dock_item(width, height, i + 2, count).contains(x, y))
-            .map(|(_, entry)| entry)
-        {
-            return match entry {
-                dock::Entry::Pinned(index) => Hit::DockPinned(index),
-                dock::Entry::Window(id) => Hit::TaskbarWindow(id),
-            };
         }
         if !self.terminal_hidden {
             if terminal_minimize(width, height).contains(x, y) {
@@ -807,12 +895,13 @@ impl Desktop {
             canvas.tint(inset, 12, colour::accent(), 70);
         }
 
+        // Launchpad under Wave's button, which closes it again (ADR-0117).
+        if self.start_open {
+            self.draw_apps_panel(canvas);
+        }
         if !self.full_screen {
             self.draw_menu_bar(canvas, windows);
             self.draw_dock(canvas, windows);
-        }
-        if self.start_open {
-            self.draw_apps_panel(canvas);
         }
         if self.volume_open
             && let Some(volume) = self.volume
@@ -872,7 +961,7 @@ impl Desktop {
             Rect::new(window.x, window.y, window.w, TITLE_HEIGHT),
             "Terminal",
             "",
-            window.x + 6 + 3 * BUTTON_STEP,
+            window.x + window.w - 6 - 3 * BUTTON_STEP,
         );
         let buttons = [
             (terminal_button(w, h, 0), None),
@@ -902,52 +991,50 @@ impl Desktop {
         }
     }
 
+    /// The top bar (ADR-0117): no band of its own, the wallpaper through
+    /// it under a soft shade, in white. At the left the time and date; at
+    /// the right, from the end in, the Oceans logo, the system's state,
+    /// the speaker, the keyboard layout and the app in use.
     fn draw_menu_bar(&self, canvas: &mut Canvas, windows: &[WindowView<'_>]) {
         let w = canvas.width;
         let bar = menu_bar(w);
-        canvas.tint(bar, 0, colour::glass(), 190);
-        canvas.tint(Rect::new(0, MENU_HEIGHT - 1, w, 1), 0, BLACK, 25);
-        let mark = menu_mark();
-        if self.start_open || mark.contains(self.pointer.0, self.pointer.1) {
-            canvas.tint(Rect::new(mark.x, 3, mark.w, MENU_HEIGHT - 6), 6, BLACK, 25);
+        // The shade: darkest at the top, gone at the bar's foot.
+        for row in 0..MENU_HEIGHT {
+            let alpha = (70 * (MENU_HEIGHT - row) / MENU_HEIGHT) as u32;
+            canvas.tint(Rect::new(0, row, w, 1), 0, BLACK, alpha);
         }
-        oceans_mark(canvas, mark, colour::text());
-        // The app in use.
+        let hover = |r: Rect| r.contains(self.pointer.0, self.pointer.1);
+        // The time, where phones show it.
+        canvas.text(14, 6, &self.clock, Font::Strong, WHITE, bar);
+
+        // The system's state, right-aligned at the bar's end.
+        let status_x = bar_end(w) - canvas.measure(&self.status, Font::Body);
+        canvas.text(status_x, 6, &self.status, Font::Body, WHITE, bar);
+        // The speaker (ADR-0100), in one place left of it.
+        if let Some((level, muted)) = self.volume {
+            let button = volume_button(w);
+            if self.volume_open || hover(button) {
+                canvas.tint(button, 6, WHITE, 45);
+            }
+            speaker(canvas, button, level, muted, WHITE);
+        }
+        // The keyboard layout (ADR-0114), left of the speaker.
+        let r = layout_button(w);
+        if hover(r) {
+            canvas.tint(r, 6, WHITE, 45);
+        }
+        let name = self.layout.short_name();
+        let x = r.x + (r.w - canvas.measure(name, Font::Strong)) / 2;
+        canvas.text(x, 6, name, Font::Strong, WHITE, bar);
+        // The app in use, last, right-aligned left of the layout.
         let current = windows
             .iter()
             .find(|view| view.focused && !view.frame.minimized)
             .map(|view| view.frame.app.as_str())
             .or((self.terminal_focused && !self.terminal_hidden).then_some("Terminal"))
             .unwrap_or("Oceans");
-        canvas.text(
-            mark.x + mark.w + 10,
-            6,
-            current,
-            Font::Strong,
-            colour::text(),
-            bar,
-        );
-        // The date and time, then the system's state, from the right.
-        let clock_x = w - 14 - canvas.measure(&self.clock, Font::Body);
-        canvas.text(clock_x, 6, &self.clock, Font::Body, colour::text(), bar);
-        let status_x = clock_x - 24 - canvas.measure(&self.status, Font::Body);
-        canvas.text(status_x, 6, &self.status, Font::Body, colour::text(), bar);
-        // The speaker (ADR-0100), in one place left of them.
-        if let Some((level, muted)) = self.volume {
-            let button = volume_button(w);
-            if self.volume_open || button.contains(self.pointer.0, self.pointer.1) {
-                canvas.tint(button, 6, BLACK, 25);
-            }
-            speaker(canvas, button, level, muted);
-        }
-        // The keyboard layout (ADR-0114), left of the speaker.
-        let r = layout_button(w);
-        if r.contains(self.pointer.0, self.pointer.1) {
-            canvas.tint(r, 6, BLACK, 25);
-        }
-        let name = self.layout.short_name();
-        let x = r.x + (r.w - canvas.measure(name, Font::Strong)) / 2;
-        canvas.text(x, 6, name, Font::Strong, colour::text(), bar);
+        let app_x = r.x - 16 - canvas.measure(current, Font::Strong);
+        canvas.text(app_x, 6, current, Font::Strong, WHITE, bar);
     }
 
     /// The sound panel (ADR-0100): the level, a slider and Mute.
@@ -1041,6 +1128,10 @@ impl Desktop {
         }
     }
 
+    /// Wave (ADR-0117): closed, one round glass button with the Oceans logo
+    /// and a dot for each app with a window open; open, the Terminal, the
+    /// kept apps and the windows rise over it along a crest, the name of
+    /// the one under the pointer above it.
     fn draw_dock(&self, canvas: &mut Canvas, windows: &[WindowView<'_>]) {
         let (w, h) = (canvas.width, canvas.height);
         let shown = taskbar_windows(windows);
@@ -1050,28 +1141,60 @@ impl Desktop {
             .collect();
         let entries = self.dock_entries(&listed);
         let kept = self.kept();
-        let count = 2 + entries.len();
-        let d = dock(w, h, count);
-        canvas.shadow(d, 10, 50);
-        canvas.tint(Rect::new(d.x - 1, d.y - 1, d.w + 2, d.h + 2), 19, BLACK, 30);
-        canvas.tint(d, 18, colour::glass(), 120);
-
         let pointer = self.pointer;
+
+        let button = wave_button(w, h);
+        let (cx, cy, radius) = (
+            button.x + button.w / 2,
+            button.y + button.h / 2,
+            button.w / 2,
+        );
+        let lit = self.wave_open || self.start_open || button.contains(pointer.0, pointer.1);
+        // Lit: a ring in the accent; else a hairline.
+        if lit {
+            canvas.circle(cx, cy, radius + 2, colour::accent());
+        } else {
+            canvas.circle(cx, cy, radius + 1, Rgb(0x8e_8e_93));
+        }
+        canvas.circle(cx, cy, radius, colour::glass());
+        oceans_logo(canvas, button);
+        // What is open: a dot for each app with a window (and the
+        // Terminal), up to five, under the button.
+        let running = shown
+            .iter()
+            .map(|view| view.frame.app.as_str())
+            .fold(Vec::<&str>::new(), |mut apps, app| {
+                if !apps.contains(&app) {
+                    apps.push(app);
+                }
+                apps
+            })
+            .len()
+            + usize::from(!self.terminal_hidden);
+        let dots = running.min(5) as i32;
+        for i in 0..dots {
+            let x = cx - (dots - 1) * 4 + i * 8;
+            canvas.circle(x, button.y + button.h + 6, 2, WHITE);
+        }
+        if !self.wave_open || self.start_open {
+            return;
+        }
+
+        let count = 1 + entries.len();
         let mut label: Option<(Rect, String)> = None;
         let mut item = |canvas: &mut Canvas, index: usize, name: &str, open: bool| {
-            let r = dock_item(w, h, index, count);
+            let r = wave_item(w, h, index, count);
+            canvas.shadow(r, 12, 60);
             if r.contains(pointer.0, pointer.1) && self.dialog.is_none() {
                 label = Some((r, String::from(name)));
             }
             if open {
-                canvas.circle(r.x + r.w / 2, d.y + d.h - 4, 2, colour::text());
+                // Open: a short bar under the icon, as on the button.
+                canvas.round_fill(Rect::new(r.x + r.w / 2 - 6, r.y + r.h + 5, 12, 3), 1, WHITE);
             }
             r
         };
-
-        let start = item(canvas, 0, "Apps", self.start_open);
-        apps_icon(canvas, start);
-        let term = item(canvas, 1, "Terminal", !self.terminal_hidden);
+        let term = item(canvas, 0, "Terminal", !self.terminal_hidden);
         terminal_icon(canvas, term);
         // Not for this account (ADR-0115): shown, but dimmed.
         if !self.admin {
@@ -1079,19 +1202,19 @@ impl Desktop {
         }
         for (i, entry) in entries.iter().enumerate() {
             match *entry {
-                // A kept app (ADR-0109): a dot while one of its windows is
+                // A kept app (ADR-0109): marked while one of its windows is
                 // open.
                 dock::Entry::Pinned(index) => {
                     let name = kept.get(index).map_or("?", |&(_, name)| name);
                     let open = shown.iter().any(|view| view.frame.app == name);
-                    let r = item(canvas, i + 2, name, open);
+                    let r = item(canvas, i + 1, name, open);
                     app_icon(canvas, r, name);
                 }
                 dock::Entry::Window(id) => {
                     let Some(view) = shown.iter().find(|view| view.frame.id == id) else {
                         continue;
                     };
-                    let r = item(canvas, i + 2, &view.frame.app, true);
+                    let r = item(canvas, i + 1, &view.frame.app, true);
                     app_icon(canvas, r, &view.frame.app);
                     if view.frame.minimized {
                         // Put away: the icon is a little faded.
@@ -1101,34 +1224,22 @@ impl Desktop {
             }
         }
 
-        // The name of what the pointer is on, over the dock.
+        // The name of what the pointer is on, over its icon.
         if let Some((r, name)) = label {
             let width = canvas.measure(&name, Font::Body) + 20;
-            let tip = Rect::new(r.x + (r.w - width) / 2, d.y - 34, width, 26);
+            let tip = Rect::new(r.x + (r.w - width) / 2, r.y - 34, width, 26);
             canvas.tint(tip, 8, Rgb(0x2c_2c_2e), 230);
             canvas.text(tip.x + 10, tip.y + 5, &name, Font::Body, WHITE, tip);
         }
     }
 
+    /// Launchpad (ADR-0117): the apps in a grid across the screen, over a
+    /// frosted wash of what is under it; the search at the top; Lock,
+    /// Restart and Shut Down in the corner.
     fn draw_apps_panel(&self, canvas: &mut Canvas) {
         let (w, h) = (canvas.width, canvas.height);
         let panel = start_menu(w, h);
-        canvas.shadow(panel, 16, 90);
-        canvas.tint(
-            Rect::new(panel.x - 1, panel.y - 1, panel.w + 2, panel.h + 2),
-            17,
-            BLACK,
-            35,
-        );
-        canvas.round_fill(panel, 16, colour::panel());
-        canvas.text(
-            panel.x + 24,
-            panel.y + 22,
-            "Apps",
-            Font::Title,
-            colour::text(),
-            panel,
-        );
+        canvas.fill(panel, colour::panel());
         // The search field (ADR-0108): what is typed goes in while the
         // panel is open.
         let field = search_field(w, h);
@@ -1184,13 +1295,7 @@ impl Desktop {
             }
             tile_label(canvas, t, &app.name);
         }
-        let footer_y = panel.y + panel.h - 48;
-        canvas.tint(
-            Rect::new(panel.x + 16, footer_y, panel.w - 32, 1),
-            0,
-            BLACK,
-            30,
-        );
+        let footer_y = power_button(w, h, 0).y;
         let note = if self.apps.is_empty() {
             String::from("No apps installed yet: the Store, or `app install`")
         } else if self.apps.len() > MAX_TILES - 1 {
@@ -1206,8 +1311,8 @@ impl Desktop {
             )
         };
         canvas.text(
-            panel.x + 24,
-            footer_y + 16,
+            panel.x + 32,
+            footer_y + 8,
             &note,
             Font::Body,
             colour::muted(),
@@ -1298,10 +1403,10 @@ impl Desktop {
         } else {
             String::from("Enter opens; the arrows choose; Esc closes")
         };
-        let footer_y = panel.y + panel.h - 48;
+        let footer_y = power_button(w, h, 0).y;
         canvas.text(
-            panel.x + 24,
-            footer_y + 16,
+            panel.x + 32,
+            footer_y + 8,
             &note,
             Font::Body,
             colour::muted(),
@@ -1447,7 +1552,7 @@ fn inset(r: Rect, by: i32) -> Rect {
     Rect::new(r.x + by, r.y + by, r.w - 2 * by, r.h - 2 * by)
 }
 
-/// The icon of an apps panel tile: 48 pixels, centred at its top.
+/// The icon of a Launchpad tile: 48 pixels, centred at its top.
 fn icon_in(tile: Rect) -> Rect {
     Rect::new(tile.x + (tile.w - ICON) / 2, tile.y + 12, ICON, ICON)
 }
@@ -1477,7 +1582,7 @@ fn tile_label(canvas: &mut Canvas, tile: Rect, name: &str) {
 }
 
 /// An app's icon: a rounded square in its colour (chosen by its name, which
-/// the dock and the apps panel both know), with its initial.
+/// Wave and Launchpad both know), with its initial.
 fn app_icon(canvas: &mut Canvas, r: Rect, name: &str) {
     let hash = name.bytes().fold(0usize, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(byte.into())
@@ -1548,20 +1653,8 @@ fn terminal_icon(canvas: &mut Canvas, r: Rect) {
     );
 }
 
-/// The apps button's icon: a grid of dots on the accent.
-fn apps_icon(canvas: &mut Canvas, r: Rect) {
-    canvas.round_fill(r, r.w / 4, colour::accent());
-    canvas.tint(Rect::new(r.x, r.y, r.w, r.h / 2), r.w / 4, WHITE, 35);
-    let step = r.w / 4;
-    for row in 1..4 {
-        for col in 1..4 {
-            canvas.circle(r.x + col * step, r.y + row * step, 3, WHITE);
-        }
-    }
-}
-
-/// Where the level shows after a volume key (ADR-0101): above the dock, in
-/// the middle.
+/// Where the level shows after a volume key (ADR-0101): above Wave's
+/// button, in the middle.
 pub fn volume_shown(width: i32, height: i32) -> Rect {
     Rect::new((width - 260) / 2, height - DOCK_RESERVE - 64, 260, 48)
 }
@@ -1571,7 +1664,13 @@ fn draw_volume_shown(canvas: &mut Canvas, (level, muted): (u8, bool)) {
     let r = volume_shown(canvas.width, canvas.height);
     canvas.shadow(r, 12, 70);
     canvas.round_fill(r, 14, colour::dialog_surface());
-    speaker(canvas, Rect::new(r.x + 8, r.y + 12, 28, 24), level, muted);
+    speaker(
+        canvas,
+        Rect::new(r.x + 8, r.y + 12, 28, 24),
+        level,
+        muted,
+        colour::text(),
+    );
     let track = Rect::new(r.x + 48, r.y + 21, r.w - 64, 6);
     canvas.round_fill(track, 3, colour::button_secondary());
     if !muted {
@@ -1586,19 +1685,16 @@ fn draw_volume_shown(canvas: &mut Canvas, (level, muted): (u8, bool)) {
 
 /// A speaker centred in `r` (ADR-0100): a body and a cone, then up to three
 /// bars for the level, or a cross when muted.
-fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool) {
+fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool, ink: Rgb) {
     let (cx, cy) = (r.x + r.w / 2 - 6, r.y + r.h / 2);
-    canvas.fill(Rect::new(cx - 5, cy - 3, 4, 7), colour::text());
+    canvas.fill(Rect::new(cx - 5, cy - 3, 4, 7), ink);
     for i in 0..5 {
-        canvas.fill(
-            Rect::new(cx - 1 + i, cy - 3 - i, 1, 7 + 2 * i),
-            colour::text(),
-        );
+        canvas.fill(Rect::new(cx - 1 + i, cy - 3 - i, 1, 7 + 2 * i), ink);
     }
     if muted || level == 0 {
         for i in 0..7 {
-            canvas.fill(Rect::new(cx + 7 + i, cy - 3 + i, 2, 1), colour::text());
-            canvas.fill(Rect::new(cx + 13 - i, cy - 3 + i, 2, 1), colour::text());
+            canvas.fill(Rect::new(cx + 7 + i, cy - 3 + i, 2, 1), ink);
+            canvas.fill(Rect::new(cx + 13 - i, cy - 3 + i, 2, 1), ink);
         }
         return;
     }
@@ -1609,21 +1705,15 @@ fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool) {
     };
     for i in 0..bars {
         let h = 4 + 3 * i;
-        canvas.fill(Rect::new(cx + 7 + 3 * i, cy - h / 2, 2, h), colour::text());
+        canvas.fill(Rect::new(cx + 7 + 3 * i, cy - h / 2, 2, h), ink);
     }
 }
 
-/// The Oceans mark (two waves), centred in `r`, in `colour`.
-fn oceans_mark(canvas: &mut Canvas, r: Rect, colour: Rgb) {
-    const WAVE: [i32; 10] = [0, -1, -2, -2, -1, 0, 1, 2, 2, 1];
-    let x0 = r.x + (r.w - 20) / 2;
-    let y0 = r.y + r.h / 2 - 4;
-    for line in 0..2 {
-        for dx in 0..20 {
-            let y = y0 + line * 8 + WAVE[dx as usize % WAVE.len()];
-            canvas.fill(Rect::new(x0 + dx, y, 1, 2), colour);
-        }
-    }
+/// The Oceans logo (ADR-0117): the wave in a circle, made from the logo
+/// the project chose, 40 pixels, centred in `r` (Wave's button).
+fn oceans_logo(canvas: &mut Canvas, r: Rect) {
+    const LOGO: &[u8] = include_bytes!("../assets/oceans-logo-40.rgba");
+    canvas.image(r.x + (r.w - 40) / 2, r.y + (r.h - 40) / 2, 40, LOGO);
 }
 
 /// A window's frame (the Terminal's too): a soft shadow, a rounded border
@@ -1642,12 +1732,13 @@ fn chrome(canvas: &mut Canvas, outer: Rect, focused: bool) {
     );
 }
 
-/// The title, centred in the bar (clear of the buttons at the left): the
-/// app's verified name, then its own title.
-fn title_text(canvas: &mut Canvas, bar: Rect, app: &str, title: &str, left: i32) {
+/// The title, centred in the bar (clear of the buttons, which start at
+/// `right`, ADR-0117): the app's verified name, then its own title.
+fn title_text(canvas: &mut Canvas, bar: Rect, app: &str, title: &str, right: i32) {
     let gap = if title.is_empty() { 0 } else { 8 };
     let width = canvas.measure(app, Font::Strong) + gap + canvas.measure(title, Font::Body);
-    let clip = Rect::new(left, bar.y, bar.x + bar.w - 8 - left, bar.h);
+    let left = bar.x + 12;
+    let clip = Rect::new(left, bar.y, right - left, bar.h);
     let x = (bar.x + (bar.w - width) / 2).max(left);
     let end = canvas.text(x, bar.y + 5, app, Font::Strong, colour::text(), clip);
     if !title.is_empty() {
@@ -1705,7 +1796,7 @@ fn draw_chrome(canvas: &mut Canvas, view: &WindowView<'_>, pointer: (i32, i32)) 
         frame.title_bar(),
         &frame.app,
         &frame.title,
-        frame.zoom_button().x + CLOSE_SIZE + 8,
+        frame.zoom_button().x - 8,
     );
     let lit = |colour| view.focused.then_some(colour);
     traffic_lights(
