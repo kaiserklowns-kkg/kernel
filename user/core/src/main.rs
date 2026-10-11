@@ -83,6 +83,10 @@ const DOCK_FILE: &str = "dock";
 const USER_FILE: &str = "user";
 /// The appearance and accent (ADR-0113), in `/system`: `APPEARANCE ACCENT`.
 const APPEARANCE_FILE: &str = "appearance";
+/// The keyboard layout in use (ADR-0116): `0` English, `1` Thai.
+const LAYOUT_FILE: &str = "layout";
+/// What each account keeps of its own (ADR-0116), by [`Core::user_file`].
+const USER_FILES: [&str; 3] = [DOCK_FILE, APPEARANCE_FILE, LAYOUT_FILE];
 /// `FIND` (ADR-0108): the most entries of Home it looks at, how deep in
 /// folders, and the most names it gives.
 const FIND_VISIT: usize = 1000;
@@ -687,7 +691,7 @@ impl Core {
     /// The apps kept in the dock (ADR-0109), from `/system/dock`: installed
     /// apps only, no repeats, at most [`MAX_PINNED`].
     fn pinned(&self) -> Vec<String> {
-        let bytes = read_path(&self.system_dir, DOCK_FILE).unwrap_or_default();
+        let bytes = read_path(&self.system_dir, &self.user_file(DOCK_FILE)).unwrap_or_default();
         let text = core::str::from_utf8(&bytes).unwrap_or("");
         let mut pinned: Vec<String> = Vec::new();
         for id in text.lines().map(str::trim) {
@@ -734,7 +738,12 @@ impl Core {
             0 => pinned.retain(|p| p != id),
             _ => return Err(Status::BadRequest.into()),
         }
-        write_file(&self.system_dir, DOCK_FILE, pinned.join("\n").as_bytes()).map_err(io)?;
+        write_file(
+            &self.system_dir,
+            &self.user_file(DOCK_FILE),
+            pinned.join("\n").as_bytes(),
+        )
+        .map_err(io)?;
         say(
             self.log,
             format_args!(
@@ -749,7 +758,8 @@ impl Core {
     /// The appearance and accent the user chose (ADR-0113), from
     /// `/system/appearance`; light and the first accent until then.
     fn appearance(&self) -> [u8; 2] {
-        let bytes = read_path(&self.system_dir, APPEARANCE_FILE).unwrap_or_default();
+        let bytes =
+            read_path(&self.system_dir, &self.user_file(APPEARANCE_FILE)).unwrap_or_default();
         let text = core::str::from_utf8(&bytes).unwrap_or("");
         let mut words = text.split_whitespace().map(|w| w.parse::<u8>().ok());
         match (words.next().flatten(), words.next().flatten()) {
@@ -803,6 +813,16 @@ impl Core {
     fn home(&self) -> String {
         self.account()
             .map_or_else(|| String::from("home"), oceans_account::Record::home)
+    }
+
+    /// The file in `/system` that keeps `name` (the dock, the appearance,
+    /// the keyboard layout) for the account in use (ADR-0116): the first
+    /// account's as before, each other's `NAME.LOGIN`.
+    fn user_file(&self, name: &str) -> String {
+        match self.account() {
+            Some(account) if !account.admin() => alloc::format!("{name}.{}", account.id),
+            _ => String::from(name),
+        }
     }
 
     /// `account` kept as the one in use.
@@ -903,6 +923,11 @@ impl Core {
             self.current -= 1;
         }
         self.save_users(users)?;
+        // Its own settings go with it (ADR-0116), so a login used again
+        // starts afresh; its Home stays.
+        for name in USER_FILES {
+            let _ = self.system_dir.remove(&alloc::format!("{name}.{id}"));
+        }
         self.record(format_args!("removed the account {id}; its files stay"));
         Ok(())
     }
@@ -1539,13 +1564,36 @@ impl Core {
                         reply.extend_from_slice(&self.appearance());
                         Ok(())
                     }
+                    // The keyboard layout (ADR-0116), each account's own.
+                    op::LAYOUT => {
+                        let kept = read_path(&self.system_dir, &self.user_file(LAYOUT_FILE));
+                        let layout = match kept.as_deref() {
+                            Ok([b'1', ..]) => 1,
+                            _ => 0,
+                        };
+                        reply.push(layout);
+                        Ok(())
+                    }
+                    op::SET_LAYOUT => match data {
+                        &[layout] if layout <= 1 => {
+                            let text = [b'0' + layout, b'\n'];
+                            write_file(&self.system_dir, &self.user_file(LAYOUT_FILE), &text)
+                                .map_err(io)?;
+                            Ok(())
+                        }
+                        _ => Err(Status::BadRequest.into()),
+                    },
                     op::SET_APPEARANCE => match data {
                         &[appearance, accent]
                             if appearance <= 1 && accent < oceans_core_proto::ACCENT_COUNT =>
                         {
                             let text = alloc::format!("{appearance} {accent}\n");
-                            write_file(&self.system_dir, APPEARANCE_FILE, text.as_bytes())
-                                .map_err(io)?;
+                            write_file(
+                                &self.system_dir,
+                                &self.user_file(APPEARANCE_FILE),
+                                text.as_bytes(),
+                            )
+                            .map_err(io)?;
                             say(
                                 self.log,
                                 format_args!(

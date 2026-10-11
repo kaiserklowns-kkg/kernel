@@ -684,7 +684,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"user password oceans123\r\n",
     b"@monitor sendkey meta_l-l",
     b"@wait desktop: locked",
-    b"@screen 780 420 ffffff the lock screen's password field",
+    b"@screen 700 420 ffffff the lock screen's password field",
     b"@keys nope\r",
     b"@wait desktop: unlock refused",
     b"@keys oceans123\r",
@@ -740,7 +740,11 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: Kim chosen at the lock screen",
     b"@keys seashell9\r",
     b"@wait desktop: Kim signed in",
+    // Her own settings (ADR-0116): light, as she has chosen nothing;
+    // Kai's stay dark.
+    b"@wait desktop: appearance light, accent 0",
     b"@monitor sendkey meta_l",
+    b"@screen 905 330 f2f2f7 Kim's apps panel, light",
     b"@keys pict",
     b"@monitor sendkey ret",
     b"@wait desktop: nothing found for pict",
@@ -751,6 +755,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: Kai chosen at the lock screen",
     b"@keys waves2026\r",
     b"@wait desktop: Kai signed in",
+    b"@monitor sendkey meta_l",
+    b"@screen 905 330 262629 Kai's apps panel, dark again",
+    b"@monitor sendkey esc",
     b"user remove kim\r\n",
     b"@wait core: audit: removed the account kim",
     b"@monitor device_del deskmouse",
@@ -1220,6 +1227,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: audit: stopped app.oceans.calculator: another user signed in"),
     Expect::Contains("core: user: kim signed in"),
     Expect::Contains("desktop: nothing found for pict"),
+    // Each account's own appearance (ADR-0116).
+    Expect::Contains("desktop: appearance light, accent 0"),
     Expect::Contains("core: user: owner signed in"),
     Expect::Contains("core: audit: removed the account kim; its files stay"),
     // The system volume (ADR-0100): at full on a fresh disk; set from the

@@ -1073,6 +1073,10 @@ impl Desktop {
         apps_icon(canvas, start);
         let term = item(canvas, 1, "Terminal", !self.terminal_hidden);
         terminal_icon(canvas, term);
+        // Not for this account (ADR-0115): shown, but dimmed.
+        if !self.admin {
+            canvas.tint(term, term.w / 4, colour::glass(), 150);
+        }
         for (i, entry) in entries.iter().enumerate() {
             match *entry {
                 // A kept app (ADR-0109): a dot while one of its windows is
@@ -1327,27 +1331,32 @@ impl Desktop {
         }
         // One account: its picture and name. Several (ADR-0115): each
         // one's picture in a row, the chosen one ringed, its name below.
+        // Round pictures, each account's colour by its place, and each name
+        // under its own: two names with one initial stay apart.
         let count = self.users.len().max(1);
         let chosen = self.chosen_user.min(count - 1);
-        let name = self
-            .users
-            .get(chosen)
-            .map_or(self.user_name.as_str(), |(_, name)| name.as_str());
         for i in 0..count {
             let avatar = lock_avatar(w, h, i, count);
-            let shown = self
+            let name = self
                 .users
                 .get(i)
                 .map_or(self.user_name.as_str(), |(_, n)| n.as_str());
-            if count > 1 && i == chosen {
-                canvas.round_fill(inset(avatar, -4), 20, WHITE);
+            let (cx, cy, radius) = (
+                avatar.x + avatar.w / 2,
+                avatar.y + avatar.h / 2,
+                avatar.w / 2,
+            );
+            let picked = count == 1 || i == chosen;
+            if count > 1 && picked {
+                canvas.circle(cx, cy, radius + 4, WHITE);
             }
-            app_icon(canvas, avatar, shown);
-            if count > 1 && i != chosen {
-                canvas.tint(avatar, 16, BLACK, 90);
-            }
+            user_picture(canvas, avatar, name, i, picked);
+            let font = if picked { Font::Strong } else { Font::Body };
+            let width = canvas.measure(name, font).min(avatar.w + 30);
+            let label = Rect::new(cx - width / 2, avatar.y + avatar.h + 14, width, 24);
+            let colour = if picked { WHITE } else { Rgb(0xc8_cc_d8) };
+            canvas.text(label.x, label.y, name, font, colour, label);
         }
-        centre(canvas, h / 2 - 44, name, Font::Strong, WHITE);
         let field = lock_field(w, h);
         canvas.round_fill(field, 12, colour::accent());
         let inner = inset(field, 2);
@@ -1362,11 +1371,24 @@ impl Desktop {
                 inner,
             );
         } else {
-            let dots = self.lock_input.chars().count().min(24) as i32;
+            // As many dots as fit left of the layout's name.
+            let dots = self.lock_input.chars().count().min(18) as i32;
             for i in 0..dots {
                 canvas.circle(inner.x + 18 + i * 14, inner.y + inner.h / 2, 4, INK);
             }
         }
+        // The layout the password is typed in (ADR-0114), as the menu bar
+        // shows it: the same keys type another password in the other one.
+        let layout = self.layout.short_name();
+        let width = canvas.measure(layout, Font::Strong);
+        canvas.text(
+            inner.x + inner.w - 14 - width,
+            inner.y + 10,
+            layout,
+            Font::Strong,
+            Rgb(0x6e_6e_73),
+            inner,
+        );
         let note = if !self.lock_note.is_empty() {
             self.lock_note.as_str()
         } else if count > 1 {
@@ -1481,6 +1503,33 @@ fn app_icon(canvas: &mut Canvas, r: Rect, name: &str) {
         WHITE,
         r,
     );
+}
+
+/// An account's picture at the lock screen (ADR-0115): a circle in the
+/// colour of its place among the accounts, with its initial; dimmed when
+/// another is chosen.
+fn user_picture(canvas: &mut Canvas, r: Rect, name: &str, index: usize, chosen: bool) {
+    let (cx, cy, radius) = (r.x + r.w / 2, r.y + r.h / 2, r.w / 2);
+    let colour = ICON_COLOURS[index % ICON_COLOURS.len()];
+    canvas.circle(cx, cy, radius, colour);
+    let initial: String = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .into_iter()
+        .collect();
+    let width = canvas.measure(&initial, Font::Title);
+    canvas.text(
+        cx - width / 2,
+        cy - Font::Title.height() / 2 - 1,
+        &initial,
+        Font::Title,
+        WHITE,
+        r,
+    );
+    if !chosen {
+        canvas.tint(r, r.w / 2, BLACK, 90);
+    }
 }
 
 /// The Terminal's icon: a dark rounded square with a prompt.

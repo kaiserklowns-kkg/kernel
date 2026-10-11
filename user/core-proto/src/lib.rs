@@ -161,6 +161,12 @@ pub mod op {
     /// account; another one than in use stops the apps (they hold its
     /// Home) and is in use from then on.
     pub const SIGN_IN: u64 = 39;
+    /// → `[layout u8]` (ADR-0116): the keyboard layout the account in use
+    /// types in, 0 English, 1 Thai. Like the dock and the appearance, each
+    /// account keeps its own.
+    pub const LAYOUT: u64 = 40;
+    /// data = `[layout u8]`, kept across reboots.
+    pub const SET_LAYOUT: u64 = 41;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -225,7 +231,8 @@ pub mod access {
             | op::UNLOCK
             | op::LOCK_AFTER
             | op::APPEARANCE
-            | op::USERS => QUERY,
+            | op::USERS
+            | op::LAYOUT => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -246,7 +253,8 @@ pub mod access {
             | op::SET_APPEARANCE
             | op::ADD_USER
             | op::REMOVE_USER
-            | op::SIGN_IN => DECIDE,
+            | op::SIGN_IN
+            | op::SET_LAYOUT => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

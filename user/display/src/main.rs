@@ -273,6 +273,7 @@ fn main(start: Start) -> i64 {
     }
     service.refresh_user();
     service.refresh_appearance();
+    service.refresh_layout();
     service.refresh_volume();
     service.refresh_clock();
     service.refresh_terminal();
@@ -1040,6 +1041,7 @@ impl Service {
         self.refresh_user();
         self.refresh_pinned();
         self.refresh_appearance();
+        self.refresh_layout();
         self.refresh_apps();
         if !self.desktop.admin {
             self.desktop.terminal_hidden = true;
@@ -1223,6 +1225,34 @@ impl Service {
         self.desktop.layout = self.desktop.layout.next();
         let name = self.desktop.layout.name();
         say(self.log, format_args!("desktop: keyboard layout {name}"));
+        // Kept by Core for the account in use (ADR-0116); at the lock
+        // screen the account may be about to change, so only for typing
+        // the password.
+        if let Some(core) = self
+            .core
+            .filter(|_| self.desktop.lock == desktop::Lock::Open)
+        {
+            let mut reply = [0u8; 8];
+            let _ = core.call(
+                op::SET_LAYOUT,
+                &[self.desktop.layout.byte()],
+                &[],
+                &mut reply,
+            );
+        }
+    }
+
+    /// The account in use's keyboard layout, from Core (ADR-0116).
+    fn refresh_layout(&mut self) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 1];
+        if let Ok(got) = core.call(op::LAYOUT, &[], &[], &mut reply)
+            && got.len == 1
+        {
+            self.desktop.layout = oceans_window::layout::Layout::from_byte(reply[0]);
+        }
     }
 
     /// A key while the apps panel is open (ADR-0108): typed into the

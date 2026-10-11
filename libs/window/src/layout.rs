@@ -22,6 +22,22 @@ impl Layout {
         }
     }
 
+    /// As Core keeps it (ADR-0116): 0 English, 1 Thai; another byte is
+    /// English.
+    pub fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::Thai,
+            _ => Self::English,
+        }
+    }
+
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::English => 0,
+            Self::Thai => 1,
+        }
+    }
+
     /// As the menu bar shows it.
     pub fn short_name(self) -> &'static str {
         match self {
@@ -120,5 +136,10 @@ mod tests {
         assert_eq!(Layout::English.character(b'a'), None);
         assert_eq!(Layout::Thai.character(b'd'), Some('ก'));
         assert_eq!(Layout::Thai.short_name(), "TH");
+        // As Core keeps it (ADR-0116).
+        for layout in [Layout::English, Layout::Thai] {
+            assert_eq!(Layout::from_byte(layout.byte()), layout);
+        }
+        assert_eq!(Layout::from_byte(9), Layout::English);
     }
 }
