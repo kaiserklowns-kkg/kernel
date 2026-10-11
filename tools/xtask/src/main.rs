@@ -625,6 +625,18 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: opening picture.png with app.oceans.viewer, from search",
     b"@wait desktop: started app.oceans.viewer",
     b"app stop app.oceans.viewer\r\n",
+    // Thai (ADR-0114): Super+Space, then the keys of Kedmanee: "wmp"
+    // types "ไทย" into the search, which finds nothing; Enter says so.
+    // Super+Space again: English.
+    b"@monitor sendkey meta_l-spc",
+    b"@wait desktop: keyboard layout Thai",
+    b"@monitor sendkey meta_l",
+    b"@keys wmp",
+    b"@monitor sendkey ret",
+    "@wait desktop: nothing found for ไทย".as_bytes(),
+    b"@monitor sendkey esc",
+    b"@monitor sendkey meta_l-spc",
+    b"@wait desktop: keyboard layout English",
     // The system volume (ADR-0100), after every sound this boot records:
     // set from the shell, then in the menu bar's sound panel. The speaker
     // is at 1012,14; its panel (766,34, 260 by 106) has the slider from
@@ -1152,6 +1164,10 @@ const SHELL_EXPECT: &[Expect] = &[
     // Search (ADR-0108): an app and a file of Home, found and opened.
     Expect::Contains("desktop: opening app.oceans.calculator, from search"),
     Expect::Contains("desktop: opening picture.png with app.oceans.viewer, from search"),
+    // Typed in Thai (ADR-0114).
+    Expect::Contains("desktop: keyboard layout Thai"),
+    Expect::Contains("desktop: nothing found for ไทย"),
+    Expect::Contains("desktop: keyboard layout English"),
     // Kept in the dock (ADR-0109), by Core.
     Expect::Contains("core: dock: app.oceans.calculator kept"),
     // The lock screen (ADR-0110).

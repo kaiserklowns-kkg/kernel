@@ -120,5 +120,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0111](0111-the-account-in-settings.md) | The account in Settings: changing the password needs the current one (`CHANGE_PASSWORD`), a password field | Accepted |
 | [0112](0112-locking-after-a-while.md) | Locking after a while without input, chosen in Settings; Lock in the apps panel | Accepted |
 | [0113](0113-dark-appearance-and-accent.md) | The dark appearance and the accent: one set of design values, kept by Core, every window told (`kind::THEME`) | Accepted |
+| [0114](0114-typing-thai.md) | Typing Thai: Kedmanee beside English, Super+Space or the menu bar to switch, characters to the focused window (`kind::TEXT`) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

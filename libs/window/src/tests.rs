@@ -38,7 +38,7 @@ fn events_round_trip_and_unknown_kinds_are_refused() {
     let mut bad = event.encode();
     bad[4] = 0;
     assert_eq!(Event::decode(&bad), None);
-    bad[4] = 9;
+    bad[4] = 10;
     assert_eq!(Event::decode(&bad), None);
 }
 
@@ -933,4 +933,33 @@ fn every_window_hears_of_the_theme() {
     let c = m.open(APP, "C", "", 100, 100).unwrap();
     let first = m.take_events(APP, 100)[0];
     assert_eq!((first.kind, first.window, first.key), (kind::THEME, c, 1));
+}
+
+#[test]
+fn typed_characters_go_to_the_focused_window() {
+    let mut m = manager();
+    let id = m.open(APP, "A", "", 100, 100).unwrap();
+    m.take_events(APP, 100);
+    assert_eq!(m.text('ก'), Some(APP));
+    let event = m.take_events(APP, 10)[0];
+    assert_eq!((event.kind, event.window), (kind::TEXT, id));
+    assert_eq!(event.character(), Some('ก'));
+    // Beyond 16 bits too, and through the wire.
+    m.text('😀');
+    let event = m.take_events(APP, 10)[0];
+    assert_eq!(
+        Event::decode(&event.encode()).and_then(|e| e.character()),
+        Some('😀')
+    );
+    // A key is not a character; the Terminal gets none.
+    assert_eq!(
+        Event {
+            kind: kind::KEY,
+            ..event
+        }
+        .character(),
+        None
+    );
+    m.set_focus(Focus::Terminal);
+    assert_eq!(m.text('ก'), None);
 }

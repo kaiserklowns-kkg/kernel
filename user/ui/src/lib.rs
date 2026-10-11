@@ -83,6 +83,10 @@ pub struct Input {
     pub focused: bool,
     /// Text the user pasted (ADR-0095), for the widget with the keyboard.
     pub paste: Option<String>,
+    /// Characters typed in a layout other than English (ADR-0114), for
+    /// the widget with the keyboard; printable keys come here instead of
+    /// `keys` then.
+    pub text: Vec<char>,
 }
 
 /// One frame's drawing and layout: a column of widgets from the top of
@@ -502,6 +506,13 @@ impl<'s, 'f> Ui<'s, 'f> {
                 }
                 self.changed = true;
             }
+            // Typed in another layout (ADR-0114): Thai, for one.
+            for c in core::mem::take(&mut self.input.text) {
+                if !c.is_control() && text.len() + c.len_utf8() <= FIELD_MAX {
+                    text.push(c);
+                }
+                self.changed = true;
+            }
             // Pasted: its first line, as far as the field goes.
             if let Some(pasted) = self.input.paste.take() {
                 for c in pasted.lines().next().unwrap_or("").chars() {
@@ -749,6 +760,7 @@ fn run_window<S>(
                     }
                     kind::BUTTON if event.button == 1 => input.held = false,
                     kind::KEY => input.keys.push(event.key),
+                    kind::TEXT => input.text.extend(event.character()),
                     // New pixels at the new size; the frame after this
                     // batch draws into them.
                     kind::RESIZE => {
@@ -782,10 +794,12 @@ fn run_window<S>(
             input.click = None;
             input.keys.clear();
             input.paste = None;
+            input.text.clear();
             draw(&mut window, &mut input, &mut focus, state);
         }
         input.click = None;
         input.keys.clear();
         input.paste = None;
+        input.text.clear();
     }
 }

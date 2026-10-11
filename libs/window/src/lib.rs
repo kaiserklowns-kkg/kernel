@@ -17,6 +17,7 @@
 extern crate alloc;
 
 pub mod dock;
+pub mod layout;
 pub mod proto;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -807,6 +808,30 @@ impl Manager {
                 KeyRoute::Window(owner)
             }
         }
+    }
+
+    /// A character typed in a layout other than English (ADR-0114), for
+    /// the focused window (`kind::TEXT`); the app's owner, or `None` when
+    /// the Terminal has the focus (the desktop types the key there as it
+    /// is).
+    pub fn text(&mut self, c: char) -> Option<u64> {
+        let Focus::Window(id) = self.focus else {
+            return None;
+        };
+        let owner = self.frames[self.index(id)?].owner;
+        self.user_acted(owner);
+        let code = c as u32;
+        self.queue(
+            owner,
+            Event {
+                window: id,
+                kind: kind::TEXT,
+                x: code as u16 as i16,
+                y: (code >> 16) as u16 as i16,
+                ..Event::default()
+            },
+        );
+        Some(owner)
     }
 
     /// The focus moved: what the user allowed the app that had it ends.

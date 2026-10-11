@@ -245,6 +245,8 @@ pub struct Desktop {
     pub user_name: String,
     /// A password is set: the apps panel offers Lock (ADR-0112).
     pub password_set: bool,
+    /// The keyboard layout typed letters follow (ADR-0114).
+    pub layout: oceans_window::layout::Layout,
 }
 
 /// Whether the screen is locked (ADR-0110).
@@ -309,6 +311,8 @@ pub enum Hit {
     TerminalMinimize,
     /// The Terminal itself.
     Terminal,
+    /// The keyboard layout in the menu bar (ADR-0114).
+    Layout,
     /// The speaker in the menu bar (ADR-0100).
     Volume,
     /// The sound panel's slider, at that level.
@@ -352,6 +356,13 @@ pub fn volume_button(width: i32) -> Rect {
         28,
         MENU_HEIGHT - 4,
     )
+}
+
+/// The keyboard layout's name in the menu bar (ADR-0114), left of the
+/// speaker: a click goes to the next layout.
+pub fn layout_button(width: i32) -> Rect {
+    let speaker = volume_button(width);
+    Rect::new(speaker.x - 8 - 32, 2, 32, MENU_HEIGHT - 4)
 }
 
 /// The sound panel, below the speaker.
@@ -680,6 +691,9 @@ impl Desktop {
         if dock_item(width, height, 0, count).contains(x, y) || menu_mark().contains(x, y) {
             return Hit::Start;
         }
+        if layout_button(width).contains(x, y) {
+            return Hit::Layout;
+        }
         // The speaker and its panel (ADR-0100).
         if self.volume.is_some() && volume_button(width).contains(x, y) {
             return Hit::Volume;
@@ -907,6 +921,14 @@ impl Desktop {
             }
             speaker(canvas, button, level, muted);
         }
+        // The keyboard layout (ADR-0114), left of the speaker.
+        let r = layout_button(w);
+        if r.contains(self.pointer.0, self.pointer.1) {
+            canvas.tint(r, 6, BLACK, 25);
+        }
+        let name = self.layout.short_name();
+        let x = r.x + (r.w - canvas.measure(name, Font::Strong)) / 2;
+        canvas.text(x, 6, name, Font::Strong, colour::text(), bar);
     }
 
     /// The sound panel (ADR-0100): the level, a slider and Mute.

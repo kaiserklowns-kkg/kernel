@@ -197,6 +197,9 @@ pub const KEY_SEARCH: u8 = 0xa9;
 /// Super+L (`oceans_abi::display::KEY_LOCK`, ADR-0110): the desktop's
 /// lock screen. Never an app's.
 pub const KEY_LOCK: u8 = 0xaa;
+/// Super+Space (`oceans_abi::display::KEY_LAYOUT`, ADR-0114): the next
+/// keyboard layout. The desktop's, never an app's.
+pub const KEY_LAYOUT: u8 = 0xab;
 /// Up and Down (`oceans_abi::display::KEY_UP`, `KEY_DOWN`): the search
 /// results they choose between while the launcher is open.
 pub const KEY_UP: u8 = 0x80;
@@ -224,6 +227,21 @@ pub mod kind {
     /// 1 dark), `button` the accent (`oceans_draw::theme::ACCENTS`). Sent
     /// when the window opens and whenever the user changes it.
     pub const THEME: u8 = 8;
+    /// A character typed in a layout other than English (ADR-0114): `x`
+    /// and `y` are the low and high 16 bits of its Unicode scalar value.
+    /// Printable keys come so instead of as `KEY` while such a layout is
+    /// in use; the others still come as `KEY`.
+    pub const TEXT: u8 = 9;
+}
+
+impl Event {
+    /// A `TEXT` event's character.
+    pub fn character(&self) -> Option<char> {
+        if self.kind != kind::TEXT {
+            return None;
+        }
+        char::from_u32(u32::from(self.x as u16) | u32::from(self.y as u16) << 16)
+    }
 }
 
 /// Something that happened to a window.
@@ -265,7 +283,7 @@ impl Event {
             x: i16::from_le_bytes([bytes[8], bytes[9]]),
             y: i16::from_le_bytes([bytes[10], bytes[11]]),
         };
-        (kind::KEY..=kind::THEME)
+        (kind::KEY..=kind::TEXT)
             .contains(&event.kind)
             .then_some(event)
     }

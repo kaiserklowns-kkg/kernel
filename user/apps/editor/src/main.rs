@@ -306,6 +306,15 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
                 app.pending = None;
             }
         }
+        // Typed in another layout (ADR-0114): put in as a paste is, over
+        // the selection.
+        let typed: String = core::mem::take(&mut ui.input.text).into_iter().collect();
+        if !typed.is_empty() {
+            ui.changed = true;
+            if !app.editor.paste(&typed) {
+                app.message = String::from("The page would pass 256 KiB.");
+            }
+        }
         if let Some(text) = ui.input.paste.take() {
             ui.changed = true;
             if app.editor.paste(&text) {

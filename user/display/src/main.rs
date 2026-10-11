@@ -572,6 +572,13 @@ impl Service {
             self.last_input_ms = oceans_rt::clock_ms();
             let mut terminal = Vec::new();
             for &byte in &keys[..count] {
+                // Super+Space (ADR-0114): the next keyboard layout, locked
+                // or not.
+                if byte == oceans_window::proto::KEY_LAYOUT {
+                    self.next_layout();
+                    dirty = true;
+                    continue;
+                }
                 // Locked (ADR-0110): the keys are the lock screen's, but for
                 // the volume keys.
                 if self.desktop.lock != desktop::Lock::Open {
@@ -608,6 +615,13 @@ impl Service {
                     && media_key_name(byte).is_none()
                 {
                     dirty |= self.search_key(byte);
+                    continue;
+                }
+                // A letter of the layout in use (ADR-0114), to the focused
+                // window as a character; the Terminal gets the key.
+                if let Some(c) = self.desktop.layout.character(byte)
+                    && self.windows.text(c).is_some()
+                {
                     continue;
                 }
                 match self.windows.key(byte) {
@@ -656,6 +670,10 @@ impl Service {
         let windows = self.dock_windows();
         let hit = self.desktop.hit(x, y, width, height, &windows);
         match hit {
+            Hit::Layout => {
+                self.next_layout();
+                true
+            }
             // The speaker and its panel (ADR-0100).
             Hit::Volume => {
                 self.desktop.volume_open = !self.desktop.volume_open;
@@ -952,7 +970,8 @@ impl Service {
                 desktop.lock_input.pop();
             }
             0x20..=0x7e if desktop.lock_input.len() < 64 => {
-                desktop.lock_input.push(char::from(byte))
+                let c = desktop.layout.character(byte).unwrap_or(char::from(byte));
+                desktop.lock_input.push(c)
             }
             _ => {}
         }
@@ -1093,6 +1112,13 @@ impl Service {
         }
     }
 
+    /// Super+Space or the menu bar (ADR-0114): the next keyboard layout.
+    fn next_layout(&mut self) {
+        self.desktop.layout = self.desktop.layout.next();
+        let name = self.desktop.layout.name();
+        say(self.log, format_args!("desktop: keyboard layout {name}"));
+    }
+
     /// A key while the apps panel is open (ADR-0108): typed into the
     /// search; the arrows choose a result, Enter opens it, Escape closes
     /// the panel. `true` if the screen changes.
@@ -1113,7 +1139,8 @@ impl Service {
                 self.refresh_search();
             }
             0x20..=0x7e if desktop.search.len() < oceans_search::MAX_QUERY => {
-                desktop.search.push(char::from(byte));
+                let c = desktop.layout.character(byte).unwrap_or(char::from(byte));
+                desktop.search.push(c);
                 self.refresh_search();
             }
             _ => return false,
@@ -1162,6 +1189,10 @@ impl Service {
     fn open_found(&mut self, index: usize) {
         use desktop::Found;
         let Some(found) = self.desktop.found.get(index).cloned() else {
+            let query = self.desktop.search.as_str();
+            if !query.is_empty() {
+                say(self.log, format_args!("desktop: nothing found for {query}"));
+            }
             return;
         };
         self.desktop.start_open = false;
