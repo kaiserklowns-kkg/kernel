@@ -3168,9 +3168,7 @@ const CONSENT_PROMPT: &[u8] = b"Allow? [y/N] ";
 /// successful exit. The guest's network card is `nic`.
 fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let udp_forward = free_udp_port()?;
-    let tcp_forward = free_tcp_port()?;
     let udp_echo = udp_echo_probe(udp_forward);
-    let tcp_echo = tcp_echo_probe(tcp_forward);
     let dns_port = dns_server(IPV4_LOOPBACK)?;
     let tcp_port = tcp_greeter(IPV4_LOOPBACK, "hello from the host")?;
     let http_port = http_server(IPV4_LOOPBACK)?;
@@ -3181,6 +3179,17 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let dns6_port = dns_server(IPV6_LOOPBACK)?;
     let tcp6_port = tcp_greeter(IPV6_LOOPBACK, "hello from the host over IPv6")?;
     let http6_port = http_server(IPV6_LOOPBACK)?;
+    // The host ports QEMU forwards to, all different and none the host
+    // servers above hold: each is held until the last is found, or the
+    // system could hand one out twice.
+    let [
+        tcp_forward,
+        monitor_port,
+        serial_port,
+        bridge_port,
+        apps_port,
+    ] = free_tcp_ports()?;
+    let tcp_echo = tcp_echo_probe(tcp_forward);
     // The third-party developer's public key (`build_third_party`).
     let developer_key =
         fs::read_to_string(root().join(PACKAGES_DIR).join("third-party.pub")).unwrap_or_default();
@@ -3198,10 +3207,6 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
             .replace("$DEVKEY", &developer_key)
             .into_bytes()
     };
-    let monitor_port = free_tcp_port()?;
-    let serial_port = free_tcp_port()?;
-    let bridge_port = free_tcp_port()?;
-    let apps_port = free_tcp_port()?;
     // The pairing code `ui pair` printed (ADR-0058), for `@bridge`.
     let mut pairing_code: Option<String> = None;
     let mut child = qemu_command(
@@ -3722,6 +3727,22 @@ fn free_tcp_port() -> Result<u16> {
         .and_then(|listener| listener.local_addr())
         .map(|address| address.port())
         .map_err(|e| format!("cannot find a free TCP port: {e}"))
+}
+
+/// `N` different TCP ports free on the host now.
+fn free_tcp_ports<const N: usize>() -> Result<[u16; N]> {
+    let mut listeners = Vec::with_capacity(N);
+    let mut ports = [0; N];
+    for port in &mut ports {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("cannot find a free TCP port: {e}"))?;
+        *port = listener
+            .local_addr()
+            .map_err(|e| format!("cannot find a free TCP port: {e}"))?
+            .port();
+        listeners.push(listener);
+    }
+    Ok(ports)
 }
 
 /// Connects from the host to the guest's TCP echo service (through QEMU's
