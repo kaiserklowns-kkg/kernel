@@ -645,6 +645,23 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move 182 -103",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
+    // Keeping apps in the dock (ADR-0109): Super and "calc"; a right click
+    // on the first result (its row from 376,360) keeps Calculator; Escape.
+    // With no window open its icon is the dock's third (from 672,736); a
+    // click there starts it. Core keeps it: the next boot shows it.
+    b"@monitor sendkey meta_l",
+    b"@keys calc",
+    b"@monitor mouse_move -3000 -3000",
+    b"@monitor mouse_move 500 376",
+    b"@monitor mouse_button 2",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: Calculator kept in the dock",
+    b"@monitor sendkey esc",
+    b"@monitor mouse_move 196 384",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: started app.oceans.calculator",
+    b"app stop app.oceans.calculator\r\n",
     b"@monitor device_del deskmouse",
     // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
     // Down goes back to 75%, Mute mutes again.
@@ -828,6 +845,8 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
 const REBOOT_EXPECT: &[Expect] = &[
     // The volume the first boot left (ADR-0100), set again by Core.
     Expect::Contains("core: volume 70%, kept from before"),
+    // The dock the first boot left (ADR-0109).
+    Expect::Contains("desktop: 1 app kept in the dock"),
     Expect::Contains("hda: volume 70%"),
     // Switching off (ADR-0085): the system stopped in order.
     Expect::Line("Stopping the system, then switching off..."),
@@ -1065,6 +1084,8 @@ const SHELL_EXPECT: &[Expect] = &[
     // Search (ADR-0108): an app and a file of Home, found and opened.
     Expect::Contains("desktop: opening app.oceans.calculator, from search"),
     Expect::Contains("desktop: opening picture.png with app.oceans.viewer, from search"),
+    // Kept in the dock (ADR-0109), by Core.
+    Expect::Contains("core: dock: app.oceans.calculator kept"),
     // The system volume (ADR-0100): at full on a fresh disk; set from the
     // shell, the driver applies it and Core keeps it; the panel's slider
     // and Mute go the same way.
@@ -1341,7 +1362,9 @@ impl Expect {
 }
 /// Each smoke boot, start to finish. Boot 1 runs ~150 scripted steps, many
 /// with QEMU monitor pauses; CI runners without KVM are slow.
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(600);
+/// 900 s since ADR-0109 (the debug build reached 560 of 600); the kernel's
+/// self-test waits as long (`kernel/src/process/self_test.rs`).
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(900);
 /// How long the last command waits for the host's echo probes.
 const PROBE_WAIT: Duration = Duration::from_secs(30);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).

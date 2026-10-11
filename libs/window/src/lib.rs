@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+pub mod dock;
 pub mod proto;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};

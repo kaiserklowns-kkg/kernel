@@ -447,6 +447,10 @@ impl Service {
                     }
                     return true;
                 }
+                // The second button keeps apps in the dock (ADR-0109).
+                if button == 2 && pressed && self.desktop.dialog.is_none() {
+                    return self.right_click(x, y, w, h);
+                }
                 return button == 1 && pressed && self.click(x, y, w, h);
             }
             _ => return false,
@@ -597,8 +601,7 @@ impl Service {
     }
 
     fn click(&mut self, x: i32, y: i32, width: i32, height: i32) -> bool {
-        let mut windows: Vec<u32> = self.windows.frames().iter().map(|f| f.id).collect();
-        windows.sort_unstable();
+        let windows = self.dock_windows();
         let hit = self.desktop.hit(x, y, width, height, &windows);
         match hit {
             // The speaker and its panel (ADR-0100).
@@ -689,17 +692,27 @@ impl Service {
                 }
                 true
             }
-            Hit::TaskbarWindow(id) => {
-                let shown = self
-                    .windows
-                    .frames()
-                    .iter()
-                    .any(|f| f.id == id && !f.minimized);
-                if shown && self.windows.focus() == Focus::Window(id) {
-                    self.windows.minimize(id);
-                } else {
-                    self.windows.set_focus(Focus::Window(id));
+            // A kept app (ADR-0109): its first window, as a window's icon
+            // does; none open, it starts.
+            Hit::DockPinned(index) => {
+                let Some((id, name)) = self
+                    .desktop
+                    .kept()
+                    .get(index)
+                    .map(|&(id, name)| (String::from(id), String::from(name)))
+                else {
+                    return false;
+                };
+                let listed: Vec<(u32, &str)> =
+                    windows.iter().map(|(w, app)| (*w, app.as_str())).collect();
+                match oceans_window::dock::first_window(&name, &listed) {
+                    Some(window) => self.taskbar_window(window),
+                    None => self.launch(&id, ""),
                 }
+                true
+            }
+            Hit::TaskbarWindow(id) => {
+                self.taskbar_window(id);
                 true
             }
             Hit::TerminalMinimize => {
@@ -759,6 +772,99 @@ impl Service {
                     true,
                 );
             }
+        }
+    }
+
+    /// The windows as the dock needs them: id and app name.
+    fn dock_windows(&self) -> Vec<desktop::DockWindow> {
+        self.windows
+            .frames()
+            .iter()
+            .map(|f| (f.id, f.app.clone()))
+            .collect()
+    }
+
+    /// A window's icon in the dock: like other docks, it brings the window
+    /// forward, or minimizes it if it is in front with the keyboard.
+    fn taskbar_window(&mut self, id: u32) {
+        let shown = self
+            .windows
+            .frames()
+            .iter()
+            .any(|f| f.id == id && !f.minimized);
+        if shown && self.windows.focus() == Focus::Window(id) {
+            self.windows.minimize(id);
+        } else {
+            self.windows.set_focus(Focus::Window(id));
+        }
+    }
+
+    /// A right click (ADR-0109): on an app's tile or search result, or on
+    /// a window's icon, its app is kept in the dock; on a kept app's icon,
+    /// taken out. `true` if the screen changes.
+    fn right_click(&mut self, x: i32, y: i32, width: i32, height: i32) -> bool {
+        let windows = self.dock_windows();
+        let id = match self.desktop.hit(x, y, width, height, &windows) {
+            Hit::StartApp(index) => self.desktop.apps.get(index).map(|a| a.id.clone()),
+            Hit::Found(index) => match self.desktop.found.get(index) {
+                Some(desktop::Found::App(app)) => self.desktop.apps.get(*app).map(|a| a.id.clone()),
+                _ => None,
+            },
+            Hit::DockPinned(index) => self
+                .desktop
+                .kept()
+                .get(index)
+                .map(|&(id, _)| String::from(id)),
+            Hit::TaskbarWindow(window) => windows
+                .iter()
+                .find(|(w, _)| *w == window)
+                .and_then(|(_, name)| self.desktop.apps.iter().find(|a| &a.name == name))
+                .map(|a| a.id.clone()),
+            _ => None,
+        };
+        let Some(id) = id else {
+            return false;
+        };
+        let keep = !self.desktop.pinned.contains(&id);
+        if keep && self.desktop.pinned.len() >= oceans_window::dock::MAX_PINNED {
+            self.toast(
+                String::from("The dock is full: take an app out first."),
+                true,
+            );
+            return true;
+        }
+        let Some(core) = self.core else {
+            return false;
+        };
+        let mut data = Vec::with_capacity(1 + id.len());
+        data.push(u8::from(keep));
+        data.extend_from_slice(id.as_bytes());
+        let mut reply = [0u8; 256];
+        let name = self.name_of(&id);
+        match core.call(op::PIN, &data, &[], &mut reply) {
+            Ok(got) => {
+                let text = core::str::from_utf8(&reply[..got.len]).unwrap_or("");
+                self.desktop.pinned = oceans_window::dock::decode(text);
+                let what = if keep { "kept in" } else { "taken out of" };
+                say(self.log, format_args!("desktop: {name} {what} the dock"));
+                self.toast(alloc::format!("{name} {what} the dock"), false);
+            }
+            Err((error, _)) => {
+                self.toast(alloc::format!("{name}: {}", error.message()), true);
+            }
+        }
+        true
+    }
+
+    /// The apps kept in the dock, from Core (ADR-0109).
+    fn refresh_pinned(&mut self) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 256];
+        if let Ok(got) = core.call(op::PINNED, &[], &[], &mut reply) {
+            let text = core::str::from_utf8(&reply[..got.len]).unwrap_or("");
+            self.desktop.pinned = oceans_window::dock::decode(text);
         }
     }
 
@@ -1116,7 +1222,8 @@ impl Service {
                 .iter()
                 .zip(&self.desktop.apps)
                 .any(|(a, b)| a.id != b.id || a.version != b.version || a.running != b.running);
-        if apps.len() != self.desktop.apps.len() {
+        let counted = apps.len() != self.desktop.apps.len();
+        if counted {
             say(
                 self.log,
                 format_args!("desktop: {} apps in the launcher", apps.len()),
@@ -1124,6 +1231,21 @@ impl Service {
         }
         if changed {
             self.desktop.apps = apps;
+        }
+        // At start, and when apps come or go: the dock's (ADR-0109); Core
+        // keeps only installed ones.
+        if counted {
+            self.refresh_pinned();
+            let kept = self.desktop.kept().len();
+            if kept > 0 {
+                say(
+                    self.log,
+                    format_args!(
+                        "desktop: {kept} app{} kept in the dock",
+                        if kept == 1 { "" } else { "s" }
+                    ),
+                );
+            }
         }
         changed
     }

@@ -49,8 +49,8 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use oceans_core_proto::{
-    Decision, MAX_DATA, Status, access, decision, display_grant, field, op, outcome, run_flags,
-    source,
+    Decision, MAX_DATA, MAX_PINNED, Status, access, decision, display_grant, field, op, outcome,
+    run_flags, source,
 };
 use oceans_fs_proto::{FsError, Kind, Node, flags};
 use oceans_package::{Package, PackageError, Permission, Runtime, TrustedKey, Version};
@@ -76,6 +76,8 @@ const WEB_APP: &str = "a web app: open it from Apps in the Oceans web experience
 const TRUST_FILE: &str = "trust.keys";
 /// The system volume the user set (ADR-0100), in `/system`.
 const VOLUME_FILE: &str = "volume";
+/// The apps kept in the dock (ADR-0109), in `/system`: ids, one per line.
+const DOCK_FILE: &str = "dock";
 /// `FIND` (ADR-0108): the most entries of Home it looks at, how deep in
 /// folders, and the most names it gives.
 const FIND_VISIT: usize = 1000;
@@ -664,6 +666,68 @@ impl Core {
         Ok(())
     }
 
+    /// The apps kept in the dock (ADR-0109), from `/system/dock`: installed
+    /// apps only, no repeats, at most [`MAX_PINNED`].
+    fn pinned(&self) -> Vec<String> {
+        let bytes = read_path(&self.system_dir, DOCK_FILE).unwrap_or_default();
+        let text = core::str::from_utf8(&bytes).unwrap_or("");
+        let mut pinned: Vec<String> = Vec::new();
+        for id in text.lines().map(str::trim) {
+            if pinned.len() < MAX_PINNED
+                && self.apps.contains_key(id)
+                && !pinned.iter().any(|p| p == id)
+            {
+                pinned.push(id.to_owned());
+            }
+        }
+        pinned
+    }
+
+    /// `PINNED`'s reply: the ids joined by `\n`, as many whole ones as fit.
+    fn pinned_reply(&self, pinned: &[String], reply: &mut Vec<u8>) {
+        for id in pinned {
+            let extra = usize::from(!reply.is_empty());
+            if reply.len() + extra + id.len() > MAX_DATA {
+                break;
+            }
+            if extra == 1 {
+                reply.push(b'\n');
+            }
+            reply.extend_from_slice(id.as_bytes());
+        }
+    }
+
+    /// `PIN` (ADR-0109): keeps an installed app in the dock, or takes one
+    /// out; kept in `/system/dock` across reboots.
+    fn pin(&mut self, data: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        let (&keep, id) = data.split_first().ok_or(Status::BadRequest)?;
+        let id = core::str::from_utf8(id).map_err(|_| Status::BadRequest)?;
+        let mut pinned = self.pinned();
+        match keep {
+            1 => {
+                self.app(id)?;
+                if !pinned.iter().any(|p| p == id) {
+                    if pinned.len() >= MAX_PINNED {
+                        return Err(Status::BadRequest.into());
+                    }
+                    pinned.push(id.to_owned());
+                }
+            }
+            0 => pinned.retain(|p| p != id),
+            _ => return Err(Status::BadRequest.into()),
+        }
+        write_file(&self.system_dir, DOCK_FILE, pinned.join("\n").as_bytes()).map_err(io)?;
+        say(
+            self.log,
+            format_args!(
+                "core: dock: {id} {}",
+                if keep == 1 { "kept" } else { "taken out" }
+            ),
+        );
+        self.pinned_reply(&pinned, reply);
+        Ok(())
+    }
+
     /// At boot: the volume the user left (ADR-0100), if one was kept.
     fn restore_volume(&mut self) {
         let Ok(bytes) = read_path(&self.system_dir, VOLUME_FILE) else {
@@ -1088,6 +1152,11 @@ impl Core {
                         _ => Err(Status::BadRequest.into()),
                     },
                     op::FIND => self.find(data, reply),
+                    op::PINNED => {
+                        self.pinned_reply(&self.pinned(), reply);
+                        Ok(())
+                    }
+                    op::PIN => self.pin(data, reply),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;

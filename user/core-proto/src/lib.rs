@@ -111,6 +111,14 @@ pub mod op {
     /// relative to Home joined by `\n`, as many as fit (ADR-0108). Names
     /// only: nothing of what they hold.
     pub const FIND: u64 = 24;
+    /// → the apps kept in the dock (ADR-0109): ids joined by `\n`, in
+    /// their order; only installed apps.
+    pub const PINNED: u64 = 25;
+    /// data = `[keep u8][id]`: keeps app `id` in the dock (1) or takes it
+    /// out (0), kept across reboots → the dock's apps, as `PINNED`.
+    /// `NotFound` for an app not installed; `BadRequest` past
+    /// [`crate::MAX_PINNED`].
+    pub const PIN: u64 = 26;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -161,7 +169,8 @@ pub mod access {
             | op::TRUSTED
             | op::WEB_BUNDLE
             | op::VOLUME
-            | op::FIND => QUERY,
+            | op::FIND
+            | op::PINNED => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -171,7 +180,7 @@ pub mod access {
             | op::WINDOWS
             | op::TRUST => MANAGE,
             // The user's setting, as a decision is (ADR-0100).
-            op::DECIDE | op::ACCEPT | op::SET_VOLUME => DECIDE,
+            op::DECIDE | op::ACCEPT | op::SET_VOLUME | op::PIN => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.
@@ -371,6 +380,9 @@ impl CoreError {
 
 /// Largest request or reply data.
 pub const MAX_DATA: usize = 248;
+/// Apps kept in the dock at most (ADR-0109; `oceans_window::dock` keeps
+/// the same).
+pub const MAX_PINNED: usize = 8;
 /// Longest app id.
 pub const MAX_ID: usize = 64;
 

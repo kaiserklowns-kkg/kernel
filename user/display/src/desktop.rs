@@ -23,7 +23,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use oceans_window::{BUTTON_STEP, CLOSE_SIZE, Frame, TITLE_HEIGHT};
+use oceans_window::{BUTTON_STEP, CLOSE_SIZE, Frame, TITLE_HEIGHT, dock};
 
 use crate::canvas::{Canvas, Font, Rect, Rgb};
 
@@ -184,7 +184,12 @@ pub struct Desktop {
     /// What it found, best first, and the one Enter opens.
     pub found: Vec<Found>,
     pub chosen: usize,
+    /// The apps kept in the dock (ADR-0109), by id, as Core keeps them.
+    pub pinned: Vec<String>,
 }
+
+/// A window, as the dock needs it: its id and its app's name.
+pub type DockWindow = (u32, String);
 
 /// A search result (ADR-0108).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +232,8 @@ pub enum Hit {
     TaskbarTerminal,
     /// A window in the dock.
     TaskbarWindow(u32),
+    /// An app kept in the dock (ADR-0109), by its index among those shown.
+    DockPinned(usize),
     /// The Terminal's minimize button.
     TerminalMinimize,
     /// The Terminal itself.
@@ -553,7 +560,28 @@ impl Desktop {
     /// What a click on the desktop (the menu bar, the dock, the apps panel,
     /// dialogs, the Terminal: everything but app windows) hits, on a
     /// `width × height` screen; `windows` as the dock shows them.
-    pub fn hit(&self, x: i32, y: i32, width: i32, height: i32, windows: &[u32]) -> Hit {
+    /// The apps kept in the dock that are installed (ADR-0109): id and
+    /// name, in their order.
+    pub fn kept(&self) -> Vec<(&str, &str)> {
+        self.pinned
+            .iter()
+            .filter_map(|id| {
+                self.apps
+                    .iter()
+                    .find(|a| &a.id == id)
+                    .map(|a| (a.id.as_str(), a.name.as_str()))
+            })
+            .collect()
+    }
+
+    /// The dock's icons after the apps button and the Terminal (ADR-0109).
+    pub fn dock_entries(&self, windows: &[DockWindow]) -> Vec<dock::Entry> {
+        let kept: Vec<&str> = self.kept().into_iter().map(|(_, name)| name).collect();
+        let windows: Vec<(u32, &str)> = windows.iter().map(|(id, a)| (*id, a.as_str())).collect();
+        dock::entries(&kept, &windows)
+    }
+
+    pub fn hit(&self, x: i32, y: i32, width: i32, height: i32, windows: &[DockWindow]) -> Hit {
         if self.dialog.is_some() {
             // A modal question: only its buttons answer.
             return if allow(width, height).contains(x, y) {
@@ -564,7 +592,8 @@ impl Desktop {
                 Hit::Nothing
             };
         }
-        let count = 2 + windows.len();
+        let entries = self.dock_entries(windows);
+        let count = 2 + entries.len();
         if dock_item(width, height, 0, count).contains(x, y) || menu_mark().contains(x, y) {
             return Hit::Start;
         }
@@ -614,13 +643,16 @@ impl Desktop {
         if dock_item(width, height, 1, count).contains(x, y) {
             return Hit::TaskbarTerminal;
         }
-        if let Some(&id) = windows
+        if let Some(&entry) = entries
             .iter()
             .enumerate()
             .find(|&(i, _)| dock_item(width, height, i + 2, count).contains(x, y))
-            .map(|(_, id)| id)
+            .map(|(_, entry)| entry)
         {
-            return Hit::TaskbarWindow(id);
+            return match entry {
+                dock::Entry::Pinned(index) => Hit::DockPinned(index),
+                dock::Entry::Window(id) => Hit::TaskbarWindow(id),
+            };
         }
         if !self.terminal_hidden {
             if terminal_minimize(width, height).contains(x, y) {
@@ -834,7 +866,13 @@ impl Desktop {
     fn draw_dock(&self, canvas: &mut Canvas, windows: &[WindowView<'_>]) {
         let (w, h) = (canvas.width, canvas.height);
         let shown = taskbar_windows(windows);
-        let count = 2 + shown.len();
+        let listed: Vec<DockWindow> = shown
+            .iter()
+            .map(|view| (view.frame.id, view.frame.app.clone()))
+            .collect();
+        let entries = self.dock_entries(&listed);
+        let kept = self.kept();
+        let count = 2 + entries.len();
         let d = dock(w, h, count);
         canvas.shadow(d, 10, 50);
         canvas.tint(Rect::new(d.x - 1, d.y - 1, d.w + 2, d.h + 2), 19, BLACK, 30);
@@ -857,12 +895,27 @@ impl Desktop {
         apps_icon(canvas, start);
         let term = item(canvas, 1, "Terminal", !self.terminal_hidden);
         terminal_icon(canvas, term);
-        for (i, view) in shown.iter().enumerate() {
-            let r = item(canvas, i + 2, &view.frame.app, true);
-            app_icon(canvas, r, &view.frame.app);
-            if view.frame.minimized {
-                // Put away: the icon is a little faded.
-                canvas.tint(r, 12, WHITE, 90);
+        for (i, entry) in entries.iter().enumerate() {
+            match *entry {
+                // A kept app (ADR-0109): a dot while one of its windows is
+                // open.
+                dock::Entry::Pinned(index) => {
+                    let name = kept.get(index).map_or("?", |&(_, name)| name);
+                    let open = shown.iter().any(|view| view.frame.app == name);
+                    let r = item(canvas, i + 2, name, open);
+                    app_icon(canvas, r, name);
+                }
+                dock::Entry::Window(id) => {
+                    let Some(view) = shown.iter().find(|view| view.frame.id == id) else {
+                        continue;
+                    };
+                    let r = item(canvas, i + 2, &view.frame.app, true);
+                    app_icon(canvas, r, &view.frame.app);
+                    if view.frame.minimized {
+                        // Put away: the icon is a little faded.
+                        canvas.tint(r, 12, WHITE, 90);
+                    }
+                }
             }
         }
 
