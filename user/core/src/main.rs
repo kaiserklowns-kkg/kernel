@@ -78,6 +78,9 @@ const TRUST_FILE: &str = "trust.keys";
 const VOLUME_FILE: &str = "volume";
 /// The apps kept in the dock (ADR-0109), in `/system`: ids, one per line.
 const DOCK_FILE: &str = "dock";
+/// The user's account (ADR-0110), in `/system`: the name and the
+/// password's Argon2id hash.
+const USER_FILE: &str = "user";
 /// `FIND` (ADR-0108): the most entries of Home it looks at, how deep in
 /// folders, and the most names it gives.
 const FIND_VISIT: usize = 1000;
@@ -342,6 +345,11 @@ struct Core {
     next_proposal: u32,
     /// Services started at boot (ADR-0049), kept in `/system/services`.
     enabled: BTreeSet<String>,
+    /// The user's account (ADR-0110), from `/system/user`; `None` if the
+    /// file is damaged (the screen then stays locked), and the wait after
+    /// wrong passwords.
+    account: Option<oceans_account::Record>,
+    throttle: oceans_account::Throttle,
     /// Restarts so far this boot, and those waiting for their time.
     restarts: BTreeMap<String, u32>,
     pending_restarts: Vec<(String, u64)>,
@@ -430,12 +438,15 @@ impl Core {
             restarts: BTreeMap::new(),
             pending_restarts: Vec::new(),
             stale: 0,
+            account: Some(oceans_account::Record::default()),
+            throttle: oceans_account::Throttle::default(),
         };
         core.load_apps();
         core.load_decisions();
         core.install_bundled(directory);
         core.load_enabled();
         core.restore_volume();
+        core.load_account();
         say(
             log,
             format_args!(
@@ -726,6 +737,103 @@ impl Core {
         );
         self.pinned_reply(&pinned, reply);
         Ok(())
+    }
+
+    /// At boot: the user's account (ADR-0110). None kept: no password.
+    fn load_account(&mut self) {
+        self.account = match read_path(&self.system_dir, USER_FILE) {
+            Err(_) => Some(oceans_account::Record::default()),
+            Ok(bytes) => core::str::from_utf8(&bytes)
+                .ok()
+                .and_then(oceans_account::Record::decode),
+        };
+        match &self.account {
+            Some(account) if account.secret.is_some() => {
+                say(
+                    self.log,
+                    format_args!("core: user: {}, with a password", account.name),
+                );
+            }
+            Some(_) => {}
+            None => say(
+                self.log,
+                format_args!("core: user: /system/user is damaged; the screen stays locked"),
+            ),
+        }
+    }
+
+    fn save_account(&mut self, account: oceans_account::Record) -> Result<(), Refusal> {
+        write_file(&self.system_dir, USER_FILE, account.encode().as_bytes()).map_err(io)?;
+        self.account = Some(account);
+        Ok(())
+    }
+
+    /// `SET_PASSWORD` (ADR-0110): hashed with Argon2id and a new salt;
+    /// empty, no password.
+    fn set_password(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let password = core::str::from_utf8(data).map_err(|_| Status::BadRequest)?;
+        let mut account = self.account.clone().unwrap_or_default();
+        if password.is_empty() {
+            account.secret = None;
+        } else {
+            if !oceans_account::valid_password(password) {
+                return Err(Status::BadRequest.into());
+            }
+            let mut salt = [0u8; oceans_account::SALT_LEN];
+            oceans_rt::random(&mut salt).map_err(|_| Status::IoError)?;
+            let secret = oceans_account::Secret::new(password, salt, oceans_account::DEFAULT)
+                .ok_or(Status::IoError)?;
+            account.secret = Some(secret);
+        }
+        let set = account.secret.is_some();
+        self.save_account(account)?;
+        self.throttle.succeeded();
+        self.record(format_args!(
+            "{} the user's password",
+            if set { "set" } else { "removed" }
+        ));
+        Ok(())
+    }
+
+    /// `SET_NAME` (ADR-0110).
+    fn set_name(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let name = core::str::from_utf8(data).map_err(|_| Status::BadRequest)?;
+        if !oceans_account::valid_name(name) {
+            return Err(Status::BadRequest.into());
+        }
+        let mut account = self.account.clone().unwrap_or_default();
+        account.name = name.to_owned();
+        self.save_account(account)?;
+        say(self.log, format_args!("core: user: named {name}"));
+        Ok(())
+    }
+
+    /// `UNLOCK` (ADR-0110): the password checked against its hash; after a
+    /// few wrong ones, a wait before the next try.
+    fn unlock(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let now = oceans_rt::clock_ms();
+        if let Err(wait_ms) = self.throttle.check(now) {
+            return Err(Refusal {
+                status: Status::TooSoon,
+                text: Some(alloc::format!("{}", wait_ms.div_ceil(1000))),
+            });
+        }
+        let password = core::str::from_utf8(data).unwrap_or("");
+        let right = match &self.account {
+            Some(account) => account.secret.as_ref().is_none_or(|s| s.verify(password)),
+            None => false,
+        };
+        if right {
+            self.throttle.succeeded();
+            say(self.log, format_args!("core: user: unlocked"));
+            return Ok(());
+        }
+        self.throttle.failed(now);
+        self.record(format_args!(
+            "a wrong password at the lock screen ({} in a row)",
+            self.throttle.failures()
+        ));
+        Err(Status::WrongPassword.into())
     }
 
     /// At boot: the volume the user left (ADR-0100), if one was kept.
@@ -1157,6 +1265,19 @@ impl Core {
                         Ok(())
                     }
                     op::PIN => self.pin(data, reply),
+                    op::USER => {
+                        let (set, name) = match &self.account {
+                            Some(account) => (account.secret.is_some(), account.name.as_str()),
+                            // Damaged: as if a password were set.
+                            None => (true, oceans_account::DEFAULT_NAME),
+                        };
+                        reply.push(u8::from(set));
+                        reply.extend_from_slice(name.as_bytes());
+                        Ok(())
+                    }
+                    op::SET_PASSWORD => self.set_password(data),
+                    op::SET_NAME => self.set_name(data),
+                    op::UNLOCK => self.unlock(data),
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;

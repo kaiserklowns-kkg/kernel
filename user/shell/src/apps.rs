@@ -507,6 +507,74 @@ fn permission_reply(bytes: &[u8]) -> Option<(Permission, Decision)> {
 }
 
 impl Shell {
+    /// `user`, `user name NAME`, `user password PASSWORD`, `user password
+    /// --remove` (ADR-0110): the user's account, kept by Core. A password
+    /// locks the screen at start and with Super+L.
+    pub(super) fn user(&self, words: &[&str]) {
+        let Some(core) = self.core() else {
+            return self.print(format_args!(
+                "user: this shell cannot reach Oceans Core\r\n"
+            ));
+        };
+        let mut reply = [0u8; 64];
+        let result = match words {
+            [] => match core.call(op::USER, &[], &[], &mut reply) {
+                Ok(got) if got.len >= 1 => {
+                    let name = core::str::from_utf8(&reply[1..got.len]).unwrap_or("?");
+                    let password = if reply[0] != 0 {
+                        "a password locks the screen"
+                    } else {
+                        "no password"
+                    };
+                    return self.print(format_args!("user: {name}, {password}\r\n"));
+                }
+                Ok(_) => return self.print(format_args!("user: no answer\r\n")),
+                Err((error, _)) => Err(error),
+            },
+            ["name", words @ ..] if !words.is_empty() => {
+                let mut joined = Buffer::<64>::new();
+                for (i, word) in words.iter().enumerate() {
+                    let _ = write!(joined, "{}{word}", if i == 0 { "" } else { " " });
+                }
+                let name = joined.as_str();
+                core.call(op::SET_NAME, name.as_bytes(), &[], &mut reply)
+                    .map(|_| self.print(format_args!("user: named {name}\r\n")))
+                    .map_err(|(error, _)| error)
+            }
+            ["password", "--remove"] => core
+                .call(op::SET_PASSWORD, &[], &[], &mut reply)
+                .map(|_| {
+                    self.print(format_args!(
+                        "user: password removed; the screen is not locked\r\n"
+                    ))
+                })
+                .map_err(|(error, _)| error),
+            ["password", password] => {
+                match core.call(op::SET_PASSWORD, password.as_bytes(), &[], &mut reply) {
+                    Ok(_) => {
+                        self.print(format_args!(
+                            "user: password set; Super+L locks the screen\r\n"
+                        ));
+                        Ok(())
+                    }
+                    Err((CoreError::Status(Status::BadRequest), _)) => {
+                        return self
+                            .print(format_args!("user: a password has 4 to 64 characters\r\n"));
+                    }
+                    Err((error, _)) => Err(error),
+                }
+            }
+            _ => {
+                return self.print(format_args!(
+                    "usage: user [name NAME | password PASSWORD | password --remove]\r\n"
+                ));
+            }
+        };
+        if let Err(error) = result {
+            self.print(format_args!("user: {}\r\n", error.message()));
+        }
+    }
+
     /// `volume [LEVEL | mute | unmute]`: the system volume (ADR-0100), kept
     /// by Core. A level (0 to 100) also unmutes, as volume keys do.
     pub(super) fn volume(&self, words: &[&str]) {

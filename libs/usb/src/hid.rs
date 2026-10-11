@@ -56,6 +56,8 @@ pub const TILE_DOWN: u8 = 0xa7;
 pub const FULL_SCREEN: u8 = 0xa8;
 /// Super pressed and let go alone: `display::KEY_SEARCH` (ADR-0108).
 pub const SEARCH: u8 = 0xa9;
+/// Super+L: `display::KEY_LOCK` (ADR-0110).
+pub const LOCK: u8 = 0xaa;
 
 /// What a key pressed with Super sends: arranging windows; other keys
 /// with Super send nothing.
@@ -66,6 +68,7 @@ fn arrange(key: u8) -> Option<u8> {
         0x52 => Some(TILE_UP),
         0x51 => Some(TILE_DOWN),
         0x09 => Some(FULL_SCREEN),
+        0x0f => Some(LOCK),
         _ => None,
     }
 }
@@ -294,6 +297,7 @@ mod tests {
                 keys(LEFT_GUI, [0x52, 0, 0, 0, 0, 0]),
                 keys(LEFT_GUI, [0x51, 0, 0, 0, 0, 0]),
                 keys(LEFT_GUI, [0x09, 0, 0, 0, 0, 0]),
+                keys(LEFT_GUI, [0x0f, 0, 0, 0, 0, 0]),
                 // Other keys with Super: nothing; without it, as ever.
                 keys(LEFT_GUI, [0x04, 0, 0, 0, 0, 0]),
                 keys(0, [0; 6]),
@@ -308,6 +312,7 @@ mod tests {
                 TILE_UP,
                 TILE_DOWN,
                 FULL_SCREEN,
+                LOCK,
                 0x82,
                 b'f'
             ]

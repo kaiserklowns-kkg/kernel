@@ -119,6 +119,18 @@ pub mod op {
     /// `NotFound` for an app not installed; `BadRequest` past
     /// [`crate::MAX_PINNED`].
     pub const PIN: u64 = 26;
+    /// → `[password set u8][name]`: the user's account (ADR-0110). With a
+    /// password, the desktop starts locked.
+    pub const USER: u64 = 27;
+    /// data = `[password]` (4 to 64 bytes; empty: none) → sets the user's
+    /// password, kept as an Argon2id hash in `/system/user`.
+    pub const SET_PASSWORD: u64 = 28;
+    /// data = `[name]` (1 to 32 bytes): the user's name.
+    pub const SET_NAME: u64 = 29;
+    /// data = `[password]` → `Ok` if it is the user's: the lock screen
+    /// opens. `WrongPassword`; after a few, `TooSoon`, its reply the
+    /// seconds to wait (decimal). Without a password, `Ok`.
+    pub const UNLOCK: u64 = 30;
 }
 
 /// What a `core` client end may do (ADR-0048). The unbadged end has all.
@@ -170,7 +182,9 @@ pub mod access {
             | op::WEB_BUNDLE
             | op::VOLUME
             | op::FIND
-            | op::PINNED => QUERY,
+            | op::PINNED
+            | op::USER
+            | op::UNLOCK => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -180,7 +194,12 @@ pub mod access {
             | op::WINDOWS
             | op::TRUST => MANAGE,
             // The user's setting, as a decision is (ADR-0100).
-            op::DECIDE | op::ACCEPT | op::SET_VOLUME | op::PIN => DECIDE,
+            op::DECIDE
+            | op::ACCEPT
+            | op::SET_VOLUME
+            | op::PIN
+            | op::SET_PASSWORD
+            | op::SET_NAME => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.
@@ -318,6 +337,11 @@ pub enum Status {
     NotAService = 13,
     /// Another proposed install waits for the user (ADR-0061).
     Pending = 14,
+    /// `UNLOCK` (ADR-0110): not the password.
+    WrongPassword = 15,
+    /// `UNLOCK` after too many wrong passwords: the reply is how many
+    /// seconds to wait, in decimal.
+    TooSoon = 16,
 }
 
 impl Status {
@@ -337,6 +361,8 @@ impl Status {
             12 => Self::Denied,
             13 => Self::NotAService,
             14 => Self::Pending,
+            15 => Self::WrongPassword,
+            16 => Self::TooSoon,
             _ => Self::BadRequest,
         }
     }
@@ -358,6 +384,8 @@ impl Status {
             Self::Denied => "not allowed by this capability",
             Self::NotAService => "not a service (only services start at boot)",
             Self::Pending => "another install is waiting for confirmation on the device",
+            Self::WrongPassword => "wrong password",
+            Self::TooSoon => "too many wrong passwords: wait",
         }
     }
 }

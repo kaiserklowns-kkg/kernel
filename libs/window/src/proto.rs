@@ -194,6 +194,9 @@ pub const KEY_FULL_SCREEN: u8 = 0xa8;
 /// ADR-0108): the desktop's launcher search. The desktop's, never an
 /// app's.
 pub const KEY_SEARCH: u8 = 0xa9;
+/// Super+L (`oceans_abi::display::KEY_LOCK`, ADR-0110): the desktop's
+/// lock screen. Never an app's.
+pub const KEY_LOCK: u8 = 0xaa;
 /// Up and Down (`oceans_abi::display::KEY_UP`, `KEY_DOWN`): the search
 /// results they choose between while the launcher is open.
 pub const KEY_UP: u8 = 0x80;

@@ -186,6 +186,23 @@ pub struct Desktop {
     pub chosen: usize,
     /// The apps kept in the dock (ADR-0109), by id, as Core keeps them.
     pub pinned: Vec<String>,
+    /// The lock screen (ADR-0110).
+    pub lock: Lock,
+    /// What is typed into it (shown as dots), and what it says.
+    pub lock_input: String,
+    pub lock_note: String,
+    /// The user's name, as Core keeps it.
+    pub user_name: String,
+}
+
+/// Whether the screen is locked (ADR-0110).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lock {
+    /// Until Core says whether there is a password: nothing shows yet.
+    #[default]
+    Starting,
+    Locked,
+    Open,
 }
 
 /// A window, as the dock needs it: its id and its app's name.
@@ -412,6 +429,11 @@ pub fn tile(width: i32, height: i32, index: usize) -> Rect {
         TILE_WIDTH,
         TILE_HEIGHT,
     )
+}
+
+/// The lock screen's password field (ADR-0110), in the middle.
+pub fn lock_field(width: i32, height: i32) -> Rect {
+    Rect::new((width - 320) / 2, height / 2, 320, 44)
 }
 
 /// The apps panel's search field (ADR-0108), right of its title.
@@ -667,6 +689,11 @@ impl Desktop {
 
     pub fn draw(&self, canvas: &mut Canvas, now_ms: u64, windows: &[WindowView<'_>]) {
         canvas.draw_wallpaper();
+        // Locked (ADR-0110): the lock screen alone; no window, the Terminal,
+        // a notification or a dialog shows.
+        if self.lock != Lock::Open {
+            return self.draw_lock_screen(canvas);
+        }
 
         if !self.terminal_hidden {
             self.draw_terminal(canvas);
@@ -1079,6 +1106,56 @@ impl Desktop {
         };
         let footer_y = panel.y + panel.h - 48;
         canvas.text(panel.x + 24, footer_y + 16, &note, Font::Body, MUTED, panel);
+    }
+
+    /// The lock screen (ADR-0110): the time, the user, and a field for the
+    /// password, shown as dots.
+    fn draw_lock_screen(&self, canvas: &mut Canvas) {
+        let (w, h) = (canvas.width, canvas.height);
+        canvas.dim(BLACK, 110);
+        let centre = |canvas: &mut Canvas, y: i32, text: &str, font: Font, colour: Rgb| {
+            let width = canvas.measure(text, font);
+            canvas.text(
+                (w - width) / 2,
+                y,
+                text,
+                font,
+                colour,
+                Rect::new(0, 0, w, h),
+            );
+        };
+        centre(canvas, h / 2 - 190, &self.clock, Font::Title, WHITE);
+        if self.lock == Lock::Starting {
+            return centre(canvas, h / 2, "Starting Oceans...", Font::Body, WHITE);
+        }
+        let avatar = Rect::new((w - 72) / 2, h / 2 - 130, 72, 72);
+        app_icon(canvas, avatar, &self.user_name);
+        centre(canvas, h / 2 - 44, &self.user_name, Font::Strong, WHITE);
+        let field = lock_field(w, h);
+        canvas.round_fill(field, 12, ACCENT);
+        let inner = inset(field, 2);
+        canvas.round_fill(inner, 10, WHITE);
+        if self.lock_input.is_empty() {
+            canvas.text(
+                inner.x + 14,
+                inner.y + 10,
+                "Password",
+                Font::Body,
+                MUTED,
+                inner,
+            );
+        } else {
+            let dots = self.lock_input.chars().count().min(24) as i32;
+            for i in 0..dots {
+                canvas.circle(inner.x + 18 + i * 14, inner.y + inner.h / 2, 4, TEXT);
+            }
+        }
+        let note = if self.lock_note.is_empty() {
+            "Type your password, then Enter"
+        } else {
+            self.lock_note.as_str()
+        };
+        centre(canvas, field.y + field.h + 16, note, Font::Body, WHITE);
     }
 
     fn draw_dialog(&self, canvas: &mut Canvas, dialog: &Dialog) {

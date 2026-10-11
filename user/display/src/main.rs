@@ -257,6 +257,12 @@ fn main(start: Start) -> i64 {
         ),
     }
     service.refresh_apps();
+    // The lock screen (ADR-0110): open at once without Core (no password
+    // can be set), else when Core says whether there is one.
+    if service.core.is_none() {
+        service.desktop.lock = desktop::Lock::Open;
+    }
+    service.refresh_user();
     service.refresh_volume();
     service.refresh_clock();
     service.refresh_terminal();
@@ -311,6 +317,9 @@ fn main(start: Start) -> i64 {
             let _ = oceans_rt::timer_set(notification, TICK, TICK_MS);
             let now = oceans_rt::clock_ms();
             dirty |= service.refresh_clock();
+            if service.desktop.lock == desktop::Lock::Starting {
+                dirty |= service.refresh_user();
+            }
             dirty |= service.refresh_terminal();
             if now.saturating_sub(last_apps) >= APPS_EVERY_MS {
                 last_apps = now;
@@ -393,6 +402,8 @@ impl Service {
                 };
                 self.desktop.pointer = (scale(x, x_max, w), scale(y, y_max, h));
             }
+            // Locked (ADR-0110): clicks reach nothing.
+            Kind::Button { .. } if self.desktop.lock != desktop::Lock::Open => return false,
             Kind::Button { button, pressed } => {
                 let (x, y) = self.desktop.pointer;
                 // The slider let go (ADR-0100): the level it shows is set.
@@ -463,7 +474,7 @@ impl Service {
             self.desktop.volume = Some((level, muted));
             return true;
         }
-        if self.desktop.dialog.is_none() {
+        if self.desktop.dialog.is_none() && self.desktop.lock == desktop::Lock::Open {
             let (x, y) = self.desktop.pointer;
             self.windows.pointer_moved(x, y);
         }
@@ -536,6 +547,22 @@ impl Service {
             };
             let mut terminal = Vec::new();
             for &byte in &keys[..count] {
+                // Locked (ADR-0110): the keys are the lock screen's, but for
+                // the volume keys.
+                if self.desktop.lock != desktop::Lock::Open {
+                    if let Some(key) = VolumeKey::of(byte) {
+                        self.volume_key(key);
+                    } else {
+                        self.lock_key(byte);
+                    }
+                    dirty = true;
+                    continue;
+                }
+                if byte == oceans_window::proto::KEY_LOCK {
+                    self.lock_screen();
+                    dirty = true;
+                    continue;
+                }
                 // Super alone (ADR-0108): the launcher's search, the
                 // desktop's whoever has the focus.
                 if byte == oceans_window::proto::KEY_SEARCH {
@@ -771,6 +798,107 @@ impl Service {
                     alloc::format!("{}: {}", self.name_of(id), error.message()),
                     true,
                 );
+            }
+        }
+    }
+
+    /// The user's account from Core (ADR-0110). While starting, it decides
+    /// the lock: locked with a password, else open. `true` if the screen
+    /// changes.
+    fn refresh_user(&mut self) -> bool {
+        let Some(core) = self.core else {
+            return false;
+        };
+        let mut reply = [0u8; 64];
+        let Ok(got) = core.call(op::USER, &[], &[], &mut reply) else {
+            return false;
+        };
+        if got.len < 1 {
+            return false;
+        }
+        self.desktop.user_name =
+            String::from(core::str::from_utf8(&reply[1..got.len]).unwrap_or("?"));
+        let password = reply[0] != 0;
+        if self.desktop.lock == desktop::Lock::Starting {
+            self.desktop.lock = if password {
+                say(self.log, format_args!("desktop: locked at start"));
+                desktop::Lock::Locked
+            } else {
+                desktop::Lock::Open
+            };
+        }
+        true
+    }
+
+    /// Super+L (ADR-0110): with a password, the screen locks; the windows
+    /// and the Terminal stay as they are, unseen until it opens.
+    fn lock_screen(&mut self) {
+        self.refresh_user();
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 64];
+        let password = matches!(core.call(op::USER, &[], &[], &mut reply), Ok(got) if got.len >= 1 && reply[0] != 0);
+        if !password {
+            return self.toast(
+                String::from("Set a password first: user password ... in the Terminal"),
+                false,
+            );
+        }
+        self.desktop.lock = desktop::Lock::Locked;
+        self.desktop.start_open = false;
+        self.desktop.volume_open = false;
+        self.desktop.lock_input.clear();
+        self.desktop.lock_note.clear();
+        say(self.log, format_args!("desktop: locked"));
+    }
+
+    /// A key on the lock screen (ADR-0110): typed into the password (never
+    /// shown), Backspace, Escape to clear, Enter to try it with Core.
+    fn lock_key(&mut self, byte: u8) {
+        if self.desktop.lock != desktop::Lock::Locked {
+            return;
+        }
+        let desktop = &mut self.desktop;
+        match byte {
+            b'\r' => self.try_unlock(),
+            0x1b => desktop.lock_input.clear(),
+            0x08 | 0x7f => {
+                desktop.lock_input.pop();
+            }
+            0x20..=0x7e if desktop.lock_input.len() < 64 => {
+                desktop.lock_input.push(char::from(byte))
+            }
+            _ => {}
+        }
+    }
+
+    fn try_unlock(&mut self) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let password = core::mem::take(&mut self.desktop.lock_input);
+        let mut reply = [0u8; 16];
+        match core.call(op::UNLOCK, password.as_bytes(), &[], &mut reply) {
+            Ok(_) => {
+                self.desktop.lock = desktop::Lock::Open;
+                self.desktop.lock_note.clear();
+                say(self.log, format_args!("desktop: unlocked"));
+            }
+            Err((CoreError::Status(Status::TooSoon), got)) => {
+                let wait = core::str::from_utf8(&reply[..got.min(reply.len())]).unwrap_or("?");
+                self.desktop.lock_note = alloc::format!("Too many wrong passwords: wait {wait} s");
+                say(
+                    self.log,
+                    format_args!("desktop: unlock refused: wait {wait} s"),
+                );
+            }
+            Err((error, _)) => {
+                self.desktop.lock_note = String::from(match error {
+                    CoreError::Status(Status::WrongPassword) => "Wrong password: try again",
+                    _ => "The password cannot be checked now",
+                });
+                say(self.log, format_args!("desktop: unlock refused"));
             }
         }
     }

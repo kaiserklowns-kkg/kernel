@@ -340,6 +340,8 @@ pub mod display {
     /// Super pressed and let go alone (ADR-0108): the desktop opens the
     /// launcher's search, or closes it. No app sees it.
     pub const KEY_SEARCH: u8 = 0xa9;
+    /// Super+L (ADR-0110): the desktop locks the screen. No app sees it.
+    pub const KEY_LOCK: u8 = 0xaa;
     /// Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A as keyboards send them.
     pub const CTRL_A: u8 = 0x01;
     pub const CTRL_C: u8 = 0x03;

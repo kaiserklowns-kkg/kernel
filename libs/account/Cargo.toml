@@ -1,0 +1,11 @@
+[package]
+name = "oceans-account"
+description = "The user's account for Oceans: the password hashed with Argon2id, its record, and the wait after wrong passwords (ADR-0110)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Password hashing (RFC 9106), RustCrypto, MIT OR Apache-2.0.
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }

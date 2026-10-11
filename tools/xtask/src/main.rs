@@ -662,6 +662,21 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 0",
     b"@wait desktop: started app.oceans.calculator",
     b"app stop app.oceans.calculator\r\n",
+    // The lock screen (ADR-0110): a name and a password, then Super+L
+    // locks; its field (from 480,400, 320 by 44) is white. A wrong
+    // password is refused, the right one opens it. The password stays:
+    // the next boot starts locked.
+    b"user\r\n",
+    b"user name Kai\r\n",
+    b"user password abc\r\n",
+    b"user password oceans123\r\n",
+    b"@monitor sendkey meta_l-l",
+    b"@wait desktop: locked",
+    b"@screen 780 420 ffffff the lock screen's password field",
+    b"@keys nope\r",
+    b"@wait desktop: unlock refused",
+    b"@keys oceans123\r",
+    b"@wait desktop: unlocked",
     b"@monitor device_del deskmouse",
     // The volume keys (ADR-0101) on the USB keyboard: Up unmutes to 80%,
     // Down goes back to 75%, Mute mutes again.
@@ -847,6 +862,9 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("core: volume 70%, kept from before"),
     // The dock the first boot left (ADR-0109).
     Expect::Contains("desktop: 1 app kept in the dock"),
+    // The password the first boot set (ADR-0110): the desktop starts locked.
+    Expect::Contains("core: user: Kai, with a password"),
+    Expect::Contains("desktop: locked at start"),
     Expect::Contains("hda: volume 70%"),
     // Switching off (ADR-0085): the system stopped in order.
     Expect::Line("Stopping the system, then switching off..."),
@@ -1086,6 +1104,15 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("desktop: opening picture.png with app.oceans.viewer, from search"),
     // Kept in the dock (ADR-0109), by Core.
     Expect::Contains("core: dock: app.oceans.calculator kept"),
+    // The lock screen (ADR-0110).
+    Expect::Line("user: Oceans user, no password"),
+    Expect::Line("user: named Kai"),
+    Expect::Line("user: a password has 4 to 64 characters"),
+    Expect::Line("user: password set; Super+L locks the screen"),
+    Expect::Contains("core: audit: set the user's password"),
+    Expect::Contains("desktop: locked"),
+    Expect::Contains("core: audit: a wrong password at the lock screen (1 in a row)"),
+    Expect::Contains("core: user: unlocked"),
     // The system volume (ADR-0100): at full on a fresh disk; set from the
     // shell, the driver applies it and Core keeps it; the panel's slider
     // and Mute go the same way.

@@ -200,6 +200,7 @@ fn translate(code: u8) -> Option<u8> {
             (true, 0x48) => Some(d::KEY_TILE_UP),
             (true, 0x50) => Some(d::KEY_TILE_DOWN),
             (false, 0x21) => Some(d::KEY_FULL_SCREEN),
+            (false, 0x26) => Some(d::KEY_LOCK),
             _ => None,
         };
     }
