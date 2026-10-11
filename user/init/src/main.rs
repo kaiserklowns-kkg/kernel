@@ -56,6 +56,9 @@ use oceans_rt::{Buffer, Error, Handle, Start, power, prot, rights};
 oceans_rt::entry!(main);
 
 const MANIFEST: &str = "services.conf";
+/// What recovery mode starts (ADR-0122): storage, the network, the
+/// filesystem, the logs and the shell, made from the usual manifest.
+const RECOVERY_MANIFEST: &str = "services-recovery.conf";
 const MAX_SERVICES: usize = 32;
 /// Grants of one service. The file system holds one per program it
 /// publishes in /bin, so this grows with the system's programs.
@@ -296,22 +299,35 @@ fn main(start: Start) -> i64 {
         },
     };
 
+    // Recovery mode (ADR-0122): its own, smaller set of services.
+    let recovery = oceans_rt::boot_mode(sysinfo) == oceans_rt::sysinfo::mode::RECOVERY;
+    let chosen = if recovery && archive.find(RECOVERY_MANIFEST).is_some() {
+        say(format_args!("recovery mode: {RECOVERY_MANIFEST}"));
+        RECOVERY_MANIFEST
+    } else {
+        if recovery {
+            say(format_args!(
+                "recovery mode, but no {RECOVERY_MANIFEST}: the usual services"
+            ));
+        }
+        MANIFEST
+    };
     let Some(manifest) = archive
-        .find(MANIFEST)
+        .find(chosen)
         .and_then(|bytes| core::str::from_utf8(bytes).ok())
     else {
-        say(format_args!("no valid {MANIFEST} in the boot archive"));
+        say(format_args!("no valid {chosen} in the boot archive"));
         return EXIT_BAD_MANIFEST;
     };
     match parse(manifest, &mut init.services) {
         Ok(count) => init.count = count,
         Err((line, problem)) => {
-            say(format_args!("{MANIFEST}:{line}: {problem}"));
+            say(format_args!("{chosen}:{line}: {problem}"));
             return EXIT_BAD_MANIFEST;
         }
     }
     say(format_args!(
-        "{} services in {MANIFEST}{}",
+        "{} services in {chosen}{}",
         init.count,
         if test_mode { " (test mode)" } else { "" }
     ));

@@ -3,6 +3,7 @@
 //! ```text
 //! update status              the running release and the boot entries
 //! update apply PATH          verify an update and install it to start next
+//! update previous            the other slot's release starts first (ADR-0122)
 //! ```
 //!
 //! An update is a package (`.opk`, ADR-0046) with the id `system.oceans`:
@@ -47,7 +48,7 @@ oceans_rt::manifest!(b"grant out\n");
 oceans_rt::entry!(main);
 
 const USAGE: &str =
-    "usage: update status | apply PATH   (run update out use:fs [use:usbdisk] -- ...)";
+    "usage: update status | apply PATH | previous   (run update out use:fs [use:usbdisk] -- ...)";
 /// The boot partition: the stick Oceans started from.
 const ESP: &str = "usb";
 const SYSTEM_ID: &str = "system.oceans";
@@ -73,6 +74,7 @@ fn main(start: Start) -> i64 {
     let result = match words.as_slice() {
         ["status"] | [] => status(&mut out, &root, stick),
         ["apply", path] => apply(&mut out, &root, stick, path),
+        ["previous"] => previous(&mut out, &root, stick),
         _ => {
             let _ = writeln!(out, "{USAGE}");
             return EXIT_USAGE;
@@ -325,9 +327,52 @@ fn apply(out: &mut Out, root: &Node, stick: Option<Handle>, path: &str) -> Resul
         None,
     )?;
 
-    // 2. The configuration: the second location first, then the first, so
-    // one complete configuration is always there.
-    let conf = boot_configuration(target, &release, slot, &previous);
+    // 2. The configuration (ADR-0071).
+    write_configuration(root, &boot_configuration(target, &release, slot, &previous))?;
+    let _ = writeln!(
+        out,
+        "update: Oceans {release} installed in slot {target}; it starts at the next boot \
+         (the previous, {previous}, stays in the boot menu)"
+    );
+    Ok(())
+}
+
+/// Limine's configuration: the new release first (and, after it, the same
+/// in safe mode and in recovery mode, ADR-0122), the previous one after.
+/// `tools/xtask/src/hardware.rs` writes the same text for a new image.
+fn boot_configuration(new: char, release: &str, old: char, previous: &str) -> String {
+    let entry = |name: &str, slot: char, cmdline: &str| {
+        let cmdline = if cmdline.is_empty() {
+            String::new()
+        } else {
+            alloc::format!("    cmdline: {cmdline}\n")
+        };
+        alloc::format!(
+            "/{name}\n    protocol: limine\n    path: boot():/boot/{slot}/oceans-kernel\n\
+             {cmdline}    module_path: boot():/boot/{slot}/initrd\n"
+        )
+    };
+    alloc::format!(
+        "# Oceans boot configuration (ADR-0071), written by `update`.\n\
+         timeout: 3\n\n{}\n{}\n{}\n{}",
+        entry(&alloc::format!("Oceans {release}"), new, ""),
+        entry(
+            &alloc::format!("Oceans {release} (safe mode)"),
+            new,
+            "oceans.mode=safe"
+        ),
+        entry(
+            &alloc::format!("Oceans {release} (recovery)"),
+            new,
+            "oceans.mode=recovery"
+        ),
+        entry(&alloc::format!("Oceans {previous} (previous)"), old, "")
+    )
+}
+
+/// Writes `conf` in both places Limine looks: the second location first,
+/// then the first, so one complete configuration is always there.
+fn write_configuration(root: &Node, conf: &str) -> Result<(), String> {
     for (dir, name) in [
         (alloc::format!("{ESP}/boot/limine"), "limine.conf"),
         (ESP.to_string(), "limine.conf"),
@@ -341,26 +386,30 @@ fn apply(out: &mut Out, root: &Node, stick: Option<Handle>, path: &str) -> Resul
         parent.close();
         renamed.map_err(fs_error(&alloc::format!("{dir}/{name}")))?;
     }
-    let _ = writeln!(
-        out,
-        "update: Oceans {release} installed in slot {target}; it starts at the next boot \
-         (the previous, {previous}, stays in the boot menu)"
-    );
     Ok(())
 }
 
-/// Limine's configuration: the new release first, the previous one after.
-fn boot_configuration(new: char, release: &str, old: char, previous: &str) -> String {
-    let entry = |name: &str, slot: char| {
-        alloc::format!(
-            "/{name}\n    protocol: limine\n    path: boot():/boot/{slot}/oceans-kernel\n    \
-             module_path: boot():/boot/{slot}/initrd\n"
-        )
+/// `previous` (ADR-0122): the release in the other slot starts first from
+/// the next boot on, the one first now kept as the previous.
+fn previous(out: &mut Out, root: &Node, stick: Option<Handle>) -> Result<(), String> {
+    if secure_stick(root, stick)?.is_some() {
+        return Err(
+            "with Secure Boot, choose \"Oceans … (previous)\" in the boot menu: \
+             its configuration is signed and cannot be changed here"
+                .into(),
+        );
+    }
+    let first = first_slot(root)?;
+    let back = other(first);
+    let Some(release) = slot_release(root, back) else {
+        return Err(alloc::format!("slot {back} holds no release to go back to"));
     };
-    alloc::format!(
-        "# Oceans boot configuration (ADR-0071), written by `update`.\n\
-         timeout: 3\n\n{}\n{}",
-        entry(&alloc::format!("Oceans {release}"), new),
-        entry(&alloc::format!("Oceans {previous} (previous)"), old)
-    )
+    let now = slot_release(root, first).unwrap_or_else(|| "?".to_string());
+    write_configuration(root, &boot_configuration(back, &release, first, &now))?;
+    let _ = writeln!(
+        out,
+        "update: Oceans {release} (slot {back}) starts first from the next boot; \
+         {now} stays as the previous"
+    );
+    Ok(())
 }

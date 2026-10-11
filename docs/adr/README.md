@@ -128,5 +128,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0119](0119-notifications-at-the-bell.md) | The notifications at the bell: kept, newest first, a count of new ones, a phone-like panel with Clear | Accepted |
 | [0120](0120-icons-on-the-desktop.md) | Icons on the desktop: Home and the apps kept in Wave, down its right side; a double click opens | Accepted |
 | [0121](0121-top-bar-as-macos.md) | The top bar as macOS has it: the time and the app at the left; the layout, speaker, user, network, Control Center and bell at the right; the user's menu | Accepted |
+| [0122](0122-recovery.md) | Recovery (ABI 17): safe mode, by choice or after three unfinished boots; recovery mode (the disks, the network, a shell); `recovery` for a forgotten password and a factory reset; `update previous` | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

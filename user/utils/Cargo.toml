@@ -88,6 +88,11 @@ test = false
 bench = false
 
 [[bin]]
+name = "recovery"
+test = false
+bench = false
+
+[[bin]]
 name = "logkeep"
 test = false
 bench = false
@@ -125,5 +130,7 @@ oceans-core-proto.workspace = true
 oceans-hardware.workspace = true
 oceans-fat.workspace = true
 oceans-gpt.workspace = true
+# Setting a forgotten password in recovery mode (ADR-0122).
+oceans-account.workspace = true
 # BLAKE2B: checking a Secure Boot update before it is written (ADR-0092).
 blake2 = { version = "0.10.6", default-features = false }

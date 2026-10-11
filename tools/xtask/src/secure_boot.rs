@@ -86,14 +86,31 @@ pub const SLOT_RELEASE: &str = "release";
 pub const UPDATE_EFI: &str = "BOOTX64.EFI";
 pub const UPDATE_CONFIG: &str = "limine.conf";
 
-/// A slot's configuration: its own kernel and boot archive, by hash,
-/// started at once (the selector had the menu).
+/// A slot's configuration: its own kernel and boot archive, by hash; the
+/// usual system first, then the same in safe mode and in recovery mode
+/// (ADR-0122), in a menu of its own (a kernel command line cannot pass
+/// through the selector's chain loading).
 pub fn slot_config(release: &str, kernel: &[u8], initrd: &[u8]) -> String {
+    let (kernel, initrd) = (blake2b(kernel), blake2b(initrd));
+    let entry = |name: &str, cmdline: &str| {
+        let cmdline = if cmdline.is_empty() {
+            String::new()
+        } else {
+            format!("    cmdline: {cmdline}\n")
+        };
+        format!(
+            "/{name}\n    protocol: limine\n    path: boot():/{SLOT_KERNEL}#{kernel}\n\
+             {cmdline}    module_path: boot():/{SLOT_INITRD}#{initrd}\n"
+        )
+    };
     format!(
-        "serial: yes\ntimeout: 0\n\n/Oceans {release}\n    protocol: limine\n    \
-         path: boot():/{SLOT_KERNEL}#{}\n    module_path: boot():/{SLOT_INITRD}#{}\n",
-        blake2b(kernel),
-        blake2b(initrd)
+        "serial: yes\ntimeout: 3\n\n{}\n{}\n{}",
+        entry(&format!("Oceans {release}"), ""),
+        entry(&format!("Oceans {release} (safe mode)"), "oceans.mode=safe"),
+        entry(
+            &format!("Oceans {release} (recovery)"),
+            "oceans.mode=recovery"
+        ),
     )
 }
 
@@ -621,7 +638,10 @@ mod tests {
     #[test]
     fn slot_configurations_name_their_files_by_hash() {
         let conf = slot_config("0.1.0 alpha", b"kernel", b"archive");
-        assert!(conf.starts_with("serial: yes\ntimeout: 0\n\n/Oceans 0.1.0 alpha\n"));
+        assert!(conf.starts_with("serial: yes\ntimeout: 3\n\n/Oceans 0.1.0 alpha\n"));
+        // Safe mode and recovery (ADR-0122), each with its command line.
+        assert!(conf.contains("/Oceans 0.1.0 alpha (recovery)\n"));
+        assert!(conf.contains("\n    cmdline: oceans.mode=safe\n"));
         assert!(conf.contains(&format!(
             "\n    path: boot():/boot/oceans-kernel#{}\n",
             blake2b(b"kernel")

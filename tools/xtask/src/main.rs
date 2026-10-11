@@ -61,6 +61,7 @@ const USER_PROGRAMS: &[&str] = &[
     "lsusb",
     "sysreport",
     "diag",
+    "recovery",
     "logkeep",
     "play",
     "update",
@@ -1066,7 +1067,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 16)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 17)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1084,6 +1085,77 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Contains("reply from fec0::2: seq=1"),
     Expect::Line("hello over http"),
     Expect::Contains("fetch: saved 1048576 bytes"),
+];
+/// Recovery mode (ADR-0122), chosen in the boot menu: a forgotten
+/// password set anew, and three boots that did not finish, for the next.
+const RECOVERY_SCRIPT: &[&[u8]] = &[
+    b"run recovery out use:fs\r\n",
+    b"run recovery out use:fs -- password owner abc\r\n",
+    b"run recovery out use:fs -- password nobody tides2026\r\n",
+    b"run recovery out use:fs -- password owner tides2026\r\n",
+    b"write /system/boots 3\r\n",
+    b"run recovery out use:fs\r\n",
+    b"run diag out logs use:fs -- previous 3\r\n",
+    b"run ifconfig out use:net\r\n",
+    b"sync\r\n",
+    b"shutdown\r\n",
+];
+const RECOVERY_EXPECT: &[Expect] = &[
+    Expect::Contains("boot mode: recovery"),
+    Expect::Contains("init: recovery mode: services-recovery.conf"),
+    Expect::Contains("Oceans recovery: the usual system is not started."),
+    Expect::Line("recovery: the usual system is not started (ADR-0122)"),
+    Expect::Line("  account owner (Kai), administrator, a password"),
+    Expect::Line("recovery: a password has 4 to 64 characters"),
+    Expect::Line("recovery: no account nobody (there are: owner)"),
+    Expect::Line("recovery: owner's password is set; it opens the lock screen"),
+    Expect::Line("  3 boot(s) in a row did not finish"),
+    Expect::Line("diag: its last 3 lines:"),
+    Expect::Line("net0: 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3"),
+];
+/// The usual system after three boots that did not finish (ADR-0122):
+/// safe mode, by itself; the password set in recovery opens the screen.
+const SAFE_SCRIPT: &[&[u8]] = &[
+    b"@wait desktop: Safe mode",
+    b"@keys tides2026\r",
+    b"@wait desktop: unlocked",
+    b"shutdown\r\n",
+];
+const SAFE_EXPECT: &[Expect] = &[
+    Expect::Contains("core: safe mode: the last 3 boots did not finish"),
+    Expect::Contains("not started at boot"),
+    Expect::Contains(
+        "desktop: Safe mode: the last boots did not finish, so the services kept to start at boot are off.",
+    ),
+    Expect::Contains("desktop: unlocked"),
+    // Shut down, the boot finished: the next is not in safe mode.
+    Expect::Contains("core: this boot finished"),
+];
+/// A factory reset in recovery mode (ADR-0122): only with its word, and
+/// the logs stay.
+const RESET_SCRIPT: &[&[u8]] = &[
+    b"run recovery out use:fs -- factory-reset\r\n",
+    b"run recovery out use:fs -- factory-reset --erase-everything\r\n",
+    b"ls /system\r\n",
+    b"run recovery out use:fs\r\n",
+    b"sync\r\n",
+    b"shutdown\r\n",
+];
+const RESET_EXPECT: &[Expect] = &[
+    Expect::Line("recovery: a factory reset erases every account, setting, app and file;"),
+    Expect::Line("recovery: factory reset"),
+    Expect::Line("  erased /system/user"),
+    Expect::Line("  erased /apps"),
+    Expect::Line("recovery: done; `reboot` starts Oceans as on a new computer"),
+    Expect::Line("  logs/"),
+    Expect::Line("  one account, never given a password"),
+];
+/// The boot after a factory reset (ADR-0122): a new computer's, its apps
+/// put back from the image, no password, not in safe mode.
+const NEW_SCRIPT: &[&[u8]] = &[b"@wait desktop: ", b"shutdown\r\n"];
+const NEW_EXPECT: &[Expect] = &[
+    Expect::Contains("core: ready, "),
+    Expect::Contains("core: this boot finished"),
 ];
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
@@ -1145,7 +1217,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 16)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 17)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -1867,6 +1939,13 @@ fn build_image_for(
         let text = String::from_utf8(manifest_bytes).map_err(|_| "services.conf is not UTF-8")?;
         manifest_bytes = hardware::hardware_services(&text)?.into_bytes();
     }
+    // Recovery mode (ADR-0122): a smaller set made from the same services.
+    let text =
+        String::from_utf8(manifest_bytes.clone()).map_err(|_| "services.conf is not UTF-8")?;
+    files.push((
+        "services-recovery.conf".to_string(),
+        recovery_services(&text).into_bytes(),
+    ));
     files.push(("services.conf".to_string(), manifest_bytes));
     build_ui()?;
     for (name, bytes) in build_go(GO_PROGRAMS)? {
@@ -1911,12 +1990,26 @@ fn build_image_for(
         );
         return Ok(esp);
     }
-    let mut conf = String::from("timeout: 0\n\n/Oceans\n    protocol: limine\n");
-    conf.push_str(&format!("    path: boot():/boot/{KERNEL_PACKAGE}\n"));
-    if let Some(cmdline) = cmdline {
-        conf.push_str(&format!("    cmdline: {cmdline}\n"));
+    // A test boots its one entry at once; `run` shows safe mode and
+    // recovery mode too (ADR-0122).
+    let entries: &[(&str, &str)] = match cmdline {
+        Some(cmdline) => &[("Oceans", cmdline)],
+        None => &[
+            ("Oceans", ""),
+            ("Oceans (safe mode)", "oceans.mode=safe"),
+            ("Oceans (recovery)", "oceans.mode=recovery"),
+        ],
+    };
+    let mut conf = format!("timeout: {}\n", if cmdline.is_some() { 0 } else { 3 });
+    for (name, line) in entries {
+        conf.push_str(&format!(
+            "\n/{name}\n    protocol: limine\n    path: boot():/boot/{KERNEL_PACKAGE}\n"
+        ));
+        if !line.is_empty() {
+            conf.push_str(&format!("    cmdline: {line}\n"));
+        }
+        conf.push_str("    module_path: boot():/boot/initrd\n");
     }
-    conf.push_str("    module_path: boot():/boot/initrd\n");
     let conf_path = limine_conf_dir.join("limine.conf");
     fs::write(&conf_path, conf)
         .map_err(|e| format!("cannot write {}: {e}", conf_path.display()))?;
@@ -1929,6 +2022,69 @@ fn build_image_for(
     );
     pack_esp(&esp)?;
     Ok(esp)
+}
+
+/// What recovery mode starts (ADR-0122): the disks, the USB stick and
+/// keyboard, the network, the filesystem, the kept logs and the shell; not
+/// Core, the desktop, the AI, the bridge, sound or the test services.
+const RECOVERY_SERVICES: &[&str] = &[
+    "block",
+    "netdev",
+    "e1000e",
+    "usb",
+    "usbstorage",
+    "usbhid",
+    "usbfs",
+    "net",
+    "nvme",
+    "nvmefs",
+    "sata",
+    "satafs",
+    "fs",
+    "logkeep",
+    "shell",
+];
+
+/// The recovery manifest (ADR-0122), made from `manifest`: only the
+/// services of [`RECOVERY_SERVICES`] it has, without what they would use
+/// of the others (init refuses a `use` no service provides) and without
+/// the test-mode checks.
+fn recovery_services(manifest: &str) -> String {
+    let blocks = || {
+        let mut name = "";
+        manifest.lines().filter(move |line| {
+            if let Some(rest) = line.strip_prefix("service ") {
+                name = rest.trim();
+            } else if !line.starts_with(char::is_whitespace) {
+                // A comment or a blank line between services.
+                return false;
+            }
+            RECOVERY_SERVICES.contains(&name)
+        })
+    };
+    let provided: Vec<&str> = blocks()
+        .filter_map(|line| line.trim().strip_prefix("provide = "))
+        .map(str::trim)
+        .collect();
+    let mut out = String::from("# Recovery mode (ADR-0122): made by xtask from services.conf.\n");
+    for line in blocks() {
+        let setting = line.trim();
+        if let Some(used) = setting.strip_prefix("use = ") {
+            let endpoint = used.split_whitespace().next().unwrap_or("");
+            if !provided.contains(&endpoint) {
+                continue;
+            }
+        }
+        if setting.starts_with("expect-") {
+            continue;
+        }
+        if line.starts_with("service ") {
+            out.push('\n');
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// The ESP as a FAT image QEMU boots from (`build/esp.img`).
@@ -1974,6 +2130,15 @@ enum Nic {
     Virtio,
     /// An Intel 82574L (`8086:10d3`), driven by e1000e.
     E1000e,
+}
+
+/// What a smoke boot starts (ADR-0122).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Services {
+    /// `services.conf`: the test services, Core and the desktop.
+    Usual,
+    /// `services-recovery.conf`: the disks, the network and the shell.
+    Recovery,
 }
 
 impl Nic {
@@ -3204,19 +3369,39 @@ fn smoke(profile: Profile) -> Result {
     prepare_blank(SMOKE_NVME_IMAGE, NVME_SIZE, true)?;
     prepare_stick(SMOKE_STICK_IMAGE, true)?;
     prepare_fat_stick()?;
-    println!("smoke boot 1 of 2: blank disk");
-    smoke_boot(SHELL_SCRIPT, SHELL_EXPECT, Nic::Virtio)?;
+    println!("smoke boot 1 of 6: blank disk");
+    smoke_boot(SHELL_SCRIPT, SHELL_EXPECT, Nic::Virtio, Services::Usual)?;
     // The second boot records over it.
     check_smoke_audio()?;
-    println!("smoke boot 2 of 2: the same disk, an Intel NIC instead of virtio-net");
+    println!("smoke boot 2 of 6: the same disk, an Intel NIC instead of virtio-net");
     // A clean boot image: the first boot's firmware wrote into it (vvfat).
     build_image(profile, Some("oceans.test=smoke"))?;
-    smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT, Nic::E1000e)?;
+    smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT, Nic::E1000e, Services::Usual)?;
     check_smoke_disk()?;
     check_smoke_nvme()?;
     check_smoke_screens()?;
     check_smoke_stick()?;
     check_smoke_fat()?;
+    // Recovery (ADR-0122), on the disk the two boots left; each boot has
+    // a clean boot image, as the second.
+    let recovery = "oceans.test=smoke oceans.mode=recovery";
+    println!("smoke boot 3 of 6: recovery mode, a forgotten password");
+    build_image(profile, Some(recovery))?;
+    smoke_boot(
+        RECOVERY_SCRIPT,
+        RECOVERY_EXPECT,
+        Nic::Virtio,
+        Services::Recovery,
+    )?;
+    println!("smoke boot 4 of 6: safe mode after three boots that did not finish");
+    build_image(profile, Some("oceans.test=smoke"))?;
+    smoke_boot(SAFE_SCRIPT, SAFE_EXPECT, Nic::Virtio, Services::Usual)?;
+    println!("smoke boot 5 of 6: recovery mode, a factory reset");
+    build_image(profile, Some(recovery))?;
+    smoke_boot(RESET_SCRIPT, RESET_EXPECT, Nic::Virtio, Services::Recovery)?;
+    println!("smoke boot 6 of 6: a new computer's first boot");
+    build_image(profile, Some("oceans.test=smoke"))?;
+    smoke_boot(NEW_SCRIPT, NEW_EXPECT, Nic::Virtio, Services::Usual)?;
     println!("smoke test passed: kernel came online, files survived a reboot");
     Ok(())
 }
@@ -3287,8 +3472,9 @@ const CONSENT_PROMPT: &[u8] = b"Allow? [y/N] ";
 
 /// One headless boot: types `script` into the shell, one command per
 /// prompt, and requires every `expected` line, the online banner and a
-/// successful exit. The guest's network card is `nic`.
-fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
+/// successful exit. The guest's network card is `nic`; `services`, what
+/// the boot starts.
+fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic, services: Services) -> Result {
     let udp_forward = free_udp_port()?;
     let udp_echo = udp_echo_probe(udp_forward);
     let dns_port = dns_server(IPV4_LOOPBACK)?;
@@ -3395,7 +3581,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     let deadline = Instant::now() + SMOKE_TIMEOUT;
     let mut online = false;
     let (mut shell_ready, mut prompt_waiting) = (false, false);
-    let mut usb_settled = [false; USB_SETTLED.len()];
+    // Recovery mode has no crasher to wait for.
+    let mut usb_settled =
+        USB_SETTLED.map(|marker| services == Services::Recovery && marker.starts_with("crasher"));
     let mut ready = false;
     let mut commands = script.iter().peekable();
     // Monitor commands waiting for a console line (`@when`).
@@ -3633,13 +3821,16 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic) -> Result {
     }
 
     let status = child.wait().map_err(|e| format!("waiting for QEMU: {e}"))?;
-    if !(udp_answered || udp_echo.try_recv().is_ok()) {
-        return Err("the guest's UDP echo service never answered from the host".into());
+    // Recovery mode starts no test services, the echo among them.
+    if services == Services::Usual {
+        if !(udp_answered || udp_echo.try_recv().is_ok()) {
+            return Err("the guest's UDP echo service never answered from the host".into());
+        }
+        if !(tcp_answered || tcp_echo.try_recv().is_ok()) {
+            return Err("the guest's TCP echo service never answered from the host".into());
+        }
+        println!("UDP and TCP echo answered from the host through the guest's network stack");
     }
-    if !(tcp_answered || tcp_echo.try_recv().is_ok()) {
-        return Err("the guest's TCP echo service never answered from the host".into());
-    }
-    println!("UDP and TCP echo answered from the host through the guest's network stack");
     if !unmet.is_empty() {
         return Err(format!("shell output missing: {unmet:?} (QEMU {status})"));
     }
@@ -5005,6 +5196,40 @@ fn check_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_mode_keeps_the_disks_the_network_and_the_shell() {
+        for manifest in [
+            include_str!("../../../config/services.conf"),
+            include_str!("../../../config/services-smoke.conf"),
+        ] {
+            let recovery = recovery_services(manifest);
+            for kept in [
+                "service fs\n",
+                "service shell\n",
+                "service net\n",
+                "service usbhid\n",
+            ] {
+                assert!(recovery.contains(kept), "{kept} is missing:\n{recovery}");
+            }
+            for gone in ["service core\n", "service display\n", "service ai\n"] {
+                assert!(!recovery.contains(gone), "{gone} is there:\n{recovery}");
+            }
+            assert!(!recovery.contains("expect-"));
+            // Every `use` names an endpoint a kept service provides, as
+            // init requires.
+            let provided: Vec<&str> = recovery
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("provide = "))
+                .collect();
+            for line in recovery.lines() {
+                if let Some(used) = line.trim().strip_prefix("use = ") {
+                    let endpoint = used.split_whitespace().next().unwrap();
+                    assert!(provided.contains(&endpoint), "{line}: nothing provides it");
+                }
+            }
+        }
+    }
 
     #[test]
     fn the_smoke_picture_decodes_as_served() {

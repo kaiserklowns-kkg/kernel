@@ -24,9 +24,10 @@
 /// `DEVICE_OPEN`); 12 = ADR-0044 (41: kill); 13 = ADR-0057 (42–44:
 /// display); 14 = ADR-0059 (45–46: the keyboard to the desktop); 15 =
 /// ADR-0070 (47: reading the log); 16 = ADR-0085 (48:
-/// switching off and restarting). Versions only add; existing numbers keep
+/// switching off and restarting); 17 = ADR-0122 (the `BOOT` kind of
+/// `SYSTEM_INFO`: the boot mode). Versions only add; existing numbers keep
 /// their meaning.
-pub const ABI_VERSION: u64 = 16;
+pub const ABI_VERSION: u64 = 17;
 
 /// System call numbers.
 pub mod nr {
@@ -588,6 +589,8 @@ pub mod sysinfo {
     pub const UPTIME: u64 = 2;
     /// A sequence of [`ProcessRecord`]s.
     pub const PROCESSES: u64 = 3;
+    /// A [`BootRecord`] (ABI 17, ADR-0122): how this boot was started.
+    pub const BOOT: u64 = 4;
 
     fn put(out: &mut [u8], at: usize, value: u64) {
         out[at..at + 8].copy_from_slice(&value.to_le_bytes());
@@ -680,6 +683,50 @@ pub mod sysinfo {
                 total_frames: get(bytes, 8),
                 free_frames: get(bytes, 16),
                 kernel_heap: get(bytes, 24),
+            })
+        }
+    }
+
+    /// How this boot was started (ADR-0122), from the kernel's command
+    /// line: `oceans.mode=safe` or `oceans.mode=recovery`, else normal.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct BootRecord {
+        pub mode: u64,
+    }
+
+    /// The boot modes (ADR-0122).
+    pub mod mode {
+        pub const NORMAL: u64 = 0;
+        /// The usual system, without the services started at boot.
+        pub const SAFE: u64 = 1;
+        /// A small system to repair the usual one from its console.
+        pub const RECOVERY: u64 = 2;
+    }
+
+    impl BootRecord {
+        pub const SIZE: usize = 8;
+
+        /// The mode the command line asks for: its `oceans.mode=` word.
+        pub fn from_cmdline(cmdline: &str) -> Self {
+            let mode = cmdline
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("oceans.mode="))
+                .map_or(mode::NORMAL, |name| match name {
+                    "safe" => mode::SAFE,
+                    "recovery" => mode::RECOVERY,
+                    _ => mode::NORMAL,
+                });
+            Self { mode }
+        }
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            put(out, 0, self.mode);
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            Some(Self {
+                mode: get(bytes, 0),
             })
         }
     }
@@ -835,6 +882,21 @@ pub mod device {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_boot_mode_comes_from_the_command_line() {
+        use sysinfo::{BootRecord, mode};
+        let of = |line| BootRecord::from_cmdline(line).mode;
+        assert_eq!(of(""), mode::NORMAL);
+        assert_eq!(of("oceans.mode=safe"), mode::SAFE);
+        assert_eq!(of("oceans.test=smoke oceans.mode=recovery"), mode::RECOVERY);
+        assert_eq!(of("oceans.mode=what"), mode::NORMAL);
+        assert_eq!(of("xoceans.mode=safe"), mode::NORMAL, "a whole word only");
+        let record = BootRecord { mode: mode::SAFE };
+        let mut out = [0u8; BootRecord::SIZE];
+        record.encode(&mut out);
+        assert_eq!(BootRecord::decode(&out), Some(record));
+    }
 
     #[test]
     fn sysinfo_records_round_trip() {

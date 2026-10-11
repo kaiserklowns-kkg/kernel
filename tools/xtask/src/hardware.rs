@@ -147,7 +147,12 @@ pub fn slot_layout(esp: &Path, release: &str) -> Result {
     }
     fs::write(slot.join("release"), format!("{release}\n"))
         .map_err(|e| format!("cannot write the release: {e}"))?;
-    let conf = boot_configuration(&[(&format!("Oceans {release}"), 'a')]);
+    let entries = release_entries(&format!("Oceans {release}"), 'a');
+    let entries: Vec<(&str, char, &str)> = entries
+        .iter()
+        .map(|(n, s, c)| (n.as_str(), *s, *c))
+        .collect();
+    let conf = boot_configuration(&entries);
     for path in [
         esp.join("limine.conf"),
         boot.join("limine").join("limine.conf"),
@@ -157,22 +162,38 @@ pub fn slot_layout(esp: &Path, release: &str) -> Result {
     Ok(())
 }
 
-/// Limine's configuration for the slots, first entry first: the same text
-/// `update` writes (user/utils/src/bin/update.rs).
-fn boot_configuration(entries: &[(&str, char)]) -> String {
+/// Limine's configuration for the slots, first entry first, each with
+/// its kernel command line (empty, or a boot mode: ADR-0122): the same text
+/// `update` writes (user/utils/src/bin/update/main.rs).
+fn boot_configuration(entries: &[(&str, char, &str)]) -> String {
     let mut conf = String::from(
         "# Oceans boot configuration (ADR-0071), written by `update`.\ntimeout: 3\n\n",
     );
-    for (i, (name, slot)) in entries.iter().enumerate() {
+    for (i, (name, slot, cmdline)) in entries.iter().enumerate() {
         if i > 0 {
             conf.push('\n');
         }
+        let cmdline = if cmdline.is_empty() {
+            String::new()
+        } else {
+            format!("    cmdline: {cmdline}\n")
+        };
         conf.push_str(&format!(
-            "/{name}\n    protocol: limine\n    path: boot():/boot/{slot}/{KERNEL_PACKAGE}\n    \
-             module_path: boot():/boot/{slot}/initrd\n"
+            "/{name}\n    protocol: limine\n    path: boot():/boot/{slot}/{KERNEL_PACKAGE}\n\
+             {cmdline}    module_path: boot():/boot/{slot}/initrd\n"
         ));
     }
     conf
+}
+
+/// The entries for a release in `slot` (ADR-0122): the usual system, then
+/// the same in safe mode and in recovery mode.
+fn release_entries(name: &str, slot: char) -> [(String, char, &'static str); 3] {
+    [
+        (name.to_string(), slot, ""),
+        (format!("{name} (safe mode)"), slot, "oceans.mode=safe"),
+        (format!("{name} (recovery)"), slot, "oceans.mode=recovery"),
+    ]
 }
 
 /// A system update (ADR-0071): this image's kernel and boot archive as
@@ -319,7 +340,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("nvme: the controller is shut down"),
     Expect::Contains("ahci: the disk is in standby"),
     Expect::Contains("init: core stopped"),
-    Expect::Contains("(ABI 16)"),
+    Expect::Contains("(ABI 17)"),
     Expect::Contains("fs: formatted a blank disk"),
     // The SATA disk (ADR-0069): identified, formatted, written.
     Expect::Contains("ahci: port 0: QEMU HARDDISK (serial oceans-sata, firmware "),
@@ -606,9 +627,17 @@ mod tests {
     #[test]
     fn boot_configurations_list_slots_in_order() {
         let conf = boot_configuration(&[
-            ("Oceans 0.1.1 alpha", 'b'),
-            ("Oceans 0.1.0 alpha (previous)", 'a'),
+            ("Oceans 0.1.1 alpha", 'b', ""),
+            ("Oceans 0.1.1 alpha (recovery)", 'b', "oceans.mode=recovery"),
+            ("Oceans 0.1.0 alpha (previous)", 'a', ""),
         ]);
+        // A boot mode on its own line, between the kernel and its archive
+        // (ADR-0122), as `update` writes it.
+        assert!(conf.contains(
+            "/Oceans 0.1.1 alpha (recovery)\n    protocol: limine\n    \
+             path: boot():/boot/b/oceans-kernel\n    cmdline: oceans.mode=recovery\n    \
+             module_path: boot():/boot/b/initrd\n"
+        ));
         let first = conf.find("path: boot():/boot/b/oceans-kernel").unwrap();
         let second = conf.find("path: boot():/boot/a/oceans-kernel").unwrap();
         assert!(first < second);

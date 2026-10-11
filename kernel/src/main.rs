@@ -52,6 +52,12 @@ fn kernel_main(boot: &'static BootInfo) -> ! {
 
     klog::info!("Oceans {} on {}", env!("CARGO_PKG_VERSION"), arch::NAME);
     klog::info!("command line: {:?}", boot.cmdline());
+    // The boot mode (ADR-0122), for userspace to read with SYSTEM_INFO.
+    match oceans_abi::sysinfo::BootRecord::from_cmdline(boot.cmdline()).mode {
+        oceans_abi::sysinfo::mode::SAFE => klog::info!("boot mode: safe"),
+        oceans_abi::sysinfo::mode::RECOVERY => klog::info!("boot mode: recovery"),
+        _ => {}
+    }
     if boot.cmdline_truncated() {
         klog::warn!("command line truncated to {} bytes", boot::MAX_CMDLINE_LEN);
     }

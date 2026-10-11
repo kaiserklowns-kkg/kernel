@@ -981,6 +981,12 @@ fn system_info(process: &Process, raw: u64, kind: u64, ptr: u64, capacity: u64) 
                 bytes.extend_from_slice(&encoded);
             }
         }
+        // How this boot was started (ABI 17, ADR-0122).
+        sysinfo::BOOT => {
+            let mut record = [0u8; sysinfo::BootRecord::SIZE];
+            sysinfo::BootRecord::from_cmdline(crate::boot::info().cmdline()).encode(&mut record);
+            bytes.extend_from_slice(&record);
+        }
         _ => return Err(Error::InvalidArgument),
     }
     if bytes.len() as u64 > capacity {

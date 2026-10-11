@@ -171,6 +171,13 @@ pub mod op {
     /// reply's handle: the desktop's Control Center and top bar show the
     /// network with it, and can open nothing. `NotFound` without one.
     pub const NET_READER: u64 = 42;
+    /// → `[safe u8]` (ADR-0122): 0 the usual system; 1 safe mode chosen in
+    /// the boot menu; 2 safe mode because the last boots did not finish.
+    /// In safe mode the services kept to start at boot did not start.
+    pub const MODE: u64 = 43;
+    /// The desktop ran a while (ADR-0122): this boot finished, and the
+    /// count of unfinished ones starts again.
+    pub const BOOT_OK: u64 = 44;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -236,7 +243,9 @@ pub mod access {
             | op::LOCK_AFTER
             | op::APPEARANCE
             | op::USERS
-            | op::LAYOUT => QUERY,
+            | op::LAYOUT
+            | op::MODE
+            | op::BOOT_OK => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE

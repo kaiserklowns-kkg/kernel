@@ -85,6 +85,14 @@ const USER_FILE: &str = "user";
 const APPEARANCE_FILE: &str = "appearance";
 /// The keyboard layout in use (ADR-0116): `0` English, `1` Thai.
 const LAYOUT_FILE: &str = "layout";
+/// Boots that started and did not finish (ADR-0122): Core counts each, the
+/// desktop clears it once it ran a while.
+const BOOTS_FILE: &str = "boots";
+/// From this many unfinished boots on, the next one is in safe mode.
+const FAILED_BOOTS: u32 = 3;
+/// Why safe mode: chosen in the boot menu, or after unfinished boots.
+const SAFE_CHOSEN: u8 = 1;
+const SAFE_AFTER_FAILURES: u8 = 2;
 /// What each account keeps of its own (ADR-0116), by [`Core::user_file`].
 const USER_FILES: [&str; 3] = [DOCK_FILE, APPEARANCE_FILE, LAYOUT_FILE];
 /// `FIND` (ADR-0108): the most entries of Home it looks at, how deep in
@@ -357,6 +365,10 @@ struct Core {
     /// passwords.
     users: Option<oceans_account::Users>,
     current: usize,
+    /// Safe mode (ADR-0122): 0, or why; and whether this boot was
+    /// counted as finished.
+    safe: u8,
+    boot_counted: bool,
     throttle: oceans_account::Throttle,
     /// Restarts so far this boot, and those waiting for their time.
     restarts: BTreeMap<String, u32>,
@@ -450,6 +462,8 @@ impl Core {
             stale: 0,
             users: Some(oceans_account::Users::default()),
             current: 0,
+            safe: 0,
+            boot_counted: false,
             throttle: oceans_account::Throttle::default(),
         };
         core.load_apps();
@@ -1135,8 +1149,67 @@ impl Core {
         }
     }
 
-    /// Starts the enabled services (at boot, once the endpoint is bound).
+    /// Safe mode (ADR-0122): chosen in the boot menu, or because the last
+    /// boots did not finish. Counts this boot as not finished until the
+    /// desktop says it did (`BOOT_OK`).
+    fn decide_safe_mode(&mut self) {
+        let chosen = self
+            .sysinfo
+            .is_some_and(|h| oceans_rt::boot_mode(h) == oceans_rt::sysinfo::mode::SAFE);
+        let unfinished = read_path(&self.system_dir, BOOTS_FILE)
+            .ok()
+            .and_then(|bytes| {
+                core::str::from_utf8(&bytes)
+                    .ok()?
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .unwrap_or(0);
+        self.safe = if chosen {
+            say(self.log, format_args!("core: safe mode, chosen at boot"));
+            SAFE_CHOSEN
+        } else if unfinished >= FAILED_BOOTS {
+            say(
+                self.log,
+                format_args!("core: safe mode: the last {unfinished} boots did not finish"),
+            );
+            SAFE_AFTER_FAILURES
+        } else {
+            0
+        };
+        let text = alloc::format!("{}\n", unfinished.saturating_add(1));
+        if write_file(&self.system_dir, BOOTS_FILE, text.as_bytes()).is_err() {
+            say(self.log, format_args!("core: cannot count this boot"));
+        }
+    }
+
+    /// `BOOT_OK` (ADR-0122): the desktop ran a while; this boot finished.
+    fn boot_finished(&mut self) {
+        if self.boot_counted {
+            return;
+        }
+        self.boot_counted = true;
+        if write_file(&self.system_dir, BOOTS_FILE, b"0\n").is_ok() {
+            say(self.log, format_args!("core: this boot finished"));
+        }
+    }
+
+    /// Starts the enabled services (at boot, once the endpoint is bound);
+    /// none in safe mode (ADR-0122).
     fn start_services(&mut self) {
+        self.decide_safe_mode();
+        if self.safe != 0 {
+            say(
+                self.log,
+                format_args!(
+                    "core: safe mode: {} service{} not started at boot",
+                    self.enabled.len(),
+                    plural(self.enabled.len())
+                ),
+            );
+            return;
+        }
         let ids: Vec<String> = self.enabled.iter().cloned().collect();
         for id in ids {
             match self.start_service(&id) {
@@ -1352,8 +1425,10 @@ impl Core {
             if got.signals & oceans_rt::STOP != 0 {
                 // The system is stopping (ADR-0086): apps end first, so
                 // their files are closed (and committed) before the disks
-                // are synced.
+                // are synced. A boot shut down this way finished too
+                // (ADR-0122), however short.
                 self.stop_all();
+                self.boot_finished();
                 return 0;
             }
             if got.signals != 0 {
@@ -1504,6 +1579,15 @@ impl Core {
                     op::WINDOW_OWNER => self.window_owner(data, reply),
                     op::PENDING => self.pending(reply),
                     op::WEB_BUNDLE => self.web_bundle(data, reply, reply_handle),
+                    // Safe mode, and a boot that finished (ADR-0122).
+                    op::MODE => {
+                        reply.push(self.safe);
+                        Ok(())
+                    }
+                    op::BOOT_OK => {
+                        self.boot_finished();
+                        Ok(())
+                    }
                     // The network, read only, for the desktop (ADR-0118).
                     op::NET_READER => {
                         let net = self.net.ok_or(Status::NotFound)?;

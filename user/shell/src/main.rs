@@ -71,7 +71,22 @@ fn main(start: Start) -> i64 {
         input: RefCell::new(Input::new()),
     };
     let _ = oceans_rt::debug_write(log, "shell: ready");
-    shell.print(format_args!("Oceans shell. Type `help` for commands.\r\n"));
+    // Recovery mode (ADR-0122): what can be done from here.
+    let recovery = shell
+        .directory
+        .find("sysinfo", "sysinfo")
+        .is_some_and(|h| oceans_rt::boot_mode(h) == oceans_rt::sysinfo::mode::RECOVERY);
+    if recovery {
+        shell.print(format_args!(
+            "Oceans recovery: the usual system is not started.\r\n\
+             \x20 run recovery out use:fs              what can be done here\r\n\
+             \x20 run diag out logs use:fs -- previous the last boot's log\r\n\
+             \x20 run update out use:fs -- status      the releases kept\r\n\
+             \x20 reboot                               back to the usual system\r\n"
+        ));
+    } else {
+        shell.print(format_args!("Oceans shell. Type `help` for commands.\r\n"));
+    }
     shell.run()
 }
 

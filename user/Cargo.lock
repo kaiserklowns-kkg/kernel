@@ -1375,6 +1375,7 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "oceans-abi",
+ "oceans-account",
  "oceans-audio-proto",
  "oceans-block-proto",
  "oceans-core-proto",

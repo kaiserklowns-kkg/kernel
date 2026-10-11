@@ -12,7 +12,7 @@ use core::fmt;
 pub use oceans_abi::EXIT_KILLED;
 pub use oceans_abi::Error;
 pub use oceans_abi::display::Info as DisplayInfo;
-pub use oceans_abi::{MessageDesc, power, prot, rights};
+pub use oceans_abi::{MessageDesc, power, prot, rights, sysinfo};
 use oceans_abi::{nr, start::MAX_INITIAL_HANDLES};
 
 /// A capability handle in this process's table.
@@ -799,6 +799,17 @@ pub fn system_info(sysinfo: Handle, kind: u64, buffer: &mut [u8]) -> Result<usiz
         0,
     ];
     call(nr::SYSTEM_INFO, args).map(|(len, _)| len as usize)
+}
+
+/// How this boot was started (ABI 17, ADR-0122): `sysinfo::mode::NORMAL`,
+/// `SAFE` or `RECOVERY`; normal on an older kernel.
+pub fn boot_mode(sysinfo: Handle) -> u64 {
+    use oceans_abi::sysinfo::{BOOT, BootRecord, mode};
+    let mut record = [0u8; BootRecord::SIZE];
+    system_info(sysinfo, BOOT, &mut record)
+        .ok()
+        .and_then(|_| BootRecord::decode(&record))
+        .map_or(mode::NORMAL, |boot| boot.mode)
 }
 
 // ---- ABI 7: devices (ADR-0021) ---------------------------------------------

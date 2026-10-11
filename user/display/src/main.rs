@@ -87,6 +87,9 @@ const KEYS: u64 = 1 << 2;
 /// How often the clock, the console mirror and the app list are checked.
 const TICK_MS: u64 = 100;
 const APPS_EVERY_MS: u64 = 2000;
+/// How long the desktop runs before this boot counts as finished
+/// (ADR-0122).
+const BOOT_OK_MS: u64 = 60_000;
 const TOAST_MS: u64 = 4000;
 /// A second press within this long, and 4 pixels, is a double click.
 const DOUBLE_CLICK_MS: u64 = 500;
@@ -133,6 +136,10 @@ struct Service {
     power: Option<Handle>,
     /// A reader end of the network stack (ADR-0118), from Core.
     net_reader: Option<Handle>,
+    /// When the desktop started, and whether it told Core this boot
+    /// finished (ADR-0122).
+    started_ms: u64,
+    boot_reported: bool,
     /// The last press of the main button: when and where (a double click
     /// maximizes, ADR-0097).
     last_press: Option<(u64, i32, i32)>,
@@ -250,6 +257,8 @@ fn main(start: Start) -> i64 {
         pixels: BTreeMap::new(),
         power: directory.find("power", "power"),
         net_reader: None,
+        started_ms: oceans_rt::clock_ms(),
+        boot_reported: false,
     };
     // Full screen covers all of it (ADR-0107).
     service
@@ -279,6 +288,7 @@ fn main(start: Start) -> i64 {
     service.refresh_layout();
     service.refresh_volume();
     service.refresh_network();
+    service.show_mode();
     service.refresh_clock();
     service.refresh_terminal();
     service.draw(&mut canvas);
@@ -347,6 +357,14 @@ fn main(start: Start) -> i64 {
             {
                 service.lock_idle();
                 dirty = true;
+            }
+            // A minute up (ADR-0122): this boot finished.
+            if !service.boot_reported && now.saturating_sub(service.started_ms) >= BOOT_OK_MS {
+                service.boot_reported = true;
+                if let Some(core) = service.core {
+                    let mut reply = [0u8; 8];
+                    let _ = core.call(op::BOOT_OK, &[], &[], &mut reply);
+                }
             }
             if now.saturating_sub(last_apps) >= APPS_EVERY_MS {
                 last_apps = now;
@@ -1116,6 +1134,27 @@ impl Service {
         {
             self.refresh_appearance();
         }
+    }
+
+    /// Safe mode (ADR-0122), said once at start: why, and what is off.
+    fn show_mode(&mut self) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 1];
+        let safe = match core.call(op::MODE, &[], &[], &mut reply) {
+            Ok(got) if got.len == 1 => reply[0],
+            _ => 0,
+        };
+        let text = match safe {
+            0 => return,
+            1 => "Safe mode: the services kept to start at boot are off.",
+            _ => {
+                "Safe mode: the last boots did not finish, so the services kept to start at boot are off."
+            }
+        };
+        say(self.log, format_args!("desktop: {text}"));
+        self.toast(String::from(text), true);
     }
 
     /// The network from the reader end Core gave (ADR-0118), asked for
