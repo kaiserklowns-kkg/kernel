@@ -88,6 +88,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DEVICE_LIST => device_list(&process, a0, a1, a2),
         nr::DEVICE_OPEN => device_open(&process, a0, a1, a2),
         nr::DEVICE_CONFIG_READ => device_config_read(&process, a0, a1, a2),
+        nr::DEVICE_CONFIG_WRITE => device_config_write(&process, a0, a1, a2, a3),
         nr::DEVICE_ENABLE => device_enable(&process, a0),
         nr::DEVICE_BAR => device_bar(&process, a0, a1),
         nr::DEVICE_DMA_CREATE => device_dma_create(&process, a0, a1),
@@ -1069,6 +1070,17 @@ fn device_open(process: &Process, bus: u64, selector: u64, index: u64) -> Syscal
 fn device_config_read(process: &Process, raw: u64, offset: u64, width: u64) -> SyscallResult {
     let device = device(process, raw, Rights::READ)?;
     Ok((u64::from(device.config_read(offset, width)?), 0))
+}
+
+fn device_config_write(
+    process: &Process,
+    raw: u64,
+    offset: u64,
+    width: u64,
+    value: u64,
+) -> SyscallResult {
+    device(process, raw, Rights::MANAGE)?.config_write(offset, width, value)?;
+    Ok((0, 0))
 }
 
 fn device_enable(process: &Process, raw: u64) -> SyscallResult {

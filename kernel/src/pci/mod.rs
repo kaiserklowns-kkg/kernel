@@ -61,6 +61,8 @@ pub enum DeviceError {
     NoInterrupt,
     OutOfMemory,
     BadArgument,
+    /// A configuration register a driver may not write (ADR-0125).
+    NotWritable,
 }
 
 impl From<DeviceError> for oceans_abi::Error {
@@ -70,6 +72,7 @@ impl From<DeviceError> for oceans_abi::Error {
             DeviceError::NotFound => Error::NotFound,
             DeviceError::Busy => Error::Busy,
             DeviceError::OutOfMemory => Error::OutOfMemory,
+            DeviceError::NotWritable => Error::MissingRights,
             DeviceError::BadBar | DeviceError::NoInterrupt | DeviceError::BadArgument => {
                 Error::InvalidArgument
             }
@@ -112,6 +115,9 @@ pub struct Function {
     msix: Option<Msix>,
     /// MSI, used only when there is no MSI-X (ADR-0124).
     msi: Option<Msi>,
+    /// The PCI Express capability's offset: the fields a driver may write
+    /// are in it (ADR-0125).
+    pcie: Option<u16>,
     /// Kernel address of the configuration space.
     config: usize,
     /// Serialises read-modify-write of control registers.
@@ -291,6 +297,7 @@ fn scan_bus(
                 bars,
                 msix: oceans_pci::msix(&ecam),
                 msi: oceans_pci::msi(&ecam),
+                pcie: oceans_pci::pcie(&ecam),
                 config,
                 control: Mutex::new(()),
                 open: AtomicBool::new(false),
@@ -359,6 +366,24 @@ impl core::fmt::Debug for Device {
 }
 
 impl Device {
+    /// Writes the bits of `value` a driver may change at `offset` (`width`
+    /// bytes, ADR-0125); the register's other bits stay as they are.
+    pub fn config_write(&self, offset: u64, width: u64, value: u64) -> Result<(), DeviceError> {
+        let offset = u16::try_from(offset).map_err(|_| DeviceError::BadArgument)?;
+        let width = u8::try_from(width).map_err(|_| DeviceError::BadArgument)?;
+        let value = u32::try_from(value).map_err(|_| DeviceError::BadArgument)?;
+        let function = &self.function;
+        let mask =
+            oceans_pci::writable(function.pcie, offset, width).ok_or(DeviceError::NotWritable)?;
+        arch::without_interrupts(|| {
+            let _guard = function.control.lock();
+            let mut ecam = function.ecam();
+            let old = u32::from(ecam.read16(offset));
+            ecam.write16(offset, ((old & !mask) | (value & mask)) as u16);
+        });
+        Ok(())
+    }
+
     /// Reads configuration space.
     pub fn config_read(&self, offset: u64, width: u64) -> Result<u32, DeviceError> {
         let offset = u16::try_from(offset).map_err(|_| DeviceError::BadArgument)?;
@@ -682,5 +707,40 @@ pub fn self_test() {
     );
     drop(open(VIRTIO_BLOCK.0, VIRTIO_BLOCK.1, 0).expect("reopen after close"));
     assert_eq!(open(0xffff, 0xffff, 0).err(), Some(DeviceError::NotFound));
+    config_write_self_test();
     klog::info!("PCI self-test passed");
+}
+
+/// Configuration writes (ADR-0125), on the NVMe controller, a PCI Express
+/// endpoint: the power fields change and nothing else does; the BARs, the
+/// command register and wider writes are refused.
+fn config_write_self_test() {
+    const NVME: u32 = 0x01_08_02;
+    let Ok(device) = open_class(NVME, 0) else {
+        klog::warn!("PCI self-test: no NVMe controller for configuration writes");
+        return;
+    };
+    let express = device
+        .function
+        .pcie
+        .expect("the NVMe controller has a PCI Express capability");
+    let link = u64::from(express + oceans_pci::pcie::LINK_CONTROL);
+    let allowed = u64::from(oceans_pci::pcie::ASPM | oceans_pci::pcie::CLOCK_PM);
+    let before = u64::from(device.config_read(link, 2).expect("Link Control"));
+    device
+        .config_write(link, 2, before ^ 0xffff)
+        .expect("Link Control's power fields are writable");
+    let after = u64::from(device.config_read(link, 2).expect("Link Control"));
+    assert_eq!(
+        after & !allowed,
+        before & !allowed,
+        "only the power fields change"
+    );
+    device.config_write(link, 2, before).expect("restored");
+    assert_eq!(u64::from(device.config_read(link, 2).unwrap()), before);
+    let refused = Err(DeviceError::NotWritable);
+    assert_eq!(device.config_write(link, 4, 0), refused, "16 bits only");
+    assert_eq!(device.config_write(u64::from(reg::BAR0), 4, 0), refused);
+    assert_eq!(device.config_write(u64::from(reg::COMMAND), 2, 0), refused);
+    klog::info!("PCI self-test: configuration writes reach only the PCI Express power fields");
 }

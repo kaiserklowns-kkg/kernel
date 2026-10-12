@@ -382,3 +382,38 @@ fn send(nic: &mut impl Nic, buffer: *mut u8, data: &[u8]) -> Status {
     let frame = unsafe { core::slice::from_raw_parts(buffer.add(offset), len) };
     nic.transmit(frame)
 }
+
+/// The offset of `device`'s PCI Express capability, found by walking its
+/// capability list through configuration reads (at most 48 entries).
+pub fn pcie_capability(device: Handle) -> Option<u16> {
+    const STATUS: u16 = 0x06;
+    const CAPABILITIES: u16 = 0x34;
+    const PCI_EXPRESS: u32 = 0x10;
+    let read = |offset: u16, width: u8| oceans_rt::device_config_read(device, offset, width).ok();
+    if read(STATUS, 2)? & (1 << 4) == 0 {
+        return None;
+    }
+    let mut at = (read(CAPABILITIES, 1)? & !0b11) as u16;
+    for _ in 0..48 {
+        if at < 0x40 {
+            return None;
+        }
+        if read(at, 1)? == PCI_EXPRESS {
+            return Some(at);
+        }
+        at = (read(at + 1, 1)? & !0b11) as u16;
+    }
+    None
+}
+
+/// Turns PCIe active-state power management (L0s, L1) and clock power
+/// management off (ADR-0125), for controllers that stall with them on.
+/// `Err` if the device has no PCI Express capability or refuses.
+pub fn disable_aspm(device: Handle) -> Result<(), &'static str> {
+    const LINK_CONTROL: u16 = 0x10;
+    let link = pcie_capability(device).ok_or("no PCI Express capability")? + LINK_CONTROL;
+    let value =
+        oceans_rt::device_config_read(device, link, 2).map_err(|_| "cannot read Link Control")?;
+    oceans_rt::device_config_write(device, link, 2, value & !0x0103)
+        .map_err(|_| "cannot write Link Control")
+}

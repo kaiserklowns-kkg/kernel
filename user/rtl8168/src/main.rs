@@ -14,7 +14,9 @@
 //! - Receive: 64 descriptors, each with its own 2048-byte buffer, given
 //!   back to the device (`OWN`) only once the stack has taken their frames.
 //! - Transmit: 32 descriptors and buffers. PCIe parts can miss a transmit
-//!   kick, so the driver kicks again whenever frames are still queued.
+//!   kick, so the driver kicks again whenever frames are still queued; and
+//!   PCIe power management (ASPM), which stalls some, is turned off
+//!   (ADR-0125).
 //! - Interrupts: MSI-X vector 0 where the part has it, else MSI (ADR-0124).
 //!   Without either the driver polls every 10 ms.
 //!
@@ -105,6 +107,11 @@ struct Driver {
 impl Driver {
     fn start(log: Handle, device: Handle, server: Handle) -> Result<(Self, Events), &'static str> {
         oceans_rt::device_enable(device).map_err(|_| "cannot enable the device")?;
+        // ASPM stalls the transmitter of many 8168s (BSD's re(4) turns it
+        // off too, ADR-0125).
+        if let Err(problem) = oceans_nic::disable_aspm(device) {
+            say(log, format_args!("ASPM left as it is: {problem}"));
+        }
         let regs = Registers::map(device, oceans_rtl8168::REGISTER_BAR, oceans_rtl8168::SPAN)
             .or_else(|_| {
                 Registers::map(

@@ -131,5 +131,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0122](0122-recovery.md) | Recovery (ABI 17): safe mode, by choice or after three unfinished boots; recovery mode (the disks, the network, a shell); `recovery` for a forgotten password and a factory reset; `update previous` | Accepted |
 | [0123](0123-ethernet-for-real-pcs.md) | Ethernet for real PCs: `oceans-nic`; the I217/I218/I219 in e1000e; igc (82576, I210/I211, I225/I226); rtl8168 (RTL8111/8168); `grant = device:A,B,...` | Accepted |
 | [0124](0124-msi.md) | MSI for devices without MSI-X (ABI 18): `DEVICE_IRQ` binds the one message and says which it bound; AHCI, the I219 and 8168s on interrupts | Accepted |
+| [0125](0125-pci-config-writes.md) | Writing PCI configuration space, the safe fields only (ABI 19): `DEVICE_CONFIG_WRITE` for the PCI Express power and request-size fields; rtl8168 turns ASPM off | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

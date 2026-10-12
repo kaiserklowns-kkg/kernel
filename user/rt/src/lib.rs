@@ -844,6 +844,29 @@ pub fn device_config_read(device: Handle, offset: u16, width: u8) -> Result<u32,
     .map(|(value, _)| value as u32)
 }
 
+/// Writes `value` into the bits of configuration register `offset` a
+/// driver may change (ABI 19, ADR-0125): the PCI Express Link Control and
+/// Device Control fields, 16 bits wide. `MissingRights` elsewhere.
+pub fn device_config_write(
+    device: Handle,
+    offset: u16,
+    width: u8,
+    value: u32,
+) -> Result<(), Error> {
+    call(
+        nr::DEVICE_CONFIG_WRITE,
+        [
+            device.0,
+            u64::from(offset),
+            u64::from(width),
+            u64::from(value),
+            0,
+            0,
+        ],
+    )
+    .map(drop)
+}
+
 /// Turns on memory decoding and bus mastering.
 pub fn device_enable(device: Handle) -> Result<(), Error> {
     call(nr::DEVICE_ENABLE, [device.0, 0, 0, 0, 0, 0]).map(drop)

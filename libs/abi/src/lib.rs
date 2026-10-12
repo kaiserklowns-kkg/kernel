@@ -26,9 +26,10 @@
 /// ADR-0070 (47: reading the log); 16 = ADR-0085 (48:
 /// switching off and restarting); 17 = ADR-0122 (the `BOOT` kind of
 /// `SYSTEM_INFO`: the boot mode); 18 = ADR-0124 (`DEVICE_IRQ` binds MSI for
-/// a function without MSI-X, and says which it bound). Versions only add; existing numbers keep
-/// their meaning.
-pub const ABI_VERSION: u64 = 18;
+/// a function without MSI-X, and says which it bound); 19 = ADR-0125 (49:
+/// writing the PCI Express power and request-size fields). Versions only
+/// add; existing numbers keep their meaning.
+pub const ABI_VERSION: u64 = 19;
 
 /// System call numbers.
 pub mod nr {
@@ -260,6 +261,16 @@ pub mod nr {
     /// they do not return (`NotFound` if `OFF` is not possible here,
     /// before anything happens).
     pub const SYSTEM_POWER: u64 = 48;
+
+    // ABI 19 (ADR-0125)
+
+    /// `(device, offset, width, value) -> 0` — writes configuration space,
+    /// only where a driver may: the PCI Express capability's Link Control
+    /// (ASPM, clock power management) and Device Control (relaxed
+    /// ordering, no snoop, maximum read request), 16 bits; the register's
+    /// other bits are kept. `MissingRights` for anything else. Needs
+    /// `MANAGE`.
+    pub const DEVICE_CONFIG_WRITE: u64 = 49;
 }
 
 /// How `DEVICE_IRQ` delivers a device's interrupt (ABI 18, ADR-0124).

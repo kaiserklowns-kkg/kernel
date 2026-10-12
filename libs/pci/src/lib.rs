@@ -353,6 +353,45 @@ pub fn msix(config: &impl ConfigSpace) -> Option<Msix> {
     (msix.table_bar < 6 && msix.pba_bar < 6).then_some(msix)
 }
 
+/// The function's PCI Express capability's offset, if it has one.
+pub fn pcie(config: &impl ConfigSpace) -> Option<u16> {
+    let (_, offset) = capabilities(config).find(|&(id, _)| id == cap::PCI_EXPRESS)?;
+    (offset + 0x14 <= CONFIG_SPACE_SIZE).then_some(offset)
+}
+
+/// Registers of the PCI Express capability, from its start.
+pub mod pcie {
+    pub const DEVICE_CONTROL: u16 = 0x08;
+    pub const LINK_CONTROL: u16 = 0x10;
+    /// `DEVICE_CONTROL`: relaxed ordering, no snoop, the maximum read
+    /// request size.
+    pub const RELAXED_ORDERING: u32 = 1 << 4;
+    pub const NO_SNOOP: u32 = 1 << 11;
+    pub const MAX_READ_REQUEST: u32 = 0b111 << 12;
+    /// `LINK_CONTROL`: ASPM L0s and L1, clock power management.
+    pub const ASPM: u32 = 0b11;
+    pub const CLOCK_PM: u32 = 1 << 8;
+}
+
+/// The bits a driver may write at `offset` (`width` bytes), if any
+/// (ADR-0125): only power-management and request-size fields of the PCI
+/// Express capability (`pcie`, its offset). Never the BARs, the command
+/// register, MSI or MSI-X, bridges' windows or anything else that could
+/// point the device at memory or interrupts it was not given.
+pub fn writable(pcie: Option<u16>, offset: u16, width: u8) -> Option<u32> {
+    let base = pcie?;
+    if width != 2 {
+        return None;
+    }
+    if offset == base + pcie::LINK_CONTROL {
+        Some(pcie::ASPM | pcie::CLOCK_PM)
+    } else if offset == base + pcie::DEVICE_CONTROL {
+        Some(pcie::RELAXED_ORDERING | pcie::NO_SNOOP | pcie::MAX_READ_REQUEST)
+    } else {
+        None
+    }
+}
+
 /// Reads `width` (1, 2 or 4) bytes at `offset`, if the access is aligned
 /// and inside configuration space.
 pub fn read(config: &impl ConfigSpace, offset: u16, width: u8) -> Option<u32> {
@@ -624,6 +663,24 @@ mod tests {
         );
         // None at all.
         assert_eq!(super::msi(&Device::new(1, 1)), None);
+    }
+
+    #[test]
+    fn only_safe_fields_are_writable() {
+        let mut device = Device::new(0x8086, 0x10d3);
+        device.add_capability(0x40, cap::MSI, 0x60);
+        device.add_capability(0x60, cap::PCI_EXPRESS, 0);
+        let express = pcie(&device);
+        assert_eq!(express, Some(0x60));
+        assert_eq!(writable(express, 0x70, 2), Some(0x0103));
+        assert_eq!(writable(express, 0x68, 2), Some(0x7810));
+        // Wrong width, the BARs, the command register, MSI: never.
+        assert_eq!(writable(express, 0x70, 4), None);
+        assert_eq!(writable(express, reg::BAR0, 4), None);
+        assert_eq!(writable(express, reg::COMMAND, 2), None);
+        assert_eq!(writable(express, 0x42, 2), None);
+        // Without the capability, nothing.
+        assert_eq!(writable(pcie(&Device::new(1, 1)), 0x70, 2), None);
     }
 
     #[test]
