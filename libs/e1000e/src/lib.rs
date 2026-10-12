@@ -10,11 +10,15 @@
 //!   rings.
 //! - [`nvm`], [`mdic`], [`Link`] and the receive address helpers: reading
 //!   the MAC address, talking to the PHY, and decoding link status.
+//! - [`pch`]: the I217, I218 and I219 inside Intel's PCH (ADR-0123), the
+//!   same rings brought up differently.
 //!
 //! The driver (`user/e1000e`) owns the registers and the DMA memory; this
 //! crate only computes what to write there and checks what comes back.
 
 #![no_std]
+
+pub mod pch;
 
 /// Intel's PCI vendor ID and the 82574L's device ID (also what QEMU's
 /// `-device e1000e` presents).

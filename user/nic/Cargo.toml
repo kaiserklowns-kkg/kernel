@@ -1,0 +1,11 @@
+[package]
+name = "oceans-nic"
+description = "What Oceans' Ethernet drivers share: registers, waiting on the device, and serving the netdev protocol to the stack (ADR-0123)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-net-proto.workspace = true

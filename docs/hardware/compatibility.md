@@ -18,7 +18,7 @@ A machine is a **Tier 1 candidate** when it has:
 | At least **256 MiB** of RAM | the system and its services |
 | An **NVMe SSD**, a **SATA disk (AHCI)**, or a USB stick | storage: the root filesystem on NVMe, a SATA disk at `/sata` |
 | A **USB 3 (xHCI)** controller, or a PS/2 keyboard | input |
-| An **Intel 82574L** network adapter (for networking) | the one Ethernet family driven today |
+| An **Intel** Ethernet adapter: 82574L, I217/I218/I219 (most Intel boards), 82576, I210/I211, I225/I226, or a **Realtek RTL8111/8168** (for networking) | the Ethernet families driven today (ADR-0041, ADR-0123) |
 
 It becomes **Tier 1 (validated)** when a `sysreport` from it shows the
 baseline met and every device it needs driven, and the validation
@@ -33,6 +33,9 @@ procedure below passes on it.
 | Intel High Definition Audio controller (any vendor) | hda (ADR-0079, ADR-0087): output and input, 48 kHz stereo | Tier 0 (QEMU `intel-hda` with `hda-output`, recorded and checked) in CI; real codecs: awaiting reports |
 | USB 3 xHCI controller (any vendor) | xhci (ADR-0032): keyboards, mice, tablets, hubs, mass storage | Tier 0 (QEMU `qemu-xhci`) in CI; real controllers: awaiting reports |
 | Intel 82574L Ethernet | e1000e (ADR-0041) | Tier 0 (QEMU `e1000e`) in CI; real adapters: awaiting reports |
+| Intel I217, I218, I219 Ethernet (in the PCH) | e1000e (ADR-0123), polled | not in QEMU: written from Intel's open drivers, host-tested; real machines: awaiting reports |
+| Intel 82576, I210, I211, I225, I226 Ethernet | igc (ADR-0123) | Tier 0 (QEMU `igb`, an 82576) in CI; I210 and I225/I226: awaiting reports |
+| Realtek RTL8111/8168 Ethernet | rtl8168 (ADR-0123) | not in QEMU: written from BSD's re(4), host-tested; real machines: awaiting reports |
 | virtio-net (modern) | virtio-net (ADR-0023) | Tier 0 (virtual machines) |
 | virtio-blk (modern) | virtio-blk (ADR-0021) | Tier 0 (virtual machines) |
 | Display controller | UEFI GOP framebuffer, 32 bpp (ADR-0029, ADR-0057) | Tier 0 (OVMF); no GPU driver |
@@ -42,10 +45,9 @@ Also driven, outside PCI: the 16550 UART (COM1), the PS/2 keyboard
 (i8042), and USB HID boot keyboards, mice and tablets on xHCI.
 
 **Not driven yet (Tier 1 candidates):**
-- Realtek Ethernet;
-- other Intel Ethernet (I219, I225, I226);
+- Realtek RTL8125 (2.5G) and the 810x fast-Ethernet parts;
 - Wi-Fi;
-- audio input (microphones) and HDMI audio;
+- HDMI audio;
 - GPUs;
 - USB 2-only controllers.
 

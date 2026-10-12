@@ -44,6 +44,8 @@ const USER_PROGRAMS: &[&str] = &[
     "hda",
     "virtio-net",
     "e1000e",
+    "igc",
+    "rtl8168",
     "xhci",
     "usb-storage",
     "core",
@@ -1151,10 +1153,25 @@ const RESET_EXPECT: &[Expect] = &[
     Expect::Line("  one account, never given a password"),
 ];
 /// The boot after a factory reset (ADR-0122): a new computer's, its apps
-/// put back from the image, no password, not in safe mode.
-const NEW_SCRIPT: &[&[u8]] = &[b"@wait desktop: ", b"shutdown\r\n"];
+/// put back from the image, no password, not in safe mode. Its network
+/// card is QEMU's igb, an Intel 82576, driven by igc (ADR-0123): the
+/// address, DHCP, a fetch of 1 MiB, and the host's probes of the echo
+/// services.
+const NEW_SCRIPT: &[&[u8]] = &[
+    b"@wait desktop: network connected",
+    b"run ifconfig out use:net\r\n",
+    b"run fetch out use:net -- http://10.0.2.2:$HTTP/hello.txt\r\n",
+    b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/big /keep/igb.bin\r\n",
+    b"shutdown\r\n",
+];
 const NEW_EXPECT: &[Expect] = &[
     Expect::Contains("core: ready, "),
+    Expect::Contains("igc: MAC 52:54:00:12:34:56, 82576, MSI-X"),
+    Expect::Contains("igc: link up, 1000 Mb/s full duplex"),
+    Expect::Contains("net: configured 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3 (DHCP)"),
+    Expect::Line("net0: 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3"),
+    Expect::Line("hello over http"),
+    Expect::Contains("fetch: saved 1048576 bytes"),
     Expect::Contains("core: this boot finished"),
 ];
 /// Output the script must produce: `Line` must be a whole console line,
@@ -2031,6 +2048,8 @@ const RECOVERY_SERVICES: &[&str] = &[
     "block",
     "netdev",
     "e1000e",
+    "igc",
+    "rtl8168",
     "usb",
     "usbstorage",
     "usbhid",
@@ -2130,6 +2149,8 @@ enum Nic {
     Virtio,
     /// An Intel 82574L (`8086:10d3`), driven by e1000e.
     E1000e,
+    /// An Intel 82576 (`8086:10c9`, QEMU's igb), driven by igc (ADR-0123).
+    Igb,
 }
 
 /// What a smoke boot starts (ADR-0122).
@@ -2147,7 +2168,10 @@ impl Nic {
         match env::var("OCEANS_NIC").as_deref() {
             Err(_) | Ok("" | "virtio") => Ok(Self::Virtio),
             Ok("e1000e") => Ok(Self::E1000e),
-            Ok(other) => Err(format!("OCEANS_NIC={other}: expected `virtio` or `e1000e`")),
+            Ok("igb") => Ok(Self::Igb),
+            Ok(other) => Err(format!(
+                "OCEANS_NIC={other}: expected `virtio`, `e1000e` or `igb`"
+            )),
         }
     }
 
@@ -2155,6 +2179,7 @@ impl Nic {
         match self {
             Self::Virtio => format!("virtio-net-pci,netdev=net0,disable-legacy=on,mac={GUEST_MAC}"),
             Self::E1000e => format!("e1000e,netdev=net0,mac={GUEST_MAC}"),
+            Self::Igb => format!("igb,netdev=net0,mac={GUEST_MAC}"),
         }
     }
 }
@@ -3399,9 +3424,9 @@ fn smoke(profile: Profile) -> Result {
     println!("smoke boot 5 of 6: recovery mode, a factory reset");
     build_image(profile, Some(recovery))?;
     smoke_boot(RESET_SCRIPT, RESET_EXPECT, Nic::Virtio, Services::Recovery)?;
-    println!("smoke boot 6 of 6: a new computer's first boot");
+    println!("smoke boot 6 of 6: a new computer's first boot, an Intel 82576 (igb)");
     build_image(profile, Some("oceans.test=smoke"))?;
-    smoke_boot(NEW_SCRIPT, NEW_EXPECT, Nic::Virtio, Services::Usual)?;
+    smoke_boot(NEW_SCRIPT, NEW_EXPECT, Nic::Igb, Services::Usual)?;
     println!("smoke test passed: kernel came online, files survived a reboot");
     Ok(())
 }

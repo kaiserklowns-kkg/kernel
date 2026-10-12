@@ -1,0 +1,9 @@
+[package]
+name = "oceans-rtl8168"
+description = "Realtek RTL8111/8168 Gigabit Ethernet controller logic: revisions, registers, descriptors, PHY access, without allocation (ADR-0123)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

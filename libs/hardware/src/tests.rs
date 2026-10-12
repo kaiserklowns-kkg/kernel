@@ -82,15 +82,28 @@ fn devices_get_the_most_specific_row() {
         support(0x8086, 0x10d3, 0x02, 0x00, 0x00),
         Support::Driver("e1000e (ADR-0041)")
     );
-    // Another Intel NIC (I219-V): not yet.
-    assert_eq!(support(0x8086, 0x15bc, 0x02, 0x00, 0x00), Support::None);
+    // The I219-V and the I225-V (ADR-0123).
+    assert_eq!(
+        support(0x8086, 0x15bc, 0x02, 0x00, 0x00),
+        Support::Driver("e1000e (ADR-0123), polled")
+    );
+    assert_eq!(
+        support(0x8086, 0x15f3, 0x02, 0x00, 0x00),
+        Support::Driver("igc (ADR-0123)")
+    );
+    // Another Intel NIC (an X550 10G): no driver.
+    assert_eq!(support(0x8086, 0x1563, 0x02, 0x00, 0x00), Support::None);
     assert!(matches!(
         support(0x10de, 0x1c82, 0x03, 0x00, 0x00),
         Support::Firmware(_)
     ));
     assert_eq!(support(0x8086, 0x29c0, 0x06, 0x00, 0x00), Support::Platform);
-    // A Realtek RTL8168: not yet.
-    assert_eq!(support(0x10ec, 0x8168, 0x02, 0x00, 0x00), Support::None);
+    // A Realtek RTL8168 (ADR-0123); its 2.5G RTL8125: no driver.
+    assert_eq!(
+        support(0x10ec, 0x8168, 0x02, 0x00, 0x00),
+        Support::Driver("rtl8168 (ADR-0123)")
+    );
+    assert_eq!(support(0x10ec, 0x8125, 0x02, 0x00, 0x00), Support::None);
 }
 
 /// The published matrix lists every row with what it gets.

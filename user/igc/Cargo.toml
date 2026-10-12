@@ -1,0 +1,19 @@
+[package]
+name = "igc"
+description = "Intel 82576, I210/I211 and I225/I226 Ethernet driver: a userspace service holding one device capability, serving the netdev protocol (ADR-0123)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "igc"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-net-proto.workspace = true
+oceans-virtio.workspace = true
+oceans-nic.workspace = true
+oceans-igc.workspace = true

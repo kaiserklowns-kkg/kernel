@@ -606,6 +606,11 @@ dependencies = [
 [[package]]
 name = "oceans-hardware"
 version = "0.1.0"
+dependencies = [
+ "oceans-e1000e",
+ "oceans-igc",
+ "oceans-rtl8168",
+]
 
 [[package]]
 name = "oceans-hda"
@@ -620,6 +625,13 @@ name = "oceans-http"
 version = "0.1.0"
 dependencies = [
  "oceans-inet",
+]
+
+[[package]]
+name = "oceans-igc"
+version = "0.1.0"
+dependencies = [
+ "oceans-e1000e",
 ]
 
 [[package]]
@@ -686,6 +698,10 @@ version = "0.1.0"
 
 [[package]]
 name = "oceans-random"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-rtl8168"
 version = "0.1.0"
 
 [[package]]

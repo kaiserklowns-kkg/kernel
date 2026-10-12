@@ -266,3 +266,69 @@ fn transmit_ring_wraps_and_fills() {
     ring.complete();
     assert_eq!((ring.free(), ring.tail()), (7, 1));
 }
+
+#[test]
+fn pch_generations_from_device_ids() {
+    use pch::Generation::*;
+    assert_eq!(pch::generation(0x15b8), Some(Spt));
+    assert_eq!(pch::generation(0x15bc), Some(Cnp));
+    assert_eq!(pch::generation(0x0d53), Some(Spt));
+    assert_eq!(pch::generation(0x15fc), Some(Tgp));
+    assert_eq!(pch::generation(0x1a1f), Some(Adp));
+    assert_eq!(pch::generation(0x550b), Some(Mtp));
+    assert_eq!(pch::generation(0x57a1), Some(Ptp));
+    assert_eq!(pch::generation(0x153a), Some(Lpt));
+    assert_eq!(pch::generation(DEVICE_82574L), None);
+    // Each ID once.
+    for (index, &(id, _)) in pch::DEVICES.iter().enumerate() {
+        assert!(
+            pch::DEVICES[index + 1..]
+                .iter()
+                .all(|&(other, _)| other != id)
+        );
+    }
+    assert!(pch::without_ulp(0x153a) && !pch::without_ulp(0x15b8));
+}
+
+#[test]
+fn pch_phy_registers_are_paged() {
+    // Page 0 at address 2, no page select.
+    assert_eq!(pch::phy::CONTROL.address(), 2);
+    assert_eq!(pch::phy::CONTROL.page_select(), None);
+    // High pages at address 1; registers above 15 after a select.
+    assert_eq!(pch::phy::SMB_CTRL.address(), 1);
+    assert_eq!(pch::phy::SMB_CTRL.page_select(), Some(769 << 5));
+    assert_eq!(pch::PhyReg::new(768, 25).page_select(), Some(0));
+    assert_eq!(pch::PhyReg::new(769, 3).page_select(), None);
+    // MDIC: register 16-20, address 21-25, read op 2 at 26.
+    assert_eq!(pch::mdic_read(2, 0), (2 << 21) | (2 << 26));
+    assert_eq!(
+        pch::mdic_write(1, 31, 0x1234),
+        (31 << 16) | (1 << 21) | (1 << 26) | 0x1234
+    );
+    assert!(pch::mdic_answers((23 << 16) | (1 << 28), 23));
+    assert!(!pch::mdic_answers((22 << 16) | (1 << 28), 23));
+}
+
+#[test]
+fn pch_tuning_follows_the_link() {
+    use pch::Generation::*;
+    let t = pch::link_tuning(Cnp, 1000, true);
+    assert_eq!(
+        (t.ipgt, t.pll_gate, t.k1_clock_request),
+        (0x08, 0x0fa, true)
+    );
+    assert_eq!(pch::link_tuning(Mtp, 1000, true).pll_gate, 0x1d5);
+    let t = pch::link_tuning(Spt, 100, true);
+    assert_eq!(
+        (t.ipgt, t.pll_gate, t.k1_clock_request),
+        (0x0c, 0x3e8, false)
+    );
+    assert_eq!(pch::link_tuning(Lpt, 100, true).ipgt, 0x08);
+    assert_eq!(pch::link_tuning(Cnp, 10, false).ipgt, 0xff);
+    // The field in bits 11:2 at least 0x18 at 1000 Mb/s.
+    assert_eq!(pch::speed_tuning(0x0003, 1000), 0x0003 | (0x18 << 2));
+    assert_eq!(pch::speed_tuning(0x20 << 2, 1000), 0x20 << 2);
+    assert_eq!(pch::speed_tuning(0x1234, 100), 0xc023);
+    assert!(pch::SPAN > pch::reg::FEXTNVM12 && pch::SPAN > reg::SPAN);
+}

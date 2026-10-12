@@ -338,6 +338,7 @@ version = "0.1.0"
 dependencies = [
  "oceans-e1000e",
  "oceans-net-proto",
+ "oceans-nic",
  "oceans-rt",
  "oceans-virtio",
 ]
@@ -556,6 +557,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "igc"
+version = "0.1.0"
+dependencies = [
+ "oceans-igc",
+ "oceans-net-proto",
+ "oceans-nic",
+ "oceans-rt",
+ "oceans-virtio",
 ]
 
 [[package]]
@@ -809,6 +821,11 @@ dependencies = [
 [[package]]
 name = "oceans-hardware"
 version = "0.1.0"
+dependencies = [
+ "oceans-e1000e",
+ "oceans-igc",
+ "oceans-rtl8168",
+]
 
 [[package]]
 name = "oceans-hda"
@@ -823,6 +840,13 @@ name = "oceans-http"
 version = "0.1.0"
 dependencies = [
  "oceans-inet",
+]
+
+[[package]]
+name = "oceans-igc"
+version = "0.1.0"
+dependencies = [
+ "oceans-e1000e",
 ]
 
 [[package]]
@@ -862,6 +886,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-nic"
+version = "0.1.0"
+dependencies = [
+ "oceans-net-proto",
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-nvme"
 version = "0.1.0"
 
@@ -881,6 +913,10 @@ dependencies = [
  "oceans-abi",
  "oceans-heap",
 ]
+
+[[package]]
+name = "oceans-rtl8168"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-sdk"
@@ -1159,6 +1195,17 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rtl8168"
+version = "0.1.0"
+dependencies = [
+ "oceans-net-proto",
+ "oceans-nic",
+ "oceans-rt",
+ "oceans-rtl8168",
+ "oceans-virtio",
 ]
 
 [[package]]

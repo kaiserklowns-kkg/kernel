@@ -1,0 +1,19 @@
+[package]
+name = "rtl8168"
+description = "Realtek RTL8111/8168 Ethernet driver: a userspace service holding one device capability, serving the netdev protocol (ADR-0123)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rtl8168"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-net-proto.workspace = true
+oceans-virtio.workspace = true
+oceans-nic.workspace = true
+oceans-rtl8168.workspace = true

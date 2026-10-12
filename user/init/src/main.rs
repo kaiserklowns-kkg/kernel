@@ -14,7 +14,8 @@
 //!    ALIAS` lists it as ALIAS, ADR-0035), `grant = devices`
 //!    (the PCI device list, read-only), `grant = device:VVVV:DDDD` (the
 //!    PCI function with that vendor and device ID, opened exclusively:
-//!    what makes a service its driver, ADR-0021), `grant =
+//!    what makes a service its driver, ADR-0021; `device:A,B,...` the first
+//!    of several present, ADR-0123), `grant =
 //!    device-class:CCSSPP` (the first function of that class, subclass
 //!    and programming interface, for standard interfaces such as xHCI),
 //!    `grant = console-input` (feeding the console's input and nothing
@@ -107,9 +108,10 @@ enum Grant {
     Console,
     SystemInfo,
     Devices,
-    /// The PCI function with this vendor and device ID; the text is the
-    /// manifest's `VVVV:DDDD`.
-    Device(u16, u16, &'static str),
+    /// The PCI function with this vendor and device ID, or the first
+    /// present of several (ADR-0123): the manifest's `VVVV:DDDD[,...]`,
+    /// checked when parsed.
+    Device(&'static str),
     /// The first PCI function of this class (`0xCCSSPP`); the text is the
     /// manifest's `CCSSPP`.
     DeviceClass(u32, &'static str),
@@ -453,10 +455,12 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                             }
                             Grant::Storage(path)
                         } else if let Some(id) = other.strip_prefix("device:") {
-                            match parse_device_id(id) {
-                                Some((vendor, device)) => Grant::Device(vendor, device, id),
-                                None => return error("device grants are device:VVVV:DDDD (hex)"),
+                            if !id.split(',').all(|one| parse_device_id(one).is_some()) {
+                                return error(
+                                    "device grants are device:VVVV:DDDD[,VVVV:DDDD...] (hex)",
+                                );
                             }
+                            Grant::Device(id)
                         } else if let Some(id) = other.strip_prefix("device-class:") {
                             match parse_class(id) {
                                 Some(class) => Grant::DeviceClass(class, id),
@@ -631,11 +635,10 @@ impl Init {
                     ),
                     // Exclusive: a restarted driver reopens it once the old
                     // instance's capability has been closed at its exit.
-                    Grant::Device(vendor, device, id) => (
-                        oceans_rt::device_open(self.bus, vendor, device, 0)?,
-                        "device",
-                        id,
-                    ),
+                    Grant::Device(ids) => {
+                        let (handle, id) = open_first_device(self.bus, ids)?;
+                        (handle, "device", id)
+                    }
                     Grant::DeviceClass(class, id) => (
                         oceans_rt::device_open_class(self.bus, class, 0)?,
                         "device",
@@ -933,6 +936,24 @@ impl Init {
 }
 
 /// `VVVV:DDDD` in hex.
+/// The first of `ids` (`VVVV:DDDD[,...]`, checked when parsed) this
+/// machine has, opened, and its id: one driver for a family of controllers
+/// (ADR-0123). `NotFound` if none is here; any other refusal (`Busy`)
+/// stops the search.
+fn open_first_device(bus: Handle, ids: &'static str) -> Result<(Handle, &'static str), Error> {
+    for id in ids.split(',') {
+        let Some((vendor, device)) = parse_device_id(id) else {
+            continue;
+        };
+        match oceans_rt::device_open(bus, vendor, device, 0) {
+            Ok(handle) => return Ok((handle, id)),
+            Err(Error::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::NotFound)
+}
+
 fn parse_device_id(id: &str) -> Option<(u16, u16)> {
     let (vendor, device) = id.split_once(':')?;
     let hex = |text: &str| {

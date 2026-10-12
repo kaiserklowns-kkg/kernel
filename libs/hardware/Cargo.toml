@@ -7,3 +7,6 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+oceans-e1000e.workspace = true
+oceans-igc.workspace = true
+oceans-rtl8168.workspace = true

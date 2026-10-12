@@ -84,12 +84,33 @@ pub enum Support {
     None,
 }
 
+/// The PCI IDs a row covers.
+#[derive(Clone, Copy, Debug)]
+pub enum Ids {
+    /// Any part (of the class).
+    Any,
+    /// This `(vendor, device)`.
+    One(u16, u16),
+    /// A family a driver knows by its own list (ADR-0123).
+    Family(fn(u16, u16) -> bool),
+}
+
+impl Ids {
+    fn matches(self, vendor: u16, device: u16) -> bool {
+        match self {
+            Self::Any => true,
+            Self::One(v, d) => (v, d) == (vendor, device),
+            Self::Family(known) => known(vendor, device),
+        }
+    }
+}
+
 /// One row of the matrix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Row {
     pub what: &'static str,
-    /// `(vendor, device)` if specific; else any with the class below.
-    pub id: Option<(u16, u16)>,
+    /// Which parts, by vendor and device ID; with the class below.
+    pub id: Ids,
     /// `(class, subclass, prog_if)`; `None` matches any part.
     pub class: (Option<u8>, Option<u8>, Option<u8>),
     pub support: Support,
@@ -103,55 +124,75 @@ const fn class(c: u8, s: u8, p: Option<u8>) -> (Option<u8>, Option<u8>, Option<u
 pub const MATRIX: &[Row] = &[
     Row {
         what: "NVMe SSD (any vendor)",
-        id: None,
+        id: Ids::Any,
         class: class(0x01, 0x08, Some(0x02)),
         support: Support::Driver("nvme (ADR-0040)"),
     },
     Row {
         what: "SATA AHCI controller (any vendor)",
-        id: None,
+        id: Ids::Any,
         class: class(0x01, 0x06, Some(0x01)),
         support: Support::Driver("ahci (ADR-0069)"),
     },
     Row {
         what: "Intel High Definition Audio controller (any vendor)",
-        id: None,
+        id: Ids::Any,
         class: class(0x04, 0x03, None),
         support: Support::Driver("hda (ADR-0079, ADR-0087): output and input, 48 kHz stereo"),
     },
     Row {
         what: "USB 3 xHCI controller (any vendor)",
-        id: None,
+        id: Ids::Any,
         class: class(0x0c, 0x03, Some(0x30)),
         support: Support::Driver("xhci (ADR-0032): keyboards, mice, tablets, hubs, mass storage"),
     },
     Row {
         what: "Intel 82574L Ethernet",
-        id: Some((0x8086, 0x10d3)),
+        id: Ids::One(0x8086, 0x10d3),
         class: (None, None, None),
         support: Support::Driver("e1000e (ADR-0041)"),
     },
     Row {
+        what: "Intel I217, I218, I219 Ethernet (in the PCH)",
+        id: Ids::Family(|vendor, device| {
+            vendor == 0x8086 && oceans_e1000e::pch::generation(device).is_some()
+        }),
+        class: (None, None, None),
+        support: Support::Driver("e1000e (ADR-0123), polled"),
+    },
+    Row {
+        what: "Intel 82576, I210, I211, I225, I226 Ethernet",
+        id: Ids::Family(|vendor, device| vendor == 0x8086 && oceans_igc::family(device).is_some()),
+        class: (None, None, None),
+        support: Support::Driver("igc (ADR-0123)"),
+    },
+    Row {
+        what: "Realtek RTL8111/8168 Ethernet",
+        id: Ids::Family(oceans_rtl8168::known),
+        class: (None, None, None),
+        support: Support::Driver("rtl8168 (ADR-0123)"),
+    },
+    Row {
         what: "virtio-net (modern)",
-        id: Some((0x1af4, 0x1041)),
+        id: Ids::One(0x1af4, 0x1041),
         class: (None, None, None),
         support: Support::Driver("virtio-net (ADR-0023)"),
     },
     Row {
         what: "virtio-blk (modern)",
-        id: Some((0x1af4, 0x1042)),
+        id: Ids::One(0x1af4, 0x1042),
         class: (None, None, None),
         support: Support::Driver("virtio-blk (ADR-0021)"),
     },
     Row {
         what: "Display controller",
-        id: None,
+        id: Ids::Any,
         class: (Some(0x03), None, None),
         support: Support::Firmware("UEFI GOP framebuffer, 32 bpp (ADR-0029, ADR-0057)"),
     },
     Row {
         what: "Host bridge, ISA/LPC bridge, PCI bridge",
-        id: None,
+        id: Ids::Any,
         class: (Some(0x06), None, None),
         support: Support::Platform,
     },
@@ -166,7 +207,7 @@ pub fn lookup(
     prog_if: u8,
 ) -> Option<&'static Row> {
     MATRIX.iter().find(|row| {
-        row.id.is_none_or(|id| id == (vendor, device))
+        row.id.matches(vendor, device)
             && row.class.0.is_none_or(|c| c == class)
             && row.class.1.is_none_or(|s| s == subclass)
             && row.class.2.is_none_or(|p| p == prog_if)
