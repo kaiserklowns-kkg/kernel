@@ -590,6 +590,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "installer"
+version = "0.1.0"
+dependencies = [
+ "oceans-block-proto",
+ "oceans-fat",
+ "oceans-gpt",
+ "oceans-install",
+ "oceans-package",
+ "oceans-rt",
+]
+
+[[package]]
 name = "ipc-test"
 version = "0.1.0"
 dependencies = [
@@ -868,6 +880,14 @@ version = "0.1.0"
 dependencies = [
  "oceans-input",
  "oceans-rt",
+]
+
+[[package]]
+name = "oceans-install"
+version = "0.1.0"
+dependencies = [
+ "oceans-fat",
+ "oceans-gpt",
 ]
 
 [[package]]

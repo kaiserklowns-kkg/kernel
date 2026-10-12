@@ -21,6 +21,7 @@ oceans-dev = { path = "../oceans" }
 oceans-dns.workspace = true
 oceans-fat.workspace = true
 oceans-gpt.workspace = true
+oceans-install.workspace = true
 oceans-random.workspace = true
 oceans-tls = { workspace = true, features = ["server"] }
 oceans-volume.workspace = true

@@ -287,10 +287,15 @@ pub fn system_package(
         )?),
         None => None,
     };
+    // Limine as the slot boots it, for the installer (ADR-0127): an
+    // installed disk gets it from the verified package.
+    let limine = fs::read(esp.join("EFI").join("BOOT").join("BOOTX64.EFI"))
+        .map_err(|e| format!("Limine: {e}"))?;
     let mut files: Vec<(&str, &[u8])> = vec![
         ("manifest", manifest.as_bytes()),
         (KERNEL_PACKAGE, &kernel),
         ("initrd", &new_initrd),
+        ("limine.efi", &limine),
     ];
     if let Some((efi, config)) = &boot_files {
         files.push((crate::secure_boot::UPDATE_EFI, efi));
@@ -386,7 +391,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("nvme: the controller is shut down"),
     Expect::Contains("ahci: the disk is in standby"),
     Expect::Contains("init: core stopped"),
-    Expect::Contains("(ABI 20)"),
+    Expect::Contains("(ABI 21)"),
     Expect::Contains("fs: formatted a blank disk"),
     // The SATA disk (ADR-0069): identified, formatted, written.
     Expect::Contains("ahci: port 0: QEMU HARDDISK (serial oceans-sata, firmware "),
@@ -510,28 +515,173 @@ pub fn smoke_hw(profile: Profile) -> Result {
     ])?;
     prepare_blank(HW_NVME_IMAGE, HW_NVME_SIZE, true)?;
     prepare_blank(HW_SATA_IMAGE, HW_SATA_SIZE, true)?;
-    println!("hardware boot 1 of 4: from the USB image, a blank NVMe SSD and SATA disk");
+    println!("hardware boot 1 of 6: from the USB image, a blank NVMe SSD and SATA disk");
     hw_boot(HW_SCRIPT, HW_EXPECT, BootFrom::Stick)?;
-    println!("hardware boot 2 of 4: the same disks");
+    println!("hardware boot 2 of 6: the same disks");
     hw_boot(HW_REBOOT_SCRIPT, HW_REBOOT_EXPECT, BootFrom::Stick)?;
     // Installed (ADR-0126): the SSD as the installer leaves it, its EFI
     // system partition holding the release, its Oceans root blank. The
     // stick stays, for its update package.
     write_installed_image(&esp, HW_NVME_IMAGE)?;
-    println!("hardware boot 3 of 4: installed, from the NVMe SSD");
+    println!("hardware boot 3 of 6: installed, from the NVMe SSD");
     hw_boot(INSTALLED_SCRIPT, INSTALLED_EXPECT, BootFrom::Nvme)?;
-    println!("hardware boot 4 of 4: installed, the update started first");
+    println!("hardware boot 4 of 6: installed, the update started first");
     hw_boot(
         INSTALLED_REBOOT_SCRIPT,
         INSTALLED_REBOOT_EXPECT,
         BootFrom::Nvme,
     )?;
+    // Installing over Windows (ADR-0127, ADR-0128): the SSD as Oceans
+    // Setup leaves it before restarting.
+    let release = system_package(
+        &esp,
+        "0.1.0",
+        &release::test_release_key(),
+        "Oceans, installed over Windows (the hardware smoke test's)",
+        None,
+    )?;
+    write_windows_image(&release, HW_NVME_IMAGE)?;
+    println!("hardware boot 5 of 6: a Windows PC prepared by Oceans Setup: the installer");
+    hw_boot(&[], WINDOWS_INSTALL_EXPECT, BootFrom::Nvme)?;
+    println!("hardware boot 6 of 6: the installed system's first start");
+    hw_boot(
+        WINDOWS_INSTALLED_SCRIPT,
+        WINDOWS_INSTALLED_EXPECT,
+        BootFrom::Nvme,
+    )?;
     println!(
         "hardware smoke test passed: booted from the USB image; root on NVMe; SATA; e1000e; xHCI; \
-         updated to slot b; installed on the NVMe SSD and updated there"
+         updated to slot b; installed on the NVMe SSD and updated there; installed over Windows"
     );
     Ok(())
 }
+
+/// The ESP GUID Oceans Setup chose in the test (its boot entry names it).
+const INSTALLED_ESP_GUID: &str = "5ea0b5ce-0127-4a5e-9c1d-00e5a1b2c3d4";
+
+/// A PC with Windows as Oceans Setup leaves it before restarting (ADR-0128)
+/// at `path`: Windows' ESP (its boot manager, no fallback loader), the
+/// Microsoft reserved partition, C: (a blank stand-in), and the staging
+/// partition Setup made, FAT32, holding what Setup stages for `package`
+/// (Oceans Setup's dry run writes it).
+fn write_windows_image(package: &[u8], path: &str) -> Result {
+    let build = root().join("build");
+    // The release as published, signed with the test's release key; then
+    // Oceans Setup itself checks it and stages it (its dry run: all of it
+    // but Windows' disk and firmware calls).
+    let published = build.join("setup-release");
+    let _ = fs::remove_dir_all(&published);
+    fs::create_dir_all(&published).map_err(|e| format!("{}: {e}", published.display()))?;
+    let name = "oceans-0.1.0-alpha.opk";
+    let sums = format!("{}  {name}\n", oceans_dev::release::sha256_hex(package));
+    let key = release::test_release_key();
+    for (file, bytes) in [
+        (name, package.to_vec()),
+        (oceans_dev::release::SUMS, sums.clone().into_bytes()),
+        (
+            oceans_dev::release::SIGNATURE,
+            oceans_dev::release::sign_checksums(&key, &sums).into_bytes(),
+        ),
+    ] {
+        fs::write(published.join(file), bytes).map_err(|e| format!("{file}: {e}"))?;
+    }
+    let staging = build.join("staging");
+    let _ = fs::remove_dir_all(&staging);
+    let status = cargo()
+        .args(["run", "--quiet", "-p", "oceans-setup", "--", "--dry-run"])
+        .arg(&staging)
+        .arg("--from")
+        .arg(&published)
+        .args([
+            "--key",
+            &key.public_hex(),
+            &key.publisher,
+            "--esp",
+            INSTALLED_ESP_GUID,
+        ])
+        .status()
+        .map_err(|e| format!("cannot run Oceans Setup: {e}"))?;
+    if !status.success() {
+        return Err(format!("Oceans Setup's dry run failed ({status})"));
+    }
+    let windows = build.join("windows-esp");
+    let manager = windows.join("EFI").join("Microsoft").join("Boot");
+    fs::create_dir_all(&manager).map_err(|e| format!("{}: {e}", manager.display()))?;
+    fs::write(
+        manager.join("bootmgfw.efi"),
+        b"Windows Boot Manager (a stand-in)",
+    )
+    .map_err(|e| format!("bootmgfw.efi: {e}"))?;
+    let guid = |text| oceans_install::parse_guid(text).expect("a GUID");
+    disk_image::gpt_image(
+        &root().join(path),
+        &[
+            disk_image::Volume {
+                kind: oceans_gpt::EFI_SYSTEM,
+                name: "EFI system partition",
+                label: "SYSTEM",
+                mib: 100,
+                sources: vec![windows.join("EFI")],
+            },
+            disk_image::Volume {
+                kind: guid("e3c9e316-0b5c-4db8-817d-f92df00215ae"),
+                name: "Microsoft reserved partition",
+                label: "",
+                mib: 16,
+                sources: Vec::new(),
+            },
+            disk_image::Volume {
+                kind: guid("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"),
+                name: "Basic data partition",
+                label: "",
+                mib: 1300,
+                sources: Vec::new(),
+            },
+            disk_image::Volume {
+                kind: guid("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"),
+                name: "Oceans Setup",
+                label: "OCEANSSETUP",
+                mib: 300,
+                sources: vec![
+                    staging.join("EFI"),
+                    staging.join("oceans"),
+                    staging.join("limine.conf"),
+                ],
+            },
+        ],
+        b"a Windows PC",
+    )
+}
+
+/// The installer's boot: no shell; it installs and restarts.
+const WINDOWS_INSTALL_EXPECT: &[Expect] = &[
+    Expect::Contains("boot mode: install"),
+    Expect::Contains("init: install mode: services-install.conf"),
+    Expect::Contains("installer: started from the SSD's partition \"Oceans Setup\""),
+    Expect::Contains(
+        "installer: Oceans 0.1.0 alpha from Oceans Test Release, verified; installing over the whole SSD",
+    ),
+    Expect::Contains("installer: Oceans 0.1.0 alpha is installed; restarting into it"),
+    Expect::Contains("init: asked to restart: stopping the system"),
+];
+/// The installed system: started from the ESP the boot entry names, its
+/// root formatted, Windows' boot manager gone.
+const WINDOWS_INSTALLED_SCRIPT: &[&[u8]] = &[
+    b"ls /boot/EFI\r\n",
+    b"cat /bin/release\r\n",
+    b"run update out use:fs -- status\r\n",
+    b"shutdown\r\n",
+];
+const WINDOWS_INSTALLED_EXPECT: &[Expect] = &[
+    Expect::Contains("boot partition: 5ea0b5ce-0127-4a5e-9c1d-00e5a1b2c3d4"),
+    Expect::Contains("fs (nvmeboot): the EFI system partition Oceans started from, read-write"),
+    Expect::Contains("fs: the root is the Oceans partition at sector 1050624"),
+    Expect::Contains("fs: formatted a blank disk"),
+    Expect::Line("  BOOT/"),
+    Expect::Line("0.1.0 alpha"),
+    Expect::Line("update: running Oceans 0.1.0 alpha (slot a)"),
+    Expect::Contains("power: switching off (ACPI S5)"),
+];
 
 /// One boot of the USB image: the shell (on the serial line) gets each
 /// script line at a prompt; the boot passes when every expectation is met.
@@ -655,7 +805,8 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect], from: BootFrom) -> Result {
     let ends_with_power = script
         .last()
         .is_some_and(|last| matches!(*last, b"reboot\r\n" | b"shutdown\r\n"));
-    let mut power_sent = false;
+    // A boot without a shell (install mode, ADR-0127) ends by itself.
+    let mut power_sent = script.is_empty();
     let mut done_at: Option<Instant> = None;
     let outcome = loop {
         if let Some(at) = done_at

@@ -217,8 +217,8 @@ pub fn gpt_image(path: &Path, volumes: &[Volume<'_>], seed: &[u8]) -> Result {
     }
     for (volume, partition) in volumes.iter().zip(&partitions) {
         // An Oceans root is left blank: Oceans formats it at first boot
-        // (ADR-0126).
-        if volume.kind == oceans_gpt::OCEANS_ROOT {
+        // (ADR-0126); so is a volume without a label (a test's stand-in).
+        if volume.kind == oceans_gpt::OCEANS_ROOT || volume.label.is_empty() {
             continue;
         }
         let window = Window::new(&mut disk, partition.start(), partition.size())

@@ -64,6 +64,7 @@ const USER_PROGRAMS: &[&str] = &[
     "sysreport",
     "diag",
     "recovery",
+    "installer",
     "logkeep",
     "play",
     "update",
@@ -1069,7 +1070,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 20)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 21)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1234,7 +1235,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 20)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 21)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -1967,6 +1968,11 @@ fn build_image_for(
         "services-recovery.conf".to_string(),
         recovery_services(&text).into_bytes(),
     ));
+    // Install mode (ADR-0127): the SSD and the installer.
+    files.push((
+        "services-install.conf".to_string(),
+        install_services(&text).into_bytes(),
+    ));
     files.push(("services.conf".to_string(), manifest_bytes));
     build_ui()?;
     for (name, bytes) in build_go(GO_PROGRAMS)? {
@@ -2074,6 +2080,42 @@ const RECOVERY_SERVICES: &[&str] = &[
 /// of the others (init refuses a `use` no service provides) and without
 /// the test-mode checks.
 fn recovery_services(manifest: &str) -> String {
+    services_subset(
+        manifest,
+        RECOVERY_SERVICES,
+        "# Recovery mode (ADR-0122): made by xtask from services.conf.
+",
+    )
+}
+
+/// What install mode starts (ADR-0127): the NVMe SSD and the installer,
+/// nothing else (not even a shell: the user confirmed on Windows).
+const INSTALLER_SERVICE: &str = "
+service installer
+    image = installer
+    \n    restart = never
+    grant = log
+    grant = sysinfo
+    grant = power
+    \n    grant = module:update.keys
+    use = nvme
+";
+
+/// The install manifest (ADR-0127), made from `manifest`.
+fn install_services(manifest: &str) -> String {
+    let mut out = services_subset(
+        manifest,
+        &["nvme"],
+        "# Install mode (ADR-0127): made by xtask from services.conf.
+",
+    );
+    out.push_str(INSTALLER_SERVICE);
+    out
+}
+
+/// The services `keep` of `manifest`, without what they would use of the
+/// others and without the test-mode checks.
+fn services_subset(manifest: &str, keep: &[&str], title: &str) -> String {
     let blocks = || {
         let mut name = "";
         manifest.lines().filter(move |line| {
@@ -2083,14 +2125,14 @@ fn recovery_services(manifest: &str) -> String {
                 // A comment or a blank line between services.
                 return false;
             }
-            RECOVERY_SERVICES.contains(&name)
+            keep.contains(&name)
         })
     };
     let provided: Vec<&str> = blocks()
         .filter_map(|line| line.trim().strip_prefix("provide = "))
         .map(str::trim)
         .collect();
-    let mut out = String::from("# Recovery mode (ADR-0122): made by xtask from services.conf.\n");
+    let mut out = String::from(title);
     for line in blocks() {
         let setting = line.trim();
         if let Some(used) = setting.strip_prefix("use = ") {
@@ -5257,6 +5299,47 @@ mod tests {
                     let endpoint = used.split_whitespace().next().unwrap();
                     assert!(provided.contains(&endpoint), "{line}: nothing provides it");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn install_mode_keeps_the_ssd_and_the_installer() {
+        for manifest in [
+            include_str!("../../../config/services.conf"),
+            include_str!("../../../config/services-smoke.conf"),
+        ] {
+            let install = install_services(manifest);
+            assert!(
+                install.contains(
+                    "service nvme
+"
+                ),
+                "{install}"
+            );
+            assert!(install.contains(
+                "service installer
+    image = installer
+"
+            ));
+            assert!(install.contains(
+                "    grant = module:update.keys
+    use = nvme
+"
+            ));
+            for gone in [
+                "service fs
+",
+                "service shell
+",
+                "service core
+",
+            ] {
+                assert!(
+                    !install.contains(gone),
+                    "{gone} is there:
+{install}"
+                );
             }
         }
     }

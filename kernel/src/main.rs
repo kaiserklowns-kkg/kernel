@@ -56,6 +56,7 @@ fn kernel_main(boot: &'static BootInfo) -> ! {
     match oceans_abi::sysinfo::BootRecord::from_cmdline(boot.cmdline()).mode {
         oceans_abi::sysinfo::mode::SAFE => klog::info!("boot mode: safe"),
         oceans_abi::sysinfo::mode::RECOVERY => klog::info!("boot mode: recovery"),
+        oceans_abi::sysinfo::mode::INSTALL => klog::info!("boot mode: install"),
         _ => {}
     }
     // Where the kernel came from (ADR-0126), as GPT tools print it.

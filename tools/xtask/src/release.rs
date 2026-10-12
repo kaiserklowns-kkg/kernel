@@ -189,6 +189,7 @@ fn published_key_matches(published: &str, key: &DeveloperKey) -> bool {
 /// oceans-VERSION-CHANNEL.opk       the same release as a system update
 /// release.keys                     the release key's public half
 /// BUILD-INFO                       the commit it was built from
+/// OceansSetup.exe                  installs it over Windows, from the web (ADR-0128)
 /// SHA256SUMS
 /// SHA256SUMS.sig                   the checksums, signed (ADR-0075)
 /// ```
@@ -267,6 +268,9 @@ pub fn release() -> Result {
             .into_bytes(),
         ),
     ];
+    // Oceans Setup (ADR-0128): installs this release from the web over a
+    // Windows PC; built for Windows, where it runs.
+    files.push(("OceansSetup.exe".to_string(), build_setup()?));
     // The same release, signed for Secure Boot: a selector and one slot
     // (ADR-0092).
     if let Some(secure_boot_key) = &secure_boot_key {
@@ -296,6 +300,34 @@ pub fn release() -> Result {
         key.public_hex()
     );
     Ok(())
+}
+
+/// Oceans Setup for Windows (ADR-0128), built in release mode for
+/// `x86_64-pc-windows-gnu`: natively on Windows, with MinGW elsewhere.
+fn build_setup() -> Result<Vec<u8>> {
+    const TARGET: &str = "x86_64-pc-windows-gnu";
+    let status = cargo()
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "oceans-setup",
+            "--target",
+            TARGET,
+        ])
+        .status()
+        .map_err(|e| format!("cannot build Oceans Setup: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Oceans Setup did not build for {TARGET} (`rustup target add {TARGET}`, and MinGW off Windows)"
+        ));
+    }
+    let exe = root()
+        .join("target")
+        .join(TARGET)
+        .join("release")
+        .join("OceansSetup.exe");
+    fs::read(&exe).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
 #[cfg(test)]

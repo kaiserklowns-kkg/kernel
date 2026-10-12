@@ -133,5 +133,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0124](0124-msi.md) | MSI for devices without MSI-X (ABI 18): `DEVICE_IRQ` binds the one message and says which it bound; AHCI, the I219 and 8168s on interrupts | Accepted |
 | [0125](0125-pci-config-writes.md) | Writing PCI configuration space, the safe fields only (ABI 19): `DEVICE_CONFIG_WRITE` for the PCI Express power and request-size fields; rtl8168 turns ASPM off | Accepted |
 | [0126](0126-installed-on-the-internal-disk.md) | Oceans installed on the internal disk (ABI 20): GPT with an ESP and an Oceans root partition; the boot partition from the kernel; `/boot`; updates there | Accepted |
+| [0127](0127-the-installer.md) | The installer (ABI 21): install mode; the release checked against the image's keys; the SSD Oceans started from laid out as installed | Accepted |
+| [0128](0128-oceans-setup.md) | Oceans Setup: installing from the web over Windows (`OceansSetup.exe`: checks, verified download, ERASE, a staging partition, UEFI boot entries, restart) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

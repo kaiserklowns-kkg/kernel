@@ -60,6 +60,8 @@ const MANIFEST: &str = "services.conf";
 /// What recovery mode starts (ADR-0122): storage, the network, the
 /// filesystem, the logs and the shell, made from the usual manifest.
 const RECOVERY_MANIFEST: &str = "services-recovery.conf";
+/// What install mode starts (ADR-0127): the NVMe SSD and the installer.
+const INSTALL_MANIFEST: &str = "services-install.conf";
 const MAX_SERVICES: usize = 32;
 /// Grants of one service. The file system holds one per program it
 /// publishes in /bin, so this grows with the system's programs.
@@ -301,18 +303,25 @@ fn main(start: Start) -> i64 {
         },
     };
 
-    // Recovery mode (ADR-0122): its own, smaller set of services.
-    let recovery = oceans_rt::boot_mode(sysinfo) == oceans_rt::sysinfo::mode::RECOVERY;
-    let chosen = if recovery && archive.find(RECOVERY_MANIFEST).is_some() {
-        say(format_args!("recovery mode: {RECOVERY_MANIFEST}"));
-        RECOVERY_MANIFEST
-    } else {
-        if recovery {
-            say(format_args!(
-                "recovery mode, but no {RECOVERY_MANIFEST}: the usual services"
-            ));
+    // Recovery mode (ADR-0122) and install mode (ADR-0127): their own,
+    // smaller sets of services.
+    let (special, name) = match oceans_rt::boot_mode(sysinfo) {
+        oceans_rt::sysinfo::mode::RECOVERY => (Some(RECOVERY_MANIFEST), "recovery"),
+        oceans_rt::sysinfo::mode::INSTALL => (Some(INSTALL_MANIFEST), "install"),
+        _ => (None, ""),
+    };
+    let chosen = match special {
+        Some(manifest) if archive.find(manifest).is_some() => {
+            say(format_args!("{name} mode: {manifest}"));
+            manifest
         }
-        MANIFEST
+        Some(manifest) => {
+            say(format_args!(
+                "{name} mode, but no {manifest}: the usual services"
+            ));
+            MANIFEST
+        }
+        None => MANIFEST,
     };
     let Some(manifest) = archive
         .find(chosen)

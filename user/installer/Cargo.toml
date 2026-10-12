@@ -1,0 +1,20 @@
+[package]
+name = "installer"
+description = "Installing Oceans over the disk it was started from, in install mode: the signed release checked, the disk laid out (ADR-0127)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "installer"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-block-proto.workspace = true
+oceans-fat.workspace = true
+oceans-gpt.workspace = true
+oceans-install.workspace = true
+oceans-package.workspace = true

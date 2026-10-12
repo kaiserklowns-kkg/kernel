@@ -28,9 +28,10 @@
 /// `SYSTEM_INFO`: the boot mode); 18 = ADR-0124 (`DEVICE_IRQ` binds MSI for
 /// a function without MSI-X, and says which it bound); 19 = ADR-0125 (49:
 /// writing the PCI Express power and request-size fields); 20 = ADR-0126
-/// (the boot disk and partition in the `BOOT` record). Versions only add;
-/// existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 20;
+/// (the boot disk and partition in the `BOOT` record); 21 = ADR-0127 (the
+/// install boot mode). Versions only add; existing numbers keep their
+/// meaning.
+pub const ABI_VERSION: u64 = 21;
 
 /// System call numbers.
 pub mod nr {
@@ -726,6 +727,9 @@ pub mod sysinfo {
         pub const SAFE: u64 = 1;
         /// A small system to repair the usual one from its console.
         pub const RECOVERY: u64 = 2;
+        /// Installing Oceans over the disk it was started from (ADR-0127,
+        /// ABI 21).
+        pub const INSTALL: u64 = 3;
     }
 
     impl BootRecord {
@@ -739,6 +743,7 @@ pub mod sysinfo {
                 .map_or(mode::NORMAL, |name| match name {
                     "safe" => mode::SAFE,
                     "recovery" => mode::RECOVERY,
+                    "install" => mode::INSTALL,
                     _ => mode::NORMAL,
                 });
             Self {

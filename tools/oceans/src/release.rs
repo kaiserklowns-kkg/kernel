@@ -61,17 +61,44 @@ pub fn sign_checksums(key: &DeveloperKey, sums: &str) -> String {
 /// `public_hex`: the signature of `SHA256SUMS`, then every file it lists.
 /// Returns the names checked.
 pub fn verify_release(dir: &Path, public_hex: &str) -> Result<Vec<String>, String> {
-    let public: [u8; 32] = unhex(public_hex).ok_or("the release key is not 64 hex digits")?;
-    let key = VerifyingKey::from_bytes(&public).map_err(|_| "not an Ed25519 public key")?;
     let read = |name: &str| {
         std::fs::read(dir.join(name)).map_err(|e| format!("{}: {e}", dir.join(name).display()))
     };
     let sums = String::from_utf8(read(SUMS)?).map_err(|_| format!("{SUMS} is not text"))?;
     let signature_text =
         String::from_utf8(read(SIGNATURE)?).map_err(|_| format!("{SIGNATURE} is not text"))?;
+    let mut checked = Vec::new();
+    for (want, name) in verify_checksums(&sums, &signature_text, public_hex)? {
+        let got = sha256_hex(&read(&name)?);
+        if got != want {
+            return Err(format!(
+                "{name}: its SHA-256 does not match {SUMS}: the file was changed"
+            ));
+        }
+        checked.push(name);
+    }
+    Ok(checked)
+}
+
+/// The release key `public_hex`, as bytes.
+pub fn parse_key(public_hex: &str) -> Option<[u8; 32]> {
+    unhex(public_hex)
+}
+
+/// Checks `SHA256SUMS`' text against its signature by the release key
+/// `public_hex`; returns its `(hash, name)` lines, every name a plain file
+/// name. A download can then fetch and check only the files it needs
+/// (ADR-0128).
+pub fn verify_checksums(
+    sums: &str,
+    signature_text: &str,
+    public_hex: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let public: [u8; 32] = unhex(public_hex).ok_or("the release key is not 64 hex digits")?;
+    let key = VerifyingKey::from_bytes(&public).map_err(|_| "not an Ed25519 public key")?;
     let signature: [u8; 64] =
-        unhex(&signature_text).ok_or(format!("{SIGNATURE} is not a signature"))?;
-    key.verify_strict(&message(&sums), &ed25519_dalek::Signature::from_bytes(&signature))
+        unhex(signature_text).ok_or(format!("{SIGNATURE} is not a signature"))?;
+    key.verify_strict(&message(sums), &ed25519_dalek::Signature::from_bytes(&signature))
         .map_err(|_| {
             format!("{SUMS} is not signed by that key: the download was changed, or the key is not this release's")
         })?;
@@ -85,13 +112,7 @@ pub fn verify_release(dir: &Path, public_hex: &str) -> Result<Vec<String>, Strin
         if name.is_empty() || name.contains(['/', '\\', ':']) || name.starts_with('.') {
             return Err(format!("{SUMS}: {name}: not a plain file name"));
         }
-        let got = sha256_hex(&read(name)?);
-        if got != want {
-            return Err(format!(
-                "{name}: its SHA-256 does not match {SUMS}: the file was changed"
-            ));
-        }
-        checked.push(name.to_string());
+        checked.push((want.to_string(), name.to_string()));
     }
     if checked.is_empty() {
         return Err(format!("{SUMS} lists no files"));
