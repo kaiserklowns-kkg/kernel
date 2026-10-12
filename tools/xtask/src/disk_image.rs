@@ -216,6 +216,11 @@ pub fn gpt_image(path: &Path, volumes: &[Volume<'_>], seed: &[u8]) -> Result {
             .map_err(|_| format!("cannot write {}", path.display()))?;
     }
     for (volume, partition) in volumes.iter().zip(&partitions) {
+        // An Oceans root is left blank: Oceans formats it at first boot
+        // (ADR-0126).
+        if volume.kind == oceans_gpt::OCEANS_ROOT {
+            continue;
+        }
         let window = Window::new(&mut disk, partition.start(), partition.size())
             .ok_or("a partition outside the image")?;
         let sources: Vec<&Path> = volume.sources.iter().map(PathBuf::as_path).collect();

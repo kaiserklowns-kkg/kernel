@@ -17,3 +17,4 @@ oceans-block-proto.workspace = true
 oceans-volume.workspace = true
 oceans-fat.workspace = true
 oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-gpt.workspace = true

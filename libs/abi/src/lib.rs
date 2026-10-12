@@ -27,9 +27,10 @@
 /// switching off and restarting); 17 = ADR-0122 (the `BOOT` kind of
 /// `SYSTEM_INFO`: the boot mode); 18 = ADR-0124 (`DEVICE_IRQ` binds MSI for
 /// a function without MSI-X, and says which it bound); 19 = ADR-0125 (49:
-/// writing the PCI Express power and request-size fields). Versions only
-/// add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 19;
+/// writing the PCI Express power and request-size fields); 20 = ADR-0126
+/// (the boot disk and partition in the `BOOT` record). Versions only add;
+/// existing numbers keep their meaning.
+pub const ABI_VERSION: u64 = 20;
 
 /// System call numbers.
 pub mod nr {
@@ -708,10 +709,14 @@ pub mod sysinfo {
     }
 
     /// How this boot was started (ADR-0122), from the kernel's command
-    /// line: `oceans.mode=safe` or `oceans.mode=recovery`, else normal.
+    /// line: `oceans.mode=safe` or `oceans.mode=recovery`, else normal; and
+    /// (ABI 20, ADR-0126) the GPT disk and partition the kernel was loaded
+    /// from, as stored on disk (zeros if not a GPT partition).
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct BootRecord {
         pub mode: u64,
+        pub disk: [u8; 16],
+        pub partition: [u8; 16],
     }
 
     /// The boot modes (ADR-0122).
@@ -724,7 +729,7 @@ pub mod sysinfo {
     }
 
     impl BootRecord {
-        pub const SIZE: usize = 8;
+        pub const SIZE: usize = 40;
 
         /// The mode the command line asks for: its `oceans.mode=` word.
         pub fn from_cmdline(cmdline: &str) -> Self {
@@ -736,18 +741,31 @@ pub mod sysinfo {
                     "recovery" => mode::RECOVERY,
                     _ => mode::NORMAL,
                 });
-            Self { mode }
+            Self {
+                mode,
+                ..Self::default()
+            }
         }
 
         pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
             put(out, 0, self.mode);
+            out[8..24].copy_from_slice(&self.disk);
+            out[24..40].copy_from_slice(&self.partition);
         }
 
+        /// A record of ABI 17 (the mode alone) decodes with zeros for the
+        /// disk and partition.
         pub fn decode(bytes: &[u8]) -> Option<Self> {
-            let bytes = bytes.get(..Self::SIZE)?;
-            Some(Self {
-                mode: get(bytes, 0),
-            })
+            let mode = get(bytes.get(..8)?, 0);
+            let mut record = Self {
+                mode,
+                ..Self::default()
+            };
+            if let Some(rest) = bytes.get(8..Self::SIZE) {
+                record.disk.copy_from_slice(&rest[..16]);
+                record.partition.copy_from_slice(&rest[16..]);
+            }
+            Some(record)
         }
     }
 
@@ -912,10 +930,22 @@ mod tests {
         assert_eq!(of("oceans.test=smoke oceans.mode=recovery"), mode::RECOVERY);
         assert_eq!(of("oceans.mode=what"), mode::NORMAL);
         assert_eq!(of("xoceans.mode=safe"), mode::NORMAL, "a whole word only");
-        let record = BootRecord { mode: mode::SAFE };
+        let record = BootRecord {
+            mode: mode::SAFE,
+            disk: [1; 16],
+            partition: [2; 16],
+        };
         let mut out = [0u8; BootRecord::SIZE];
         record.encode(&mut out);
         assert_eq!(BootRecord::decode(&out), Some(record));
+        // An ABI 17 record: the mode alone.
+        assert_eq!(
+            BootRecord::decode(&out[..8]),
+            Some(BootRecord {
+                mode: mode::SAFE,
+                ..BootRecord::default()
+            })
+        );
     }
 
     #[test]

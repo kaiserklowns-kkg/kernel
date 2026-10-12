@@ -58,6 +58,25 @@ fn kernel_main(boot: &'static BootInfo) -> ! {
         oceans_abi::sysinfo::mode::RECOVERY => klog::info!("boot mode: recovery"),
         _ => {}
     }
+    // Where the kernel came from (ADR-0126), as GPT tools print it.
+    let (_, partition) = boot.boot_volume();
+    if partition != [0; 16] {
+        let p = partition;
+        klog::info!(
+            "boot partition: {:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            u32::from_le_bytes([p[0], p[1], p[2], p[3]]),
+            u16::from_le_bytes([p[4], p[5]]),
+            u16::from_le_bytes([p[6], p[7]]),
+            p[8],
+            p[9],
+            p[10],
+            p[11],
+            p[12],
+            p[13],
+            p[14],
+            p[15]
+        );
+    }
     if boot.cmdline_truncated() {
         klog::warn!("command line truncated to {} bytes", boot::MAX_CMDLINE_LEN);
     }

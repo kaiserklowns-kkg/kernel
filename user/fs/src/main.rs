@@ -66,9 +66,11 @@ oceans_rt::entry!(main);
 
 const SECTORS_PER_BLOCK: u32 = (BLOCK_SIZE / SECTOR_SIZE) as u32;
 
-/// The volume's disk: a block-service session with a one-block buffer.
+/// The volume's disk: a block-service session with a one-block buffer,
+/// from sector `base` (a partition's start, ADR-0126; 0 for a whole disk).
 struct DiskDevice {
     disk: Disk,
+    base: u64,
     blocks: u64,
 }
 
@@ -78,7 +80,7 @@ impl BlockDevice for DiskDevice {
     }
 
     fn read_block(&mut self, block: u64, out: &mut BlockBuf) -> Result<(), IoError> {
-        let sector = block * u64::from(SECTORS_PER_BLOCK);
+        let sector = self.base + block * u64::from(SECTORS_PER_BLOCK);
         self.disk
             .read(sector, SECTORS_PER_BLOCK, 0)
             .map_err(|_| IoError)?;
@@ -88,7 +90,7 @@ impl BlockDevice for DiskDevice {
 
     fn write_block(&mut self, block: u64, data: &BlockBuf) -> Result<(), IoError> {
         self.disk.buffer()[..BLOCK_SIZE].copy_from_slice(data);
-        let sector = block * u64::from(SECTORS_PER_BLOCK);
+        let sector = self.base + block * u64::from(SECTORS_PER_BLOCK);
         self.disk
             .write(sector, SECTORS_PER_BLOCK, 0)
             .map_err(|_| IoError)
@@ -239,9 +241,11 @@ fn main(start: Start) -> i64 {
     if let Some(name) = provided.filter(|&name| name != "fs") {
         set_instance(name);
     }
-    let volume = match media {
-        Some(_) => Store::memory(),
-        None => Store::Oceans(mount(log, directory.find("use", "block"))),
+    let volume = match (media, directory.find("use", "boot")) {
+        (Some(_), _) => Store::memory(),
+        // The EFI system partition Oceans started from (ADR-0126).
+        (None, Some(boot)) => mount_boot(log, boot, directory.find("sysinfo", "sysinfo")),
+        (None, None) => Store::Oceans(mount(log, directory.find("use", "block"))),
     };
     let mut mounts = Vec::new();
     for line in directory.lines() {
@@ -351,10 +355,27 @@ fn mount(log: Handle, block: Option<Handle>) -> Volume<DiskDevice> {
         );
         return Volume::memory();
     }
+    let (disk, region) = root_region(disk, info.sectors);
+    let Some((base, sectors, partition)) = region else {
+        say(
+            log,
+            format_args!(
+                "the disk holds partitions, none of them Oceans', left untouched; files are kept in memory only"
+            ),
+        );
+        return Volume::memory();
+    };
     let device = DiskDevice {
         disk,
-        blocks: info.sectors / u64::from(SECTORS_PER_BLOCK),
+        base,
+        blocks: sectors / u64::from(SECTORS_PER_BLOCK),
     };
+    if partition {
+        say(
+            log,
+            format_args!("the root is the Oceans partition at sector {base}"),
+        );
+    }
     match Volume::open(device, true) {
         Ok((volume, opened)) => {
             let (used, total) = volume.usage();
@@ -392,6 +413,91 @@ fn mount(log: Handle, block: Option<Handle>) -> Volume<DiskDevice> {
             Volume::memory()
         }
     }
+}
+
+/// The EFI system partition the kernel was loaded from (ADR-0126), its
+/// FAT volume served read-write: where `update` puts releases on an
+/// installed system. Only that partition: started from a USB stick, the
+/// disk's own ESP (another system's) is left alone, and nothing is served.
+/// Never formatted.
+fn mount_boot(log: Handle, block: Handle, sysinfo: Option<Handle>) -> Store {
+    let nothing = |why: &str| {
+        say(log, format_args!("{why}; nothing served"));
+        Store::memory()
+    };
+    let Some(wanted) = sysinfo.and_then(oceans_rt::boot_partition) else {
+        return nothing("Oceans was not started from a GPT partition");
+    };
+    let Ok(disk) = Disk::open(block, BLOCK_SIZE) else {
+        return nothing("the disk is unavailable");
+    };
+    let sectors = disk.info.sectors;
+    let read_only = disk.info.read_only();
+    let mut probe = FatDisk {
+        disk,
+        base: 0,
+        sectors,
+        read_only: true,
+    };
+    let partition = oceans_gpt::read(&mut probe).ok().and_then(|partitions| {
+        partitions.into_iter().flatten().find(|p| {
+            p.guid == wanted
+                && p.kind == oceans_gpt::EFI_SYSTEM
+                && p.first_lba <= p.last_lba
+                && p.last_lba < sectors
+        })
+    });
+    let Some(partition) = partition else {
+        return nothing("Oceans was started from another disk");
+    };
+    let mut fat = match Fat::open(FatDisk {
+        disk: probe.disk,
+        base: partition.first_lba,
+        sectors: partition.last_lba - partition.first_lba + 1,
+        read_only,
+    }) {
+        Ok(fat) => fat,
+        Err(_) => return nothing("its EFI system partition holds no usable FAT volume"),
+    };
+    fat.set_clock(|| oceans_rt::unix_time_ms().map(|ms| ms / 1000));
+    let access = match fat.enable_writes() {
+        Ok(_) => "read-write",
+        Err(_) => "read-only",
+    };
+    say(
+        log,
+        format_args!(
+            "the EFI system partition Oceans started from, {access}: {} KiB",
+            fat.capacity() / 1024
+        ),
+    );
+    Store::Fat(fat)
+}
+
+/// Where the root volume lives on a disk of `sectors` (ADR-0126): the
+/// Oceans root partition of a GPT disk, or the whole of a disk without a
+/// partition table. `None`: a GPT disk without one is another system's.
+/// Also says whether it is a partition.
+fn root_region(disk: Disk, sectors: u64) -> (Disk, Option<(u64, u64, bool)>) {
+    let mut probe = FatDisk {
+        disk,
+        base: 0,
+        sectors,
+        read_only: true,
+    };
+    let region = match oceans_gpt::read(&mut probe) {
+        Ok(partitions) => partitions
+            .into_iter()
+            .flatten()
+            .find(|p| {
+                p.kind == oceans_gpt::OCEANS_ROOT
+                    && p.first_lba <= p.last_lba
+                    && p.last_lba < sectors
+            })
+            .map(|p| (p.first_lba, p.last_lba - p.first_lba + 1, true)),
+        Err(_) => Some((0, sectors, false)),
+    };
+    (probe.disk, region)
 }
 
 /// A relative path's components, each a valid name.
@@ -523,6 +629,7 @@ impl Fs {
         }
         let device = DiskDevice {
             disk,
+            base: 0,
             blocks: info.sectors / u64::from(SECTORS_PER_BLOCK),
         };
         match Volume::open(device, true) {
@@ -558,6 +665,7 @@ impl Fs {
         let read_only = disk.info.read_only();
         match Fat::open(FatDisk {
             disk,
+            base: 0,
             sectors,
             read_only,
         }) {

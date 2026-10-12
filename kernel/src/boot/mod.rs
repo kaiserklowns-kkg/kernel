@@ -101,6 +101,10 @@ pub struct BootInfo {
     secondary: [u32; MAX_SECONDARY_CPUS],
     secondary_count: usize,
     cpus_truncated: bool,
+    /// The GPT disk and partition the kernel was loaded from, as stored on
+    /// disk (ADR-0126); zeros otherwise.
+    pub(super) boot_disk: [u8; 16],
+    pub(super) boot_partition: [u8; 16],
 }
 
 impl BootInfo {
@@ -123,6 +127,8 @@ impl BootInfo {
             rsdp: None,
             framebuffer: None,
             bsp_lapic_id: None,
+            boot_disk: [0; 16],
+            boot_partition: [0; 16],
             secondary: [0; MAX_SECONDARY_CPUS],
             secondary_count: 0,
             cpus_truncated: false,
@@ -229,6 +235,11 @@ impl BootInfo {
     pub fn cmdline(&self) -> &str {
         // Copied from a `&str` and cut at a character boundary, so valid.
         core::str::from_utf8(&self.cmdline[..self.cmdline_len]).unwrap_or("")
+    }
+
+    /// The GPT disk and partition the kernel came from (ADR-0126).
+    pub fn boot_volume(&self) -> ([u8; 16], [u8; 16]) {
+        (self.boot_disk, self.boot_partition)
     }
 
     pub fn cmdline_truncated(&self) -> bool {

@@ -7,9 +7,9 @@ use limine::memory_map::EntryType;
 
 use limine::mp::Cpu;
 use limine::request::{
-    ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
-    MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker, RequestsStartMarker,
-    RsdpRequest,
+    ExecutableAddressRequest, ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest,
+    HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker,
+    RequestsStartMarker, RsdpRequest,
 };
 use oceans_memory_map::{Region, RegionKind};
 
@@ -44,6 +44,11 @@ static KERNEL_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new(
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+/// The file the kernel was loaded from: its disk and partition (ADR-0126).
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static EXECUTABLE: ExecutableFileRequest = ExecutableFileRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
@@ -102,6 +107,23 @@ extern "C" fn kernel_entry() -> ! {
             match cmdline.cmdline().to_str() {
                 Ok(text) => info.set_cmdline(text),
                 Err(_) => klog::warn!("ignoring kernel command line: not valid UTF-8"),
+            }
+        }
+
+        if let Some(file) = EXECUTABLE.get_response().map(|r| r.file()) {
+            let bytes = |id: limine::file::Uuid| {
+                let mut out = [0u8; 16];
+                out[..4].copy_from_slice(&id.a.to_le_bytes());
+                out[4..6].copy_from_slice(&id.b.to_le_bytes());
+                out[6..8].copy_from_slice(&id.c.to_le_bytes());
+                out[8..].copy_from_slice(&id.d);
+                out
+            };
+            if let Some(disk) = file.gpt_disk_id() {
+                info.boot_disk = bytes(disk);
+            }
+            if let Some(partition) = file.gpt_partition_id() {
+                info.boot_partition = bytes(partition);
             }
         }
 

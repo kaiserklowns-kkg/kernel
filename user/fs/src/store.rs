@@ -12,6 +12,8 @@ use crate::DiskDevice;
 /// one-block buffer.
 pub struct FatDisk {
     pub disk: Disk,
+    /// The volume's first sector: a partition's start (ADR-0126), or 0.
+    pub base: u64,
     pub sectors: u64,
     pub read_only: bool,
 }
@@ -27,7 +29,7 @@ impl oceans_fat::Disk for FatDisk {
             }
             let count = per_read.min(self.sectors - sector);
             self.disk
-                .read(sector, count as u32, 0)
+                .read(self.base + sector, count as u32, 0)
                 .map_err(|_| oceans_fat::IoError)?;
             let skip = (offset % SECTOR_SIZE as u64) as usize;
             let available = count as usize * SECTOR_SIZE - skip;
@@ -53,7 +55,7 @@ impl oceans_fat::Disk for FatDisk {
             let sector = first + (i * BLOCK_SIZE / SECTOR_SIZE) as u64;
             self.disk.buffer()[..chunk.len()].copy_from_slice(chunk);
             self.disk
-                .write(sector, (chunk.len() / SECTOR_SIZE) as u32, 0)
+                .write(self.base + sector, (chunk.len() / SECTOR_SIZE) as u32, 0)
                 .map_err(|_| oceans_fat::IoError)?;
         }
         Ok(())

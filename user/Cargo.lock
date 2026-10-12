@@ -452,6 +452,7 @@ dependencies = [
  "oceans-block-proto",
  "oceans-fat",
  "oceans-fs-proto",
+ "oceans-gpt",
  "oceans-rt",
  "oceans-volume",
 ]

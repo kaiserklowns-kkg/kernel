@@ -984,8 +984,15 @@ fn system_info(process: &Process, raw: u64, kind: u64, ptr: u64, capacity: u64) 
         }
         // How this boot was started (ABI 17, ADR-0122).
         sysinfo::BOOT => {
+            let info = crate::boot::info();
+            let (disk, partition) = info.boot_volume();
             let mut record = [0u8; sysinfo::BootRecord::SIZE];
-            sysinfo::BootRecord::from_cmdline(crate::boot::info().cmdline()).encode(&mut record);
+            sysinfo::BootRecord {
+                disk,
+                partition,
+                ..sysinfo::BootRecord::from_cmdline(info.cmdline())
+            }
+            .encode(&mut record);
             bytes.extend_from_slice(&record);
         }
         _ => return Err(Error::InvalidArgument),

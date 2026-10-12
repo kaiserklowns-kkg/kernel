@@ -12,8 +12,9 @@
 //! image; never the keys of app developers). It must be newer than the
 //! running release (`/bin/release`).
 //!
-//! The boot partition (the USB stick Oceans started from, `/usb`) has two
-//! slots, `/boot/a` and `/boot/b`. The update goes into the slot not in
+//! The boot partition (the USB stick Oceans started from, `/usb`; on an
+//! installed system the disk's EFI system partition, `/boot`, ADR-0126)
+//! has two slots, `/boot/a` and `/boot/b`. The update goes into the slot not in
 //! use; then the boot configuration is switched so that it starts first
 //! and the running release stays in the boot menu as "previous". Limine
 //! reads `/limine.conf` and, if that is missing, `/boot/limine/limine.conf`:
@@ -49,8 +50,17 @@ oceans_rt::entry!(main);
 
 const USAGE: &str =
     "usage: update status | apply PATH | previous   (run update out use:fs [use:usbdisk] -- ...)";
-/// The boot partition: the stick Oceans started from.
-const ESP: &str = "usb";
+/// The boot partition: on an installed system the disk's own EFI system
+/// partition, `/boot` (ADR-0126); else the stick Oceans started from.
+static INSTALLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn esp() -> &'static str {
+    if INSTALLED.load(core::sync::atomic::Ordering::Relaxed) {
+        "boot"
+    } else {
+        "usb"
+    }
+}
 const SYSTEM_ID: &str = "system.oceans";
 /// On a boot partition signed for Secure Boot (ADR-0091).
 const SECURE_BOOT_MARKER: &str = "usb/boot/secure-boot";
@@ -68,6 +78,9 @@ fn main(start: Start) -> i64 {
         Ok(fs) => Node(fs),
         Err(code) => return code,
     };
+    // `/boot` serves only the partition Oceans started from (ADR-0126).
+    let installed = read_file(&root, "boot/limine.conf", 64 << 10).is_ok();
+    INSTALLED.store(installed, core::sync::atomic::Ordering::Relaxed);
     let stick = directory.find("use", "usbdisk");
     let args = directory.args();
     let words: Vec<&str> = args.split_whitespace().collect();
@@ -182,7 +195,7 @@ fn other(slot: char) -> char {
 
 /// The release a slot holds, if any.
 fn slot_release(root: &Node, slot: char) -> Option<String> {
-    let bytes = read_file(root, &alloc::format!("{ESP}/boot/{slot}/release"), 256).ok()?;
+    let bytes = read_file(root, &alloc::format!("{}/boot/{slot}/release", esp()), 256).ok()?;
     String::from_utf8(bytes)
         .ok()
         .map(|text| text.trim().to_string())
@@ -190,11 +203,11 @@ fn slot_release(root: &Node, slot: char) -> Option<String> {
 
 /// The slot the boot configuration starts first (`a` or `b`).
 fn first_slot(root: &Node) -> Result<char, String> {
-    let conf = read_file(root, &alloc::format!("{ESP}/limine.conf"), 64 << 10)
+    let conf = read_file(root, &alloc::format!("{}/limine.conf", esp()), 64 << 10)
         .or_else(|_| {
             read_file(
                 root,
-                &alloc::format!("{ESP}/boot/limine/limine.conf"),
+                &alloc::format!("{}/boot/limine/limine.conf", esp()),
                 64 << 10,
             )
         })
@@ -308,7 +321,7 @@ fn apply(out: &mut Out, root: &Node, stick: Option<Handle>, path: &str) -> Resul
     let _ = out.flush();
 
     // 1. The new release, into the slot not in use.
-    let dir = alloc::format!("{ESP}/boot/{target}");
+    let dir = alloc::format!("{}/boot/{target}", esp());
     root.walk(&dir, flags::CREATE_DIRECTORY | flags::WRITE)
         .map(|(node, _)| node.close())
         .map_err(fs_error(&dir))?;
@@ -374,8 +387,8 @@ fn boot_configuration(new: char, release: &str, old: char, previous: &str) -> St
 /// then the first, so one complete configuration is always there.
 fn write_configuration(root: &Node, conf: &str) -> Result<(), String> {
     for (dir, name) in [
-        (alloc::format!("{ESP}/boot/limine"), "limine.conf"),
-        (ESP.to_string(), "limine.conf"),
+        (alloc::format!("{}/boot/limine", esp()), "limine.conf"),
+        (esp().to_string(), "limine.conf"),
     ] {
         let new = alloc::format!("{dir}/limine.new");
         write_file(root, &new, conf.as_bytes(), None)?;

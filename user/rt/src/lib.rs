@@ -812,6 +812,17 @@ pub fn boot_mode(sysinfo: Handle) -> u64 {
         .map_or(mode::NORMAL, |boot| boot.mode)
 }
 
+/// The GPT partition the kernel was loaded from (ABI 20, ADR-0126), as
+/// stored on disk; `None` if unknown or not a GPT partition.
+pub fn boot_partition(sysinfo: Handle) -> Option<[u8; 16]> {
+    use oceans_abi::sysinfo::{BOOT, BootRecord};
+    let mut record = [0u8; BootRecord::SIZE];
+    let len = system_info(sysinfo, BOOT, &mut record).ok()?;
+    BootRecord::decode(&record[..len.min(BootRecord::SIZE)])
+        .map(|boot| boot.partition)
+        .filter(|partition| *partition != [0; 16])
+}
+
 // ---- ABI 7: devices (ADR-0021) ---------------------------------------------
 
 /// Copies a `oceans_abi::device::DeviceRecord` per PCI function into
