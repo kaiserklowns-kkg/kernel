@@ -21,7 +21,8 @@
 //!   and queued, and its descriptor reclaimed once the device sets `DONE`.
 //! - Interrupts: MSI-X vector 0, a notification bound to the driver's
 //!   endpoint; every cause (receive, transmit, link changes, overruns) is
-//!   routed to it. Without MSI-X the driver polls every 10 ms.
+//!   routed to it. The PCH LAN has MSI instead (ADR-0124), with the legacy
+//!   causes. Without either the driver polls every 10 ms.
 //! - Errors: bad frames are dropped and counted; the counts and the
 //!   device's own error statistics are logged (at most every 10 s). A
 //!   device that stops answering (registers read all ones) ends the driver
@@ -206,10 +207,12 @@ impl Driver {
 
         let events = oceans_rt::notification_create().map_err(|_| "no notification")?;
         oceans_rt::endpoint_bind(server, events).map_err(|_| "cannot bind events")?;
-        // The PCH LAN has no MSI-X: it is polled.
-        let interrupts =
-            pch.is_none() && oceans_rt::device_irq(device, MSIX_VECTOR, events, IRQ).is_ok();
-        if interrupts {
+        // MSI-X on the 82574L; the PCH LAN has only MSI (ADR-0124), with
+        // the legacy causes.
+        let kind = oceans_rt::device_irq(device, MSIX_VECTOR, events, IRQ).ok();
+        let interrupts = kind.is_some();
+        let msix = kind == Some(oceans_rt::interrupt::MSI_X) && pch.is_none();
+        if msix {
             regs.write(reg::IVAR, oceans_e1000e::ivar(MSIX_VECTOR as u8));
             regs.update(reg::CTRL_EXT, reg::ctrl_ext::PBA_SUPPORT, 0);
             // Causes stay in ICR until the driver clears them.
@@ -254,7 +257,7 @@ impl Driver {
         // causes the driver handles are unmasked.
         let stale = regs.read(reg::ICR);
         regs.write(reg::ICR, stale);
-        regs.write(reg::IMS, oceans_e1000e::interrupt_mask(interrupts));
+        regs.write(reg::IMS, oceans_e1000e::interrupt_mask(msix));
 
         let mut driver = Self {
             log,
@@ -281,7 +284,11 @@ impl Driver {
                     Some(pch) => pch.name(),
                     None => "82574L",
                 },
-                if interrupts { "MSI-X" } else { "polling" }
+                match (interrupts, msix) {
+                    (true, true) => "MSI-X",
+                    (true, false) => "MSI",
+                    _ => "polling",
+                }
             ),
         );
         driver.link = Link::from_status(regs.read(reg::STATUS));

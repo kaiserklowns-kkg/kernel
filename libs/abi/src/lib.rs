@@ -25,9 +25,10 @@
 /// display); 14 = ADR-0059 (45–46: the keyboard to the desktop); 15 =
 /// ADR-0070 (47: reading the log); 16 = ADR-0085 (48:
 /// switching off and restarting); 17 = ADR-0122 (the `BOOT` kind of
-/// `SYSTEM_INFO`: the boot mode). Versions only add; existing numbers keep
+/// `SYSTEM_INFO`: the boot mode); 18 = ADR-0124 (`DEVICE_IRQ` binds MSI for
+/// a function without MSI-X, and says which it bound). Versions only add; existing numbers keep
 /// their meaning.
-pub const ABI_VERSION: u64 = 17;
+pub const ABI_VERSION: u64 = 18;
 
 /// System call numbers.
 pub mod nr {
@@ -157,8 +158,10 @@ pub mod nr {
     /// uses for it. Kept alive until DMA has been switched off when the
     /// device closes. Needs `MANAGE`.
     pub const DEVICE_DMA_CREATE: u64 = 33;
-    /// `(device, entry, notification, bits) -> 0` — delivers MSI-X vector
-    /// `entry` as `bits` on the notification (replacing an earlier binding).
+    /// `(device, entry, notification, bits) -> kind` — delivers MSI-X vector
+    /// `entry` as `bits` on the notification (replacing an earlier binding);
+    /// for a function without MSI-X, its one MSI message (`entry` 0, ABI 18).
+    /// `kind` is an [`interrupt`](super::interrupt) value (0 before ABI 18).
     /// Needs `MANAGE` on the device and `SIGNAL` on the notification.
     pub const DEVICE_IRQ: u64 = 34;
 
@@ -257,6 +260,12 @@ pub mod nr {
     /// they do not return (`NotFound` if `OFF` is not possible here,
     /// before anything happens).
     pub const SYSTEM_POWER: u64 = 48;
+}
+
+/// How `DEVICE_IRQ` delivers a device's interrupt (ABI 18, ADR-0124).
+pub mod interrupt {
+    pub const MSI_X: u64 = 1;
+    pub const MSI: u64 = 2;
 }
 
 /// The machine's power (ADR-0085): `SYSTEM_POWER` actions, which are also

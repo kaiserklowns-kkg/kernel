@@ -158,7 +158,7 @@ pub const MATRIX: &[Row] = &[
             vendor == 0x8086 && oceans_e1000e::pch::generation(device).is_some()
         }),
         class: (None, None, None),
-        support: Support::Driver("e1000e (ADR-0123), polled"),
+        support: Support::Driver("e1000e (ADR-0123), MSI (ADR-0124)"),
     },
     Row {
         what: "Intel 82576, I210, I211, I225, I226 Ethernet",

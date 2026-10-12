@@ -170,6 +170,8 @@ pub mod reg {
     pub const CFG9346: usize = 0x50;
     /// 8-bit.
     pub const CONFIG1: usize = 0x52;
+    /// 8-bit.
+    pub const CONFIG2: usize = 0x53;
     pub const TIMER_INT: usize = 0x58;
     pub const PHYAR: usize = 0x60;
     /// 8-bit.
@@ -205,6 +207,8 @@ pub mod reg {
         pub const LOCK: u8 = 0x00;
     }
 
+    /// `CONFIG2`: the chip signals MSI (set only in MSI mode).
+    pub const CONFIG2_MSI: u8 = 0x20;
     /// `CONFIG1`: the driver has the device.
     pub const CONFIG1_DRIVER_LOADED: u8 = 0x20;
     /// `PMCH`: PHY wake.

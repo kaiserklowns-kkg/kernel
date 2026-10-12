@@ -15,8 +15,8 @@
 //!   back to the device (`OWN`) only once the stack has taken their frames.
 //! - Transmit: 32 descriptors and buffers. PCIe parts can miss a transmit
 //!   kick, so the driver kicks again whenever frames are still queued.
-//! - Interrupts: MSI-X vector 0 where the part has it; otherwise the driver
-//!   polls every 10 ms.
+//! - Interrupts: MSI-X vector 0 where the part has it, else MSI (ADR-0124).
+//!   Without either the driver polls every 10 ms.
 //!
 //! QEMU has no model of this chip: the logic in `oceans-rtl8168`
 //! (libs/rtl8168) is tested on the host, this driver on real machines.
@@ -212,7 +212,22 @@ impl Driver {
 
         let events = oceans_rt::notification_create().map_err(|_| "no notification")?;
         oceans_rt::endpoint_bind(server, events).map_err(|_| "cannot bind events")?;
-        let interrupts = oceans_rt::device_irq(device, MSIX_VECTOR, events, IRQ).is_ok();
+        // MSI-X where the part has it, else MSI (ADR-0124); Config2 says
+        // which the chip signals.
+        let kind = oceans_rt::device_irq(device, MSIX_VECTOR, events, IRQ).ok();
+        let interrupts = kind.is_some();
+        let msi = kind == Some(oceans_rt::interrupt::MSI);
+        regs.write8(reg::CFG9346, reg::cfg9346::UNLOCK);
+        let config2 = regs.read8(reg::CONFIG2);
+        regs.write8(
+            reg::CONFIG2,
+            if msi {
+                config2 | reg::CONFIG2_MSI
+            } else {
+                config2 & !reg::CONFIG2_MSI
+            },
+        );
+        regs.write8(reg::CFG9346, reg::cfg9346::LOCK);
         regs.write16(reg::INTR_STATUS, reg::int::ALL);
         regs.write16(
             reg::INTR_MASK,
@@ -245,7 +260,11 @@ impl Driver {
                 "MAC {}, {}, {}",
                 ShowMac(mac),
                 revision.name(),
-                if interrupts { "MSI-X" } else { "polling" }
+                match kind {
+                    Some(oceans_rt::interrupt::MSI) => "MSI",
+                    Some(_) => "MSI-X",
+                    None => "polling",
+                }
             ),
         );
         match autonegotiate(regs) {

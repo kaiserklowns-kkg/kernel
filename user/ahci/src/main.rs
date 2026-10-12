@@ -16,9 +16,10 @@
 //!   512-byte logical sectors are served; others are refused with a log
 //!   line (and the next port is tried).
 //! - **One command in flight** (slot 0), as for `nvme`.
-//! - **Polling:** the kernel delivers only MSI-X (ADR-0021) and AHCI
-//!   controllers offer MSI or pin interrupts, so completions are polled
-//!   (`PxCI`, `PxIS`), yielding and sleeping a millisecond between looks.
+//! - **Interrupts:** MSI (AHCI controllers have no MSI-X, ADR-0124): a
+//!   command waits for the port's interrupt, a 10 ms timer as a fallback.
+//!   Without an interrupt, completions are polled (`PxCI`, `PxIS`),
+//!   yielding and sleeping a millisecond between looks.
 //! - **Failures:** a device error restarts the port's command engine; a
 //!   command that does not complete within 30 s resets the link
 //!   (COMRESET); a port that cannot be brought back answers every request
@@ -75,6 +76,10 @@ const READY_TIMEOUT_MS: u64 = 10_000;
 const HANDOFF_TIMEOUT_MS: u64 = 2_000;
 /// COMRESET is held at least 1 ms.
 const COMRESET_HOLD_MS: u64 = 2;
+/// The interrupt's notification bit, and the fallback timer's.
+const IRQ: u64 = 1;
+const TICK: u64 = 2;
+const TICK_MS: u64 = 10;
 
 /// Exit codes.
 const EXIT_BAD_START: i64 = 2;
@@ -116,13 +121,17 @@ fn main(start: Start) -> i64 {
     say(
         log,
         format_args!(
-            "ahci: AHCI {}, {} ports implemented, {} command slots, polling",
+            "ahci: AHCI {}, {} ports implemented, {} command slots, {}",
             version.as_str(),
             controller.implemented.count_ones(),
-            controller.caps.slots
+            controller.caps.slots,
+            controller.interrupt
         ),
     );
     let mut disk = Disk::find(log, device, &controller);
+    if let (Some(disk), Some(irq)) = (&mut disk, controller.irq) {
+        disk.listen(irq);
+    }
     if disk.is_none() {
         say(
             log,
@@ -186,6 +195,10 @@ struct Controller {
     caps: Capabilities,
     /// Implemented ports (`PI`) whose registers lie inside the `ABAR`.
     implemented: u32,
+    /// The notification its interrupt signals, if it has one.
+    irq: Option<Handle>,
+    /// How: MSI, MSI-X, or polling.
+    interrupt: &'static str,
 }
 
 impl Controller {
@@ -225,10 +238,28 @@ impl Controller {
                 );
             }
         }
-        // AHCI mode (before anything else), interrupts off: completions are
-        // polled.
+        // AHCI mode (before anything else), interrupts off until bound.
         let control = regs.read32(hba::GHC);
         regs.write32(hba::GHC, (control | ghc::AHCI_ENABLE) & !ghc::INTERRUPTS);
+        let mut interrupt = "polling";
+        let irq = oceans_rt::notification_create()
+            .ok()
+            .filter(|&notification| {
+                match oceans_rt::device_irq(device, 0, notification, IRQ) {
+                    Ok(oceans_rt::interrupt::MSI) => interrupt = "MSI",
+                    Ok(_) => interrupt = "MSI-X",
+                    Err(_) => {
+                        let _ = oceans_rt::close(notification);
+                        return false;
+                    }
+                }
+                true
+            });
+        if irq.is_some() {
+            regs.write32(hba::IS, u32::MAX);
+            let control = regs.read32(hba::GHC);
+            regs.write32(hba::GHC, control | ghc::INTERRUPTS);
+        }
         let implemented = oceans_ahci::implemented_ports(regs.read32(hba::PI))
             .filter(|&index| hba::port(index) + hba::PORT_SIZE <= regs.size)
             .fold(0u32, |set, index| set | (1 << index));
@@ -236,6 +267,8 @@ impl Controller {
             regs,
             caps,
             implemented,
+            irq,
+            interrupt,
         })
     }
 
@@ -263,6 +296,12 @@ impl Port {
 
     fn write(self, register: usize, value: u32) {
         self.regs.write32(self.base + register, value);
+    }
+
+    /// Clears the port's bit in the controller's interrupt status (after
+    /// its own), so its next cause raises a new message.
+    fn acknowledge(self) {
+        self.regs.write32(hba::IS, 1 << self.index);
     }
 
     fn link(self) -> LinkStatus {
@@ -374,6 +413,8 @@ struct Disk {
     flush: Option<AtaCommand>,
     /// The port could not be brought back after a failure.
     failed: bool,
+    /// The controller's interrupt, once the port raises it.
+    irq: Option<Handle>,
 }
 
 impl Disk {
@@ -492,6 +533,7 @@ impl Disk {
             },
             flush: None,
             failed: false,
+            irq: None,
         };
         disk.execute(AtaCommand::identify())
             .map_err(|_| "IDENTIFY DEVICE failed")?;
@@ -561,6 +603,22 @@ impl Disk {
         );
     }
 
+    /// From now on commands wait for the port's interrupt (ADR-0124): a
+    /// register FIS, a PIO or DMA setup, set device bits, a descriptor
+    /// done, or an error.
+    fn listen(&mut self, irq: Handle) {
+        let causes = is::D2H_REGISTER
+            | is::PIO_SETUP
+            | is::DMA_SETUP
+            | is::SET_DEVICE_BITS
+            | is::DESCRIPTOR_PROCESSED
+            | is::INTERFACE_NON_FATAL
+            | is::FATAL;
+        self.port.write(port::IS, u32::MAX);
+        self.port.write(port::IE, causes);
+        self.irq = Some(irq);
+    }
+
     /// Runs one command in slot 0 on the bounce buffer and waits for it.
     fn execute(&mut self, command: AtaCommand) -> Result<(), Failure> {
         let port = self.port;
@@ -580,6 +638,7 @@ impl Disk {
             &oceans_ahci::command_header(command.writes(), prds as u16, table),
         );
         port.write(port::IS, u32::MAX);
+        port.acknowledge();
         // The command is in memory before the controller hears of it.
         fence(Ordering::SeqCst);
         port.write(port::CI, 1);
@@ -597,6 +656,13 @@ impl Disk {
             if oceans_rt::clock_ms() >= deadline {
                 break Err(Failure::Timeout);
             }
+            if let Some(irq) = self.irq {
+                // The completion's interrupt, or the fallback tick: both
+                // lead to another look.
+                let _ = oceans_rt::timer_set(irq, TICK, TICK_MS);
+                let _ = oceans_rt::notification_wait(irq);
+                continue;
+            }
             spins += 1;
             if spins.is_multiple_of(64) {
                 oceans_rt::sleep_ms(1);
@@ -608,6 +674,7 @@ impl Disk {
         fence(Ordering::Acquire);
         let status = port.read(port::IS);
         port.write(port::IS, status);
+        port.acknowledge();
         let task = port.task_file();
         match result {
             Ok(()) if status & is::FATAL != 0 || task.has_error() => {

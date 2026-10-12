@@ -141,6 +141,14 @@ pub mod cmd {
 pub mod is {
     /// A device-to-host register FIS arrived.
     pub const D2H_REGISTER: u32 = 1 << 0;
+    /// A PIO setup FIS arrived.
+    pub const PIO_SETUP: u32 = 1 << 1;
+    /// A DMA setup FIS arrived.
+    pub const DMA_SETUP: u32 = 1 << 2;
+    /// A set device bits FIS arrived.
+    pub const SET_DEVICE_BITS: u32 = 1 << 3;
+    /// A descriptor with its interrupt bit was processed.
+    pub const DESCRIPTOR_PROCESSED: u32 = 1 << 5;
     /// Interface non-fatal error.
     pub const INTERFACE_NON_FATAL: u32 = 1 << 26;
     /// Interface fatal error.

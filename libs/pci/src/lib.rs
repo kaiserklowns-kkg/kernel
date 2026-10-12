@@ -265,6 +265,74 @@ impl Msix {
     }
 }
 
+/// An MSI capability (ADR-0124): one message, for functions without
+/// MSI-X. Its registers follow the control word; their offsets depend on
+/// whether the address is 64-bit and whether vectors can be masked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Msi {
+    /// Offset of the capability in configuration space.
+    pub offset: u16,
+    /// The message address may be 64-bit.
+    pub wide: bool,
+    /// Per-vector mask bits exist.
+    pub maskable: bool,
+}
+
+impl Msi {
+    /// Message control: enable (bit 0), the number of messages enabled
+    /// (bits 6:4, left 0: one).
+    pub const fn control(&self) -> u16 {
+        self.offset + 2
+    }
+
+    pub const ENABLE: u16 = 1 << 0;
+    pub const MULTIPLE_ENABLE: u16 = 0b111 << 4;
+
+    pub const fn address_low(&self) -> u16 {
+        self.offset + 4
+    }
+
+    /// The upper half of a 64-bit address.
+    pub const fn address_high(&self) -> Option<u16> {
+        if self.wide {
+            Some(self.offset + 8)
+        } else {
+            None
+        }
+    }
+
+    /// The message data (16 bits).
+    pub const fn data(&self) -> u16 {
+        self.offset + if self.wide { 12 } else { 8 }
+    }
+
+    /// The mask bits, if the function has them (bit 0: the one vector).
+    pub const fn mask(&self) -> Option<u16> {
+        if self.maskable {
+            Some(self.offset + if self.wide { 16 } else { 12 })
+        } else {
+            None
+        }
+    }
+
+    /// Bytes the capability spans.
+    const fn len(&self) -> u16 {
+        (if self.wide { 14 } else { 10 }) + if self.maskable { 10 } else { 0 }
+    }
+}
+
+/// The function's MSI capability, if it has one that fits.
+pub fn msi(config: &impl ConfigSpace) -> Option<Msi> {
+    let (_, offset) = capabilities(config).find(|&(id, _)| id == cap::MSI)?;
+    let control = config.read16(offset + 2);
+    let msi = Msi {
+        offset,
+        wide: control & (1 << 7) != 0,
+        maskable: control & (1 << 8) != 0,
+    };
+    (offset + msi.len() <= CONFIG_SPACE_SIZE).then_some(msi)
+}
+
 /// The function's MSI-X capability, if it has a valid one.
 pub fn msix(config: &impl ConfigSpace) -> Option<Msix> {
     let (_, offset) = capabilities(config).find(|&(id, _)| id == cap::MSIX)?;
@@ -525,6 +593,37 @@ mod tests {
         assert_eq!(msix.table(), (1, 0x2000, 48));
         assert_eq!(msix.pending_bits(), (1, 0x3000, 8));
         assert_eq!(msix.control(), 0x52);
+    }
+
+    #[test]
+    fn finds_msi_and_its_registers() {
+        // 64-bit, maskable: address 0x44/0x48, data 0x4c, mask 0x50.
+        let mut device = Device::new(0x8086, 0x2922);
+        device.add_capability(0x40, cap::MSI, 0);
+        device.set16(0x42, (1 << 7) | (1 << 8));
+        let msi = super::msi(&device).unwrap();
+        assert_eq!((msi.wide, msi.maskable), (true, true));
+        assert_eq!(
+            (
+                msi.control(),
+                msi.address_low(),
+                msi.address_high(),
+                msi.data(),
+                msi.mask()
+            ),
+            (0x42, 0x44, Some(0x48), 0x4c, Some(0x50))
+        );
+        // 32-bit, not maskable: data right after the address.
+        let mut device = Device::new(0x8086, 0x2668);
+        device.add_capability(0x60, cap::VENDOR, 0x70);
+        device.add_capability(0x70, cap::MSI, 0);
+        let msi = super::msi(&device).unwrap();
+        assert_eq!(
+            (msi.address_high(), msi.data(), msi.mask()),
+            (None, 0x78, None)
+        );
+        // None at all.
+        assert_eq!(super::msi(&Device::new(1, 1)), None);
     }
 
     #[test]

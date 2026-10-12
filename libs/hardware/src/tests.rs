@@ -85,7 +85,7 @@ fn devices_get_the_most_specific_row() {
     // The I219-V and the I225-V (ADR-0123).
     assert_eq!(
         support(0x8086, 0x15bc, 0x02, 0x00, 0x00),
-        Support::Driver("e1000e (ADR-0123), polled")
+        Support::Driver("e1000e (ADR-0123), MSI (ADR-0124)")
     );
     assert_eq!(
         support(0x8086, 0x15f3, 0x02, 0x00, 0x00),

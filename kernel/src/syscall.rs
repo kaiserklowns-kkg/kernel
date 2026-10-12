@@ -1109,8 +1109,11 @@ fn device_irq(
         Ok((device, notification))
     })
     .map_err(object_error)?;
-    device.bind_irq(entry, notification, bits)?;
-    Ok((0, 0))
+    let kind = match device.bind_irq(entry, notification, bits)? {
+        crate::pci::Interrupt::MsiX => oceans_abi::interrupt::MSI_X,
+        crate::pci::Interrupt::Msi => oceans_abi::interrupt::MSI,
+    };
+    Ok((kind, 0))
 }
 
 // ---- ABI 8 -----------------------------------------------------------------

@@ -12,7 +12,7 @@ use core::fmt;
 pub use oceans_abi::EXIT_KILLED;
 pub use oceans_abi::Error;
 pub use oceans_abi::display::Info as DisplayInfo;
-pub use oceans_abi::{MessageDesc, power, prot, rights, sysinfo};
+pub use oceans_abi::{MessageDesc, interrupt, power, prot, rights, sysinfo};
 use oceans_abi::{nr, start::MAX_INITIAL_HANDLES};
 
 /// A capability handle in this process's table.
@@ -861,18 +861,20 @@ pub fn device_dma_create(device: Handle, size: u64) -> Result<(Handle, u64), Err
         .map(|(h, address)| (Handle(h), address))
 }
 
-/// Delivers MSI-X vector `entry` as `bits` on `notification`.
+/// Delivers MSI-X vector `entry` as `bits` on `notification`; for a
+/// device without MSI-X, its MSI (`entry` 0, ABI 18). Says which:
+/// [`interrupt::MSI_X`] or [`interrupt::MSI`].
 pub fn device_irq(
     device: Handle,
     entry: u16,
     notification: Handle,
     bits: u64,
-) -> Result<(), Error> {
+) -> Result<u64, Error> {
     call(
         nr::DEVICE_IRQ,
         [device.0, u64::from(entry), notification.0, bits, 0, 0],
     )
-    .map(drop)
+    .map(|(kind, _)| kind)
 }
 
 // ---- ABI 8: events and time (ADR-0023) --------------------------------------

@@ -1069,7 +1069,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 17)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 18)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1234,7 +1234,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 17)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 18)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -1302,7 +1302,9 @@ const SHELL_EXPECT: &[Expect] = &[
     // SATA (ADR-0069): q35's AHCI controller holds the boot disk (the
     // ESP, attached without `if=`); the driver identifies it, and the fs
     // instance on it leaves it untouched (it is not blank).
-    Expect::Contains("ahci: AHCI 1.0, 6 ports implemented, 32 command slots, polling"),
+    // ICH9's AHCI has MSI and no MSI-X (ADR-0124).
+    Expect::Contains("pci: pci 0000:00:1f.2 8086:2922 class 01.06, MSI"),
+    Expect::Contains("ahci: AHCI 1.0, 6 ports implemented, 32 command slots, MSI"),
     Expect::Contains("ahci: port 0: QEMU HARDDISK (serial QM0000"),
     Expect::Contains(
         "fs (satafs): disk not mounted (it holds something other than an Oceans volume), left untouched",

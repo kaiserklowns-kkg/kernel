@@ -33,7 +33,7 @@ procedure below passes on it.
 | Intel High Definition Audio controller (any vendor) | hda (ADR-0079, ADR-0087): output and input, 48 kHz stereo | Tier 0 (QEMU `intel-hda` with `hda-output`, recorded and checked) in CI; real codecs: awaiting reports |
 | USB 3 xHCI controller (any vendor) | xhci (ADR-0032): keyboards, mice, tablets, hubs, mass storage | Tier 0 (QEMU `qemu-xhci`) in CI; real controllers: awaiting reports |
 | Intel 82574L Ethernet | e1000e (ADR-0041) | Tier 0 (QEMU `e1000e`) in CI; real adapters: awaiting reports |
-| Intel I217, I218, I219 Ethernet (in the PCH) | e1000e (ADR-0123), polled | not in QEMU: written from Intel's open drivers, host-tested; real machines: awaiting reports |
+| Intel I217, I218, I219 Ethernet (in the PCH) | e1000e (ADR-0123), MSI (ADR-0124) | not in QEMU: written from Intel's open drivers, host-tested; real machines: awaiting reports |
 | Intel 82576, I210, I211, I225, I226 Ethernet | igc (ADR-0123) | Tier 0 (QEMU `igb`, an 82576) in CI; I210 and I225/I226: awaiting reports |
 | Realtek RTL8111/8168 Ethernet | rtl8168 (ADR-0123) | not in QEMU: written from BSD's re(4), host-tested; real machines: awaiting reports |
 | virtio-net (modern) | virtio-net (ADR-0023) | Tier 0 (virtual machines) |

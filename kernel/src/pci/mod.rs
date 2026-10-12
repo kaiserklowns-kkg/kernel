@@ -10,7 +10,8 @@
 //!   bits a driver needs are set, through `DEVICE_ENABLE`);
 //! - map its memory BARs uncached, without the MSI-X table pages;
 //! - allocate contiguous DMA memory, kept alive until DMA is switched off;
-//! - bind MSI-X vectors to notifications (the kernel programs the table).
+//! - bind MSI-X vectors to notifications (the kernel programs the table),
+//!   or, for a function without MSI-X, its one MSI message (ADR-0124).
 //!
 //! Closing the device (or the driver dying) masks its interrupts, turns
 //! off bus mastering and memory decoding, and only then releases its DMA
@@ -33,7 +34,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use oceans_abi::device::DeviceRecord;
 use oceans_acpi::EcamRegion;
 use oceans_memory_map::{PAGE_SIZE, RegionKind};
-use oceans_pci::{Bar, ConfigSpace, Header, Msix, command, reg};
+use oceans_pci::{Bar, ConfigSpace, Header, Msi, Msix, command, reg};
 use spin::{Mutex, Once};
 
 use crate::acpi::Acpi;
@@ -109,6 +110,8 @@ pub struct Function {
     header: Header,
     bars: [Bar; 6],
     msix: Option<Msix>,
+    /// MSI, used only when there is no MSI-X (ADR-0124).
+    msi: Option<Msi>,
     /// Kernel address of the configuration space.
     config: usize,
     /// Serialises read-modify-write of control registers.
@@ -223,6 +226,8 @@ pub fn init(acpi: Option<&Acpi>) {
         );
         if let Some(msix) = function.msix {
             let _ = write!(line, ", {} MSI-X vectors", msix.entries);
+        } else if function.msi.is_some() {
+            let _ = write!(line, ", MSI");
         }
         klog::info!("{line}");
     }
@@ -285,6 +290,7 @@ fn scan_bus(
                 header,
                 bars,
                 msix: oceans_pci::msix(&ecam),
+                msi: oceans_pci::msi(&ecam),
                 config,
                 control: Mutex::new(()),
                 open: AtomicBool::new(false),
@@ -426,24 +432,58 @@ impl Device {
         Ok((object, address))
     }
 
-    /// Delivers MSI-X `entry` as `bits` on `notification`.
+    /// Delivers MSI-X `entry` as `bits` on `notification`; for a function
+    /// without MSI-X, its MSI message (`entry` 0, ADR-0124). Says which.
     pub fn bind_irq(
         &self,
         entry: u64,
         notification: Arc<Notification>,
         bits: u64,
-    ) -> Result<(), DeviceError> {
+    ) -> Result<Interrupt, DeviceError> {
         let function = &self.function;
-        let msix = function.msix.ok_or(DeviceError::NoInterrupt)?;
+        if bits == 0 {
+            return Err(DeviceError::BadArgument);
+        }
+        let Some(msix) = function.msix else {
+            let msi = function.msi.ok_or(DeviceError::NoInterrupt)?;
+            if entry != 0 {
+                return Err(DeviceError::NoInterrupt);
+            }
+            let vector = self.vector(0, notification, bits)?;
+            program_msi(function, msi, Some(arch::msi_message(vector)));
+            return Ok(Interrupt::Msi);
+        };
         let entry = u16::try_from(entry)
             .ok()
             .filter(|&e| e < msix.entries)
             .ok_or(DeviceError::NoInterrupt)?;
-        if bits == 0 {
-            return Err(DeviceError::BadArgument);
-        }
         let table = function.msix_table().ok_or(DeviceError::NoInterrupt)?;
+        let vector = self.vector(entry, notification, bits)?;
+        write_msix_entry(table, entry, Some(arch::msi_message(vector)));
 
+        // MSI-X on (unbound entries stay masked), legacy interrupts off.
+        arch::without_interrupts(|| {
+            let _guard = function.control.lock();
+            let mut ecam = function.ecam();
+            let control = ecam.read16(msix.control());
+            ecam.write16(
+                msix.control(),
+                (control | Msix::ENABLE) & !Msix::FUNCTION_MASK,
+            );
+            let value = ecam.read16(reg::COMMAND);
+            ecam.write16(reg::COMMAND, value | command::INTX_DISABLE);
+        });
+        Ok(Interrupt::MsiX)
+    }
+
+    /// The vector of `entry`: the one already bound, pointed at the new
+    /// notification, or a new one.
+    fn vector(
+        &self,
+        entry: u16,
+        notification: Arc<Notification>,
+        bits: u64,
+    ) -> Result<u8, DeviceError> {
         let bound = arch::without_interrupts(|| {
             self.irqs
                 .lock()
@@ -462,22 +502,49 @@ impl Device {
                 vector
             }
         };
-        write_msix_entry(table, entry, Some(arch::msi_message(vector)));
-
-        // MSI-X on (unbound entries stay masked), legacy interrupts off.
-        arch::without_interrupts(|| {
-            let _guard = function.control.lock();
-            let mut ecam = function.ecam();
-            let control = ecam.read16(msix.control());
-            ecam.write16(
-                msix.control(),
-                (control | Msix::ENABLE) & !Msix::FUNCTION_MASK,
-            );
-            let value = ecam.read16(reg::COMMAND);
-            ecam.write16(reg::COMMAND, value | command::INTX_DISABLE);
-        });
-        Ok(())
+        Ok(vector)
     }
+}
+
+/// How a device interrupt is delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interrupt {
+    MsiX,
+    Msi,
+}
+
+/// Programs `function`'s one MSI message and turns MSI on (legacy
+/// interrupts off), or with `None` turns it off.
+fn program_msi(function: &Function, msi: Msi, message: Option<(u64, u32)>) {
+    arch::without_interrupts(|| {
+        let _guard = function.control.lock();
+        let mut ecam = function.ecam();
+        let control = ecam.read16(msi.control());
+        let Some((address, data)) = message else {
+            ecam.write16(msi.control(), control & !Msi::ENABLE);
+            return;
+        };
+        // Off while the message changes; one message (`MME` 0).
+        ecam.write16(
+            msi.control(),
+            control & !(Msi::ENABLE | Msi::MULTIPLE_ENABLE),
+        );
+        ecam.write32(msi.address_low(), address as u32);
+        if let Some(high) = msi.address_high() {
+            ecam.write32(high, (address >> 32) as u32);
+        }
+        ecam.write16(msi.data(), data as u16);
+        if let Some(mask) = msi.mask() {
+            let bits = ecam.read32(mask);
+            ecam.write32(mask, bits & !1);
+        }
+        ecam.write16(
+            msi.control(),
+            (control & !Msi::MULTIPLE_ENABLE) | Msi::ENABLE,
+        );
+        let value = ecam.read16(reg::COMMAND);
+        ecam.write16(reg::COMMAND, value | command::INTX_DISABLE);
+    });
 }
 
 impl Drop for Device {
@@ -500,6 +567,11 @@ impl Drop for Device {
                     (control & !Msix::ENABLE) | Msix::FUNCTION_MASK,
                 );
             });
+        } else if let Some(msi) = function.msi
+            && function.msix.is_none()
+            && !irqs.is_empty()
+        {
+            program_msi(function, msi, None);
         }
         for &(_, vector) in &irqs {
             msi::release(vector);
