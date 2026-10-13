@@ -1091,13 +1091,20 @@ impl<'a> Chip<'a> {
         }
     }
 
-    /// The strongest access point of the network `ssid`.
-    pub fn find(&self, ssid: &[u8]) -> Option<Network> {
+    /// The strongest access point of the network `ssid` offering exactly
+    /// `security`: another one of the same name with other security (an
+    /// open "evil twin" of a WPA2 network) is never chosen.
+    pub fn find(&self, ssid: &[u8], security: Security) -> Option<Network> {
         self.networks
             .iter()
-            .filter(|n| n.bss.ssid() == ssid)
+            .filter(|n| n.bss.ssid() == ssid && n.bss.security == security)
             .max_by_key(|n| n.bss.rssi)
             .copied()
+    }
+
+    /// Whether `ssid` was heard at all (with any security).
+    pub fn heard_name(&self, ssid: &[u8]) -> bool {
+        self.networks.iter().any(|n| n.bss.ssid() == ssid)
     }
 
     pub fn show_networks(&mut self) {

@@ -330,19 +330,32 @@ impl<'a> Driver<'a> {
         let chip = self.chip.as_mut().ok_or("no Wi-Fi")?;
         chip.scan(Some(&wanted.ssid))
             .map_err(|e| alloc::format!("scan: {e}"))?;
-        let network = chip
-            .find(&wanted.ssid)
-            .ok_or_else(|| String::from("the network was not found"))?;
+        // The setting says the security: with a password WPA2, without one
+        // open. An access point of the same name with other security is
+        // never joined, so an open look-alike cannot take a WPA2 network's
+        // traffic (and a password never goes to an open one).
+        let required = if wanted.password.is_some() {
+            Security::Wpa2Personal
+        } else {
+            Security::Open
+        };
+        let Some(network) = chip.find(&wanted.ssid, required) else {
+            return Err(String::from(
+                match (chip.heard_name(&wanted.ssid), required) {
+                    (false, _) => "the network was not found",
+                    (true, Security::Open) => {
+                        "the network is not open (it needs a password, or its security is not supported)"
+                    }
+                    (true, _) => {
+                        "no WPA2-Personal access point of that name (open, or security not supported): refused"
+                    }
+                },
+            ));
+        };
         let bss = network.bss;
-        let pmk = match (bss.security, &wanted.password) {
-            (Security::Open, _) => None,
-            (Security::Wpa2Personal, Some(password)) => Some(self.pmk_for(wanted, password)?),
-            (Security::Wpa2Personal, None) => return Err("the network needs a password".into()),
-            (Security::Unsupported, _) => {
-                return Err(
-                    "the network's security is not supported (WPA2-Personal or open only)".into(),
-                );
-            }
+        let pmk = match &wanted.password {
+            Some(password) => Some(self.pmk_for(wanted, password)?),
+            None => None,
         };
         self.say(format_args!(
             "joining {:?} on channel {} ({} dBm, {})",
