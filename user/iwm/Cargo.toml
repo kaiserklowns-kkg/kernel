@@ -1,0 +1,22 @@
+[package]
+name = "iwm"
+description = "Intel Wireless 8260 driver: Intel's firmware, scanning, joining WPA2 networks (ADR-0129)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "iwm"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-virtio.workspace = true
+oceans-nic.workspace = true
+oceans-iwm.workspace = true
+oceans-wifi.workspace = true
+oceans-wpa.workspace = true
+oceans-fs-proto.workspace = true
+oceans-net-proto.workspace = true

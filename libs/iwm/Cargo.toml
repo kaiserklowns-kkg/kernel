@@ -1,0 +1,9 @@
+[package]
+name = "oceans-iwm"
+description = "Intel Wireless 8260 logic: the firmware file, registers, host commands, RX packets, NVM; host-tested (ADR-0129)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

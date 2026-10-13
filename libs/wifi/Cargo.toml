@@ -1,0 +1,9 @@
+[package]
+name = "oceans-wifi"
+description = "802.11 frames for Oceans' Wi-Fi: beacons and probe responses read, probe, authentication and association requests written, data frames to and from Ethernet; without allocation (ADR-0129)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

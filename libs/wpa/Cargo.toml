@@ -1,0 +1,17 @@
+[package]
+name = "oceans-wpa"
+description = "WPA2-Personal for Oceans' Wi-Fi: the passphrase's key, the 4-way and group handshakes, CCMP; independent of the chip, without allocation (ADR-0129)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# RustCrypto, software only: Oceans does not save SIMD state across
+# context switches (user/.cargo/config.toml forces the soft backends).
+[dependencies]
+sha1 = { version = "0.10.6", default-features = false, features = ["force-soft"] }
+hmac = { version = "0.12.1", default-features = false }
+pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }
+aes = { version = "0.8.4", default-features = false }
+ccm = { version = "0.5.0", default-features = false }
+aes-kw = { version = "0.2.1", default-features = false }

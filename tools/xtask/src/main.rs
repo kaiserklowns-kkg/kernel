@@ -46,6 +46,7 @@ const USER_PROGRAMS: &[&str] = &[
     "e1000e",
     "igc",
     "rtl8168",
+    "iwm",
     "xhci",
     "usb-storage",
     "core",
@@ -679,6 +680,42 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move 108 -210",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
+    // The Wi-Fi panel (ADR-0130), with the shell in the driver's place
+    // (QEMU has no Wi-Fi): its files say idle, and one WPA2 network,
+    // "oceans". Control Center (the speaker, 1124,14) opens; its network
+    // toggle (978,80) opens the panel, which asks for a scan. The network's
+    // row (from 940,116) asks for its password; typed, Enter sets the
+    // network: the password, then the name. The "driver" says joined.
+    b"write /system/wifi/networks W -48 6 6f6365616e73\r\n",
+    b"write /system/wifi/status idle\r\n",
+    b"@wait desktop: Wi-Fi not connected",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move -146 66",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: Wi-Fi scan asked for",
+    b"@monitor mouse_move 112 52",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@keys password1",
+    b"@monitor screendump build/smoke-wifi-password.ppm",
+    b"@monitor sendkey ret",
+    b"@wait desktop: Wi-Fi: joining oceans",
+    b"cat /system/wifi/ssid\r\n",
+    b"cat /system/wifi/password\r\n",
+    b"write /system/wifi/status joined 6f6365616e73 -48 6\r\n",
+    b"@wait desktop: Wi-Fi joined oceans",
+    // The panel shows it: the network's bars (from 947,126) in the accent.
+    b"@screen 963 133 2f7cf6 Wi-Fi panel, joined",
+    b"@monitor mouse_move 34 -118",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"rm /system/wifi/status\r\n",
+    b"rm /system/wifi/networks\r\n",
+    b"rm /system/wifi/ssid\r\n",
+    b"rm /system/wifi/password\r\n",
+    b"rm /system/wifi/scan\r\n",
     // Keeping apps in Wave (ADR-0109, ADR-0117): Super and "calc"; a right
     // click on the first result (its row from 340,124) keeps Calculator;
     // Escape. With no window open Wave holds the Terminal and Calculator:
@@ -1402,6 +1439,9 @@ const SHELL_EXPECT: &[Expect] = &[
     // the keyboard from its tile.
     Expect::Contains("desktop: network connected, 10.0.2.15"),
     Expect::Contains("desktop: keyboard Thai, from Control Center"),
+    // The Wi-Fi panel (ADR-0130): the network and password it set.
+    Expect::Line("oceans"),
+    Expect::Line("password1"),
     Expect::Line("volume: 75%, muted"),
     Expect::Line("volume: 70%"),
     Expect::Line("pasted edited in oceans"),
@@ -1974,6 +2014,31 @@ fn build_image_for(
         install_services(&text).into_bytes(),
     ));
     files.push(("services.conf".to_string(), manifest_bytes));
+    // The wallpaper's photograph (ADR-0117), a module the desktop decodes:
+    // inside the program it made it larger than the 4 MiB the kernel
+    // loads a program in.
+    let wallpaper = root()
+        .join("user")
+        .join("display")
+        .join("assets")
+        .join("wallpaper-ocean.png");
+    let bytes = fs::read(&wallpaper).map_err(|e| format!("{}: {e}", wallpaper.display()))?;
+    files.push(("wallpaper-ocean.png".to_string(), bytes));
+    // Wi-Fi firmware (ADR-0129): Intel's, loaded into the chip by `iwm`.
+    // Not in the smoke image: QEMU has no such chip, and its 256 MiB are
+    // better left to what the smoke runs.
+    let wifi_firmware = if setup == Setup::Smoke {
+        &[][..]
+    } else {
+        WIFI_FIRMWARE
+    };
+    // With Intel's licence, whose notice goes wherever the firmware does.
+    let licence = (!wifi_firmware.is_empty()).then_some("LICENCE.iwlwifi_firmware");
+    for name in wifi_firmware.iter().copied().chain(licence) {
+        let path = root().join("firmware").join("intel").join(name);
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        files.push((name.to_string(), bytes));
+    }
     build_ui()?;
     for (name, bytes) in build_go(GO_PROGRAMS)? {
         files.push((name, bytes));
@@ -2050,6 +2115,9 @@ fn build_image_for(
     pack_esp(&esp)?;
     Ok(esp)
 }
+
+/// Firmware files the image carries (ADR-0129), from `firmware/intel`.
+const WIFI_FIRMWARE: &[&str] = &["iwlwifi-8000C-36.ucode"];
 
 /// What recovery mode starts (ADR-0122): the disks, the USB stick and
 /// keyboard, the network, the filesystem, the kept logs and the shell; not

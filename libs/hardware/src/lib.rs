@@ -167,6 +167,14 @@ pub const MATRIX: &[Row] = &[
         support: Support::Driver("igc (ADR-0123)"),
     },
     Row {
+        what: "Intel Wireless 8260 (Wi-Fi)",
+        id: Ids::Family(|vendor, device| vendor == 0x8086 && oceans_iwm::DEVICES.contains(&device)),
+        class: (None, None, None),
+        support: Support::Driver(
+            "iwm (ADR-0129): Intel's firmware; joins WPA2-Personal and open networks (set in /system/wifi), software CCMP",
+        ),
+    },
+    Row {
         what: "Realtek RTL8111/8168 Ethernet",
         id: Ids::Family(oceans_rtl8168::known),
         class: (None, None, None),

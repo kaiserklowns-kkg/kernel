@@ -135,5 +135,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0126](0126-installed-on-the-internal-disk.md) | Oceans installed on the internal disk (ABI 20): GPT with an ESP and an Oceans root partition; the boot partition from the kernel; `/boot`; updates there | Accepted |
 | [0127](0127-the-installer.md) | The installer (ABI 21): install mode; the release checked against the image's keys; the SSD Oceans started from laid out as installed | Accepted |
 | [0128](0128-oceans-setup.md) | Oceans Setup: installing from the web over Windows (`OceansSetup.exe`: checks, verified download, ERASE, a staging partition, UEFI boot entries, restart) | Accepted |
+| [0129](0129-wi-fi.md) | Wi-Fi: the Intel Wireless 8260 (`iwm`, Intel's firmware as a module), WPA2-Personal in software (`oceans-wpa`), iwm between the stack and the wired NIC; the network in `/system/wifi` | Accepted |
+| [0130](0130-wi-fi-panel.md) | Choosing a Wi-Fi network in Control Center: files in `/system/wifi` between the driver and the desktop; the wallpaper a module of the boot image | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

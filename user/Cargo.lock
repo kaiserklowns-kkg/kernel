@@ -67,6 +67,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes-kw"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69fa2b352dcefb5f7f3a5fb840e02665d311d878955380515e4fd50095dd3d8c"
+dependencies = [
+ "aes",
+]
+
+[[package]]
 name = "ahci"
 version = "0.1.0"
 dependencies = [
@@ -146,6 +155,18 @@ checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
 dependencies = [
  "find-msvc-tools",
  "shlex",
+]
+
+[[package]]
+name = "ccm"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ae3c82e4355234767756212c570e29833699ab63e6ffd161887314cc5b43847"
+dependencies = [
+ "aead",
+ "cipher",
+ "ctr",
+ "subtle",
 ]
 
 [[package]]
@@ -323,12 +344,14 @@ dependencies = [
  "oceans-account",
  "oceans-core-proto",
  "oceans-draw",
+ "oceans-fs-proto",
  "oceans-image",
  "oceans-input-proto",
  "oceans-net-proto",
  "oceans-package",
  "oceans-rt",
  "oceans-search",
+ "oceans-wifi",
  "oceans-window",
 ]
 
@@ -609,6 +632,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iwm"
+version = "0.1.0"
+dependencies = [
+ "oceans-fs-proto",
+ "oceans-iwm",
+ "oceans-net-proto",
+ "oceans-nic",
+ "oceans-rt",
+ "oceans-virtio",
+ "oceans-wifi",
+ "oceans-wpa",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -837,6 +874,7 @@ version = "0.1.0"
 dependencies = [
  "oceans-e1000e",
  "oceans-igc",
+ "oceans-iwm",
  "oceans-rtl8168",
 ]
 
@@ -889,6 +927,10 @@ dependencies = [
  "oceans-fat",
  "oceans-gpt",
 ]
+
+[[package]]
+name = "oceans-iwm"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-net"
@@ -1008,8 +1050,24 @@ name = "oceans-wav"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-wifi"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-window"
 version = "0.1.0"
+
+[[package]]
+name = "oceans-wpa"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-kw",
+ "ccm",
+ "hmac",
+ "pbkdf2",
+ "sha1",
+]
 
 [[package]]
 name = "once_cell"
@@ -1065,6 +1123,16 @@ dependencies = [
  "base64ct",
  "rand_core",
  "subtle",
+]
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
 ]
 
 [[package]]
@@ -1301,6 +1369,17 @@ dependencies = [
  "oceans-package",
  "oceans-rt",
  "oceans-ui",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]

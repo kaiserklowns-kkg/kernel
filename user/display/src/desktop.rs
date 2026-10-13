@@ -25,6 +25,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use oceans_wifi::Security;
+use oceans_wifi::state::{Listed, Ssid};
 use oceans_window::{BUTTON_STEP, CLOSE_SIZE, Frame, TITLE_HEIGHT, dock};
 
 use crate::canvas::{Canvas, Font, Rect, Rgb};
@@ -164,6 +166,46 @@ pub struct Network {
     pub address: String,
 }
 
+/// Wi-Fi as the driver's files say (ADR-0130): what it is doing, and the
+/// networks of its last scan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Wifi {
+    pub state: WifiState,
+    pub networks: Vec<Listed>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WifiState {
+    /// No Wi-Fi to use (the chip did not come up).
+    #[default]
+    Off,
+    Idle,
+    Scanning,
+    Joining(String),
+    Joined {
+        name: String,
+        rssi: i8,
+    },
+    Failed {
+        name: String,
+        reason: String,
+    },
+}
+
+/// A network's password being typed in the Wi-Fi panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WifiEntry {
+    pub ssid: Ssid,
+    pub name: String,
+    pub password: String,
+}
+
+/// A network's name as text (the font has Latin letters; anything else
+/// shows as a replacement).
+pub fn ssid_name(ssid: &[u8]) -> String {
+    String::from_utf8_lossy(ssid).into_owned()
+}
+
 /// A short message in the corner.
 pub struct Toast {
     pub text: String,
@@ -274,6 +316,12 @@ pub struct Desktop {
     pub wave_open: bool,
     /// The network (ADR-0118), if the desktop can read it.
     pub network: Option<Network>,
+    /// Wi-Fi (ADR-0130), on a machine whose Wi-Fi driver runs.
+    pub wifi: Option<Wifi>,
+    /// Control Center shows the Wi-Fi panel in place of its modules.
+    pub wifi_open: bool,
+    /// A password being typed there.
+    pub wifi_entry: Option<WifiEntry>,
     /// The notifications (ADR-0119), newest first, at most
     /// [`MAX_NOTICES`]; how many came since they were last looked at;
     /// whether their panel is open.
@@ -412,6 +460,15 @@ pub enum Hit {
     User,
     /// An item of the user's menu.
     UserItem(UserAction),
+    /// The Wi-Fi panel (ADR-0130): back to Control Center, a new scan, a
+    /// network (by its place in the list), the password field, Join,
+    /// Cancel.
+    WifiBack,
+    WifiScan,
+    WifiNetwork(usize),
+    WifiField,
+    WifiJoin,
+    WifiCancel,
     /// Somewhere else in Control Center.
     VolumePanel,
     Allow,
@@ -564,6 +621,52 @@ pub fn cc_toggle(width: i32, index: usize) -> Rect {
     let cx = m.x + m.w / 4 + col * m.w / 2;
     let cy = m.y + 34 + row * 66;
     Rect::new(cx - 22, cy - 22, 44, 44)
+}
+
+// ---- The Wi-Fi panel (ADR-0130), in Control Center's place ----------------
+
+/// Its back button, top left.
+pub fn wifi_back(width: i32) -> Rect {
+    let cc = control_center(width);
+    Rect::new(cc.x + 12, cc.y + 12, 32, 30)
+}
+
+/// Scan, top right.
+pub fn wifi_scan(width: i32) -> Rect {
+    let cc = control_center(width);
+    Rect::new(cc.x + cc.w - 12 - 64, cc.y + 14, 64, 26)
+}
+
+/// The networks' rows, under the status line.
+const WIFI_ROW: i32 = 34;
+const WIFI_LIST_TOP: i32 = 82;
+pub const WIFI_ROWS: usize = ((CC_HEIGHT - WIFI_LIST_TOP - 12) / WIFI_ROW) as usize;
+
+pub fn wifi_row(width: i32, index: usize) -> Rect {
+    let cc = control_center(width);
+    Rect::new(
+        cc.x + 12,
+        cc.y + WIFI_LIST_TOP + index as i32 * WIFI_ROW,
+        cc.w - 24,
+        WIFI_ROW - 2,
+    )
+}
+
+/// The password field, and Cancel and Join under it.
+pub fn wifi_field(width: i32) -> Rect {
+    let cc = control_center(width);
+    Rect::new(cc.x + 16, cc.y + WIFI_LIST_TOP + 30, cc.w - 32, 34)
+}
+
+pub fn wifi_button(width: i32, join: bool) -> Rect {
+    let field = wifi_field(width);
+    let w = 92;
+    let x = if join {
+        field.x + field.w - w
+    } else {
+        field.x + field.w - 2 * w - 10
+    };
+    Rect::new(x, field.y + field.h + 14, w, 30)
 }
 
 /// The media keys the buttons press: Previous, Play/Pause, Next.
@@ -853,13 +956,13 @@ fn mix(from: Rgb, to: Rgb, t: f32) -> Rgb {
     to.over(from, (t.clamp(0.0, 1.0) * 255.0) as u32)
 }
 
-/// The wallpaper (ADR-0117): a photograph of the ocean, cut to the
-/// screen's shape from its middle and scaled to fill it. Made once; the
-/// drawn one if the picture cannot be read.
-pub fn wallpaper(width: i32, height: i32) -> Vec<u32> {
-    const PHOTO: &[u8] = include_bytes!("../assets/wallpaper-ocean.png");
+/// The wallpaper (ADR-0117): a photograph of the ocean (`photo`, the PNG
+/// the boot image brings as a module), cut to the screen's shape from its
+/// middle and scaled to fill it. Made once; the drawn one without the
+/// picture, or if it cannot be read.
+pub fn wallpaper(width: i32, height: i32, photo: Option<&[u8]>) -> Vec<u32> {
     let (w, h) = (width.max(1) as u32, height.max(1) as u32);
-    let Ok((_, photo)) = oceans_image::decode(PHOTO) else {
+    let Some(Ok((_, photo))) = photo.map(oceans_image::decode) else {
         return drawn_wallpaper(width, height);
     };
     // The largest part of the photograph with the screen's shape.
@@ -1080,6 +1183,32 @@ impl Desktop {
             .any(|&i| status_icon(width, i).contains(x, y))
         {
             return Hit::Volume;
+        }
+        if self.volume_open && self.wifi_open && control_center(width).contains(x, y) {
+            if wifi_back(width).contains(x, y) {
+                return Hit::WifiBack;
+            }
+            if self.wifi_entry.is_some() {
+                return if wifi_field(width).contains(x, y) {
+                    Hit::WifiField
+                } else if wifi_button(width, true).contains(x, y) {
+                    Hit::WifiJoin
+                } else if wifi_button(width, false).contains(x, y) {
+                    Hit::WifiCancel
+                } else {
+                    Hit::VolumePanel
+                };
+            }
+            if wifi_scan(width).contains(x, y) {
+                return Hit::WifiScan;
+            }
+            let shown = self
+                .wifi
+                .as_ref()
+                .map_or(0, |w| w.networks.len().min(WIFI_ROWS));
+            return (0..shown)
+                .find(|&i| wifi_row(width, i).contains(x, y))
+                .map_or(Hit::VolumePanel, Hit::WifiNetwork);
         }
         if self.volume_open && control_center(width).contains(x, y) {
             let media = self.now_playing.is_some();
@@ -1529,6 +1658,210 @@ impl Desktop {
         }
     }
 
+    /// The Wi-Fi panel (ADR-0130), in Control Center's place: back, the
+    /// title and Scan; what Wi-Fi is doing; the networks, strongest first,
+    /// or the password of the one chosen.
+    fn draw_wifi(&self, canvas: &mut Canvas) {
+        let w = canvas.width;
+        let cc = control_center(w);
+        let pointer = self.pointer;
+        let hover = |r: Rect| r.contains(pointer.0, pointer.1);
+        let clip = Rect::new(cc.x + 12, cc.y, cc.w - 24, cc.h);
+
+        let back = wifi_back(w);
+        if hover(back) {
+            canvas.tint(back, 8, BLACK, 20);
+        }
+        chevron_left(
+            canvas,
+            back.x + back.w / 2,
+            back.y + back.h / 2,
+            colour::text(),
+        );
+        canvas.text(
+            back.x + back.w + 6,
+            cc.y + 17,
+            "Wi-Fi",
+            Font::Strong,
+            colour::text(),
+            clip,
+        );
+
+        let wifi = self.wifi.as_ref();
+        let state = wifi.map_or(&WifiState::Off, |w| &w.state);
+        let (line, error) = match state {
+            WifiState::Off => (String::from("Wi-Fi is off: no Wi-Fi device works"), true),
+            WifiState::Idle => (String::from("Not connected"), false),
+            WifiState::Scanning => (String::from("Looking for networks..."), false),
+            WifiState::Joining(name) => (alloc::format!("Joining {name}..."), false),
+            WifiState::Joined { name, .. } => (alloc::format!("Connected to {name}"), false),
+            WifiState::Failed { name, reason } => {
+                (alloc::format!("Could not join {name}: {reason}"), true)
+            }
+        };
+        let ink = if error {
+            Rgb(0xd7_3a_49)
+        } else {
+            colour::muted()
+        };
+        canvas.text(cc.x + 16, cc.y + 52, &line, Font::Body, ink, clip);
+
+        if let Some(entry) = &self.wifi_entry {
+            let prompt = alloc::format!("Password for {}", entry.name);
+            canvas.text(
+                cc.x + 16,
+                cc.y + WIFI_LIST_TOP + 4,
+                &prompt,
+                Font::Strong,
+                colour::text(),
+                clip,
+            );
+            let field = wifi_field(w);
+            canvas.round_fill(field, 8, colour::surface());
+            canvas.round_fill(
+                Rect::new(field.x, field.y + field.h - 2, field.w, 2),
+                1,
+                colour::accent(),
+            );
+            // Dots, never the password; the last ones if it is long.
+            let count = entry.password.chars().count();
+            let shown = count.min(((field.w - 24) / 12) as usize);
+            for i in 0..shown {
+                canvas.circle(
+                    field.x + 14 + i as i32 * 12,
+                    field.y + field.h / 2,
+                    4,
+                    colour::text(),
+                );
+            }
+            let caret = field.x + 10 + shown as i32 * 12;
+            canvas.fill(
+                Rect::new(caret, field.y + 8, 2, field.h - 16),
+                colour::accent(),
+            );
+            let hint = if count < 8 {
+                "8 characters or more"
+            } else {
+                "Enter joins, Escape cancels"
+            };
+            // On its own line, under the buttons.
+            let below = wifi_button(w, true);
+            canvas.text(
+                field.x,
+                below.y + below.h + 14,
+                hint,
+                Font::Body,
+                colour::muted(),
+                Rect::new(field.x, below.y + below.h, field.w, 40),
+            );
+            for join in [false, true] {
+                let b = wifi_button(w, join);
+                let ready = !join || count >= 8;
+                let fill = if join && ready {
+                    colour::accent()
+                } else {
+                    colour::button_secondary()
+                };
+                canvas.round_fill(b, 8, fill);
+                if hover(b) && ready {
+                    canvas.tint(b, 8, BLACK, 20);
+                }
+                let label = if join { "Join" } else { "Cancel" };
+                let ink = if join && ready {
+                    WHITE
+                } else if ready {
+                    colour::text()
+                } else {
+                    colour::muted()
+                };
+                let lw = canvas.measure(label, Font::Strong);
+                canvas.text(b.x + (b.w - lw) / 2, b.y + 6, label, Font::Strong, ink, b);
+            }
+            return;
+        }
+
+        let scan = wifi_scan(w);
+        let scanning = matches!(state, WifiState::Scanning);
+        canvas.round_fill(scan, 8, colour::button_secondary());
+        if hover(scan) && !scanning {
+            canvas.tint(scan, 8, BLACK, 20);
+        }
+        let label = "Scan";
+        let lw = canvas.measure(label, Font::Body);
+        let ink = if scanning {
+            colour::muted()
+        } else {
+            colour::text()
+        };
+        canvas.text(
+            scan.x + (scan.w - lw) / 2,
+            scan.y + 5,
+            label,
+            Font::Body,
+            ink,
+            scan,
+        );
+
+        let networks = wifi.map_or(&[][..], |w| &w.networks[..]);
+        if networks.is_empty() {
+            let none = if scanning { "" } else { "No networks found" };
+            canvas.text(
+                cc.x + 16,
+                cc.y + WIFI_LIST_TOP + 8,
+                none,
+                Font::Body,
+                colour::muted(),
+                clip,
+            );
+        }
+        let joined = match state {
+            WifiState::Joined { name, .. } => Some(name.as_str()),
+            _ => None,
+        };
+        for (i, network) in networks.iter().take(WIFI_ROWS).enumerate() {
+            let row = wifi_row(w, i);
+            let name = ssid_name(network.ssid.as_bytes());
+            let connected = joined == Some(name.as_str());
+            if connected {
+                canvas.round_fill(row, 8, colour::surface());
+            }
+            if hover(row) && network.security != Security::Unsupported {
+                canvas.tint(row, 8, BLACK, 16);
+            }
+            let ink = if network.security == Security::Unsupported {
+                colour::muted()
+            } else {
+                colour::text()
+            };
+            // The network joined: its bars in the accent.
+            let bars = if connected { colour::accent() } else { ink };
+            signal_icon(canvas, row.x + 16, row.y + row.h / 2, network.rssi, bars);
+            let right = match (connected, network.security) {
+                (true, _) => "Connected",
+                (false, Security::Wpa2Personal) => "WPA2",
+                (false, Security::Open) => "Open",
+                (false, Security::Unsupported) => "Not supported",
+            };
+            let rw = canvas.measure(right, Font::Body);
+            let name_clip = Rect::new(row.x + 36, row.y, row.w - 44 - rw - 8, row.h);
+            let font = if connected { Font::Strong } else { Font::Body };
+            canvas.text(row.x + 36, row.y + 7, &name, font, ink, name_clip);
+            let right_ink = if connected {
+                colour::accent()
+            } else {
+                colour::muted()
+            };
+            canvas.text(
+                row.x + row.w - 8 - rw,
+                row.y + 7,
+                right,
+                Font::Body,
+                right_ink,
+                row,
+            );
+        }
+    }
+
     /// Control Center (ADR-0118): the round toggles, what plays, the
     /// keyboard and the accent, the sound, and a line of the system's
     /// state, each module on its own surface.
@@ -1537,6 +1870,10 @@ impl Desktop {
         let cc = control_center(w);
         canvas.shadow(cc, 16, 80);
         canvas.round_fill(cc, 18, colour::panel());
+        if self.wifi_open {
+            self.draw_wifi(canvas);
+            return;
+        }
         for which in 0..5 {
             canvas.round_fill(cc_module(w, which), 14, colour::surface());
         }
@@ -1697,7 +2034,13 @@ impl Desktop {
         // The system's state: memory and where the network is.
         let mut line = self.status.clone();
         match &self.network {
-            Some(n) if n.connected => line.push_str(&alloc::format!("  ·  Ethernet {}", n.address)),
+            Some(n) if n.connected => {
+                let by = match self.wifi.as_ref().map(|w| &w.state) {
+                    Some(WifiState::Joined { name, .. }) => alloc::format!("Wi-Fi {name}"),
+                    _ => String::from("Ethernet"),
+                };
+                line.push_str(&alloc::format!("  ·  {by} {}", n.address));
+            }
             Some(_) => line.push_str("  ·  Not connected"),
             None => {}
         }
@@ -2308,6 +2651,31 @@ fn network_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
     canvas.fill(Rect::new(cx - 6, cy, 13, 1), ink);
     canvas.fill(Rect::new(cx - 6, cy, 1, 3), ink);
     canvas.fill(Rect::new(cx + 6, cy, 1, 3), ink);
+}
+
+/// A network's signal (ADR-0130): four bars, as many lit as it is strong
+/// (-55 dBm and above all four, below -85 one).
+fn signal_icon(canvas: &mut Canvas, cx: i32, cy: i32, rssi: i8, ink: Rgb) {
+    let lit = match rssi {
+        -55.. => 4,
+        -65..=-56 => 3,
+        -75..=-66 => 2,
+        _ => 1,
+    };
+    for bar in 0..4 {
+        let h = 4 + bar * 3;
+        let colour = if bar < lit { ink } else { Rgb(0xb8_b8_be) };
+        canvas.round_fill(Rect::new(cx - 9 + bar * 5, cy + 7 - h, 3, h), 1, colour);
+    }
+}
+
+/// Back: a chevron pointing left, about 12 pixels.
+fn chevron_left(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    // The point at the left, the arms going right and away.
+    for i in 0..7 {
+        canvas.fill(Rect::new(cx - 3 + i, cy - i, 2, 2), ink);
+        canvas.fill(Rect::new(cx - 3 + i, cy + i, 2, 2), ink);
+    }
 }
 
 /// Dark (ADR-0118): a crescent, cut from a circle by one in `bg`.

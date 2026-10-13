@@ -36,6 +36,7 @@ procedure below passes on it.
 | Intel I217, I218, I219 Ethernet (in the PCH) | e1000e (ADR-0123), MSI (ADR-0124) | not in QEMU: written from Intel's open drivers, host-tested; real machines: awaiting reports |
 | Intel 82576, I210, I211, I225, I226 Ethernet | igc (ADR-0123) | Tier 0 (QEMU `igb`, an 82576) in CI; I210 and I225/I226: awaiting reports |
 | Realtek RTL8111/8168 Ethernet | rtl8168 (ADR-0123) | not in QEMU: written from BSD's re(4), host-tested; real machines: awaiting reports |
+| Intel Wireless 8260 (Wi-Fi) | iwm (ADR-0129): Intel's firmware; joins WPA2-Personal and open networks (set in /system/wifi), software CCMP | not in QEMU: first on an HP ZBook 15u G3, awaiting its report |
 | virtio-net (modern) | virtio-net (ADR-0023) | Tier 0 (virtual machines) |
 | virtio-blk (modern) | virtio-blk (ADR-0021) | Tier 0 (virtual machines) |
 | Display controller | UEFI GOP framebuffer, 32 bpp (ADR-0029, ADR-0057) | Tier 0 (OVMF); no GPU driver |

@@ -87,6 +87,8 @@ const KEYS: u64 = 1 << 2;
 /// How often the clock, the console mirror and the app list are checked.
 const TICK_MS: u64 = 100;
 const APPS_EVERY_MS: u64 = 2000;
+/// The wallpaper's photograph (ADR-0117), a module of the boot image.
+const WALLPAPER: &str = "wallpaper-ocean.png";
 /// How long the desktop runs before this boot counts as finished
 /// (ADR-0122).
 const BOOT_OK_MS: u64 = 60_000;
@@ -136,6 +138,9 @@ struct Service {
     power: Option<Handle>,
     /// A reader end of the network stack (ADR-0118), from Core.
     net_reader: Option<Handle>,
+    /// Wi-Fi's files (ADR-0130): `/system/wifi`, granted as storage.
+    wifi_dir: Option<oceans_fs_proto::Node>,
+    wifi_refreshed_ms: u64,
     /// When the desktop started, and whether it told Core this boot
     /// finished (ADR-0122).
     started_ms: u64,
@@ -204,8 +209,27 @@ fn main(start: Start) -> i64 {
         info.pitch,
         (info.red_shift, info.green_shift, info.blue_shift),
     );
-    // Drawn once (ADR-0078); each frame starts from a copy.
-    canvas.set_wallpaper(desktop::wallpaper(canvas.width, canvas.height));
+    // Drawn once (ADR-0078); each frame starts from a copy. The photograph
+    // is a module of the boot image, mapped while it is decoded (kept out
+    // of the program: the kernel loads programs of at most 4 MiB).
+    let photo = directory.find("module", WALLPAPER).and_then(|module| {
+        let size = oceans_rt::memory_size(module).ok()? as usize;
+        let base = oceans_rt::memory_map(module, 0, prot::READ).ok()?;
+        Some((base, size))
+    });
+    // SAFETY: `base` maps `size` bytes of the module, read-only, until it
+    // is unmapped below, after the last use of the slice.
+    let bytes = photo.map(|(base, size)| unsafe { core::slice::from_raw_parts(base, size) });
+    canvas.set_wallpaper(desktop::wallpaper(canvas.width, canvas.height, bytes));
+    if let Some((base, _)) = photo {
+        let _ = oceans_rt::memory_unmap(base);
+    }
+    if photo.is_none() {
+        say(
+            log,
+            format_args!("display: no {WALLPAPER}: the drawn wallpaper"),
+        );
+    }
 
     let Ok(notification) = oceans_rt::notification_create() else {
         return EXIT_BAD_START;
@@ -257,6 +281,8 @@ fn main(start: Start) -> i64 {
         pixels: BTreeMap::new(),
         power: directory.find("power", "power"),
         net_reader: None,
+        wifi_dir: directory.find("use", "storage").map(oceans_fs_proto::Node),
+        wifi_refreshed_ms: 0,
         started_ms: oceans_rt::clock_ms(),
         boot_reported: false,
     };
@@ -346,6 +372,10 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_user();
             }
             dirty |= service.refresh_terminal();
+            // The Wi-Fi panel open (ADR-0130): what the driver does, often.
+            if service.desktop.wifi_open && now.saturating_sub(service.wifi_refreshed_ms) >= 500 {
+                dirty |= service.refresh_wifi();
+            }
             // A while without input (ADR-0112): the screen locks.
             if service.desktop.lock == desktop::Lock::Open
                 && oceans_account::lock_due(
@@ -373,6 +403,7 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_appearance();
                 dirty |= service.refresh_volume();
                 dirty |= service.refresh_network();
+                dirty |= service.refresh_wifi();
                 dirty |= service.refresh_pending();
             }
             if service
@@ -680,6 +711,16 @@ impl Service {
                 if self.desktop.dialog.is_some() && VolumeKey::of(byte).is_none() {
                     continue;
                 }
+                // A Wi-Fi password being typed (ADR-0130): the keys are its.
+                if self.desktop.volume_open
+                    && self.desktop.wifi_open
+                    && self.desktop.wifi_entry.is_some()
+                    && VolumeKey::of(byte).is_none()
+                    && media_key_name(byte).is_none()
+                {
+                    dirty |= self.wifi_key(byte);
+                    continue;
+                }
                 // Launchpad open: typing searches, and no window or
                 // the Terminal gets the keys (the volume and media keys
                 // still work).
@@ -811,6 +852,7 @@ impl Service {
             Hit::NoticePanel => false,
             Hit::Volume => {
                 self.desktop.volume_open = !self.desktop.volume_open;
+                self.close_wifi();
                 self.desktop.notices_open = false;
                 self.desktop.user_menu_open = false;
                 self.desktop.start_open = false;
@@ -848,6 +890,15 @@ impl Service {
                 // it.
                 self.desktop.volume_open = which == 1;
                 match which {
+                    // The network with Wi-Fi: its panel (ADR-0130), a scan
+                    // asked for.
+                    0 if self.desktop.wifi.is_some() => {
+                        self.desktop.volume_open = true;
+                        self.desktop.wifi_open = true;
+                        self.desktop.wifi_entry = None;
+                        self.wifi_scan();
+                        self.refresh_wifi();
+                    }
                     // The network and Settings: Settings, which shows them.
                     0 | 3 => self.launch("app.oceans.settings", ""),
                     1 => {
@@ -856,6 +907,28 @@ impl Service {
                     }
                     _ => self.lock_screen(),
                 }
+                true
+            }
+            // The Wi-Fi panel (ADR-0130).
+            Hit::WifiBack => {
+                self.close_wifi();
+                true
+            }
+            Hit::WifiScan => {
+                self.wifi_scan();
+                true
+            }
+            Hit::WifiNetwork(index) => {
+                self.wifi_choose(index);
+                true
+            }
+            Hit::WifiField => false,
+            Hit::WifiJoin => {
+                self.wifi_key(b'\r');
+                true
+            }
+            Hit::WifiCancel => {
+                self.desktop.wifi_entry = None;
                 true
             }
             Hit::Accent => {
@@ -1191,6 +1264,216 @@ impl Service {
         }
         self.desktop.network = network;
         changed
+    }
+
+    // ---- Wi-Fi (ADR-0130): the driver's files in /system/wifi ---------------
+
+    fn wifi_read(&self, name: &str) -> Option<Vec<u8>> {
+        let dir = self.wifi_dir.as_ref()?;
+        let (node, kind) = dir.open(name, 0).ok()?;
+        let mut data = alloc::vec![0u8; 4096];
+        let len = if kind == oceans_fs_proto::Kind::File {
+            node.read(0, &mut data).ok()
+        } else {
+            None
+        };
+        node.close();
+        data.truncate(len?);
+        Some(data)
+    }
+
+    fn wifi_write(&self, name: &str, bytes: &[u8]) -> bool {
+        let Some(dir) = self.wifi_dir.as_ref() else {
+            return false;
+        };
+        let create = oceans_fs_proto::flags::CREATE_FILE | oceans_fs_proto::flags::WRITE;
+        let Ok((node, kind)) = dir.open(name, create) else {
+            return false;
+        };
+        let written = kind == oceans_fs_proto::Kind::File
+            && node.truncate(0).is_ok()
+            && node.write_all(0, bytes).is_ok();
+        node.close();
+        written
+    }
+
+    fn wifi_remove(&self, name: &str) {
+        if let Some(dir) = self.wifi_dir.as_ref() {
+            let _ = dir.remove(name);
+        }
+    }
+
+    /// Wi-Fi as the driver last wrote it; `None` without a driver (no
+    /// `status`). `true` if what shows changed. Control Center closed, the
+    /// panel closes too (and a half-typed password goes).
+    fn refresh_wifi(&mut self) -> bool {
+        use oceans_wifi::state;
+        self.wifi_refreshed_ms = oceans_rt::clock_ms();
+        let mut changed = false;
+        if !self.desktop.volume_open
+            && (self.desktop.wifi_open || self.desktop.wifi_entry.is_some())
+        {
+            self.close_wifi();
+            changed = true;
+        }
+        let wifi = self.wifi_read(state::STATUS).map(|status| {
+            let name = |ssid: state::Ssid| desktop::ssid_name(ssid.as_bytes());
+            let state = match state::parse_status(&status) {
+                Some(state::Status::Off) | None => desktop::WifiState::Off,
+                Some(state::Status::Idle) => desktop::WifiState::Idle,
+                Some(state::Status::Scanning) => desktop::WifiState::Scanning,
+                Some(state::Status::Joining(ssid)) => desktop::WifiState::Joining(name(ssid)),
+                Some(state::Status::Joined { ssid, rssi, .. }) => desktop::WifiState::Joined {
+                    name: name(ssid),
+                    rssi,
+                },
+                Some(state::Status::Failed { ssid, reason }) => desktop::WifiState::Failed {
+                    name: name(ssid),
+                    reason: String::from(reason),
+                },
+            };
+            let networks = self
+                .wifi_read(state::NETWORKS)
+                .map(|file| {
+                    state::lines(&file)
+                        .filter_map(state::parse_network)
+                        .collect()
+                })
+                .unwrap_or_default();
+            desktop::Wifi { state, networks }
+        });
+        if wifi != self.desktop.wifi {
+            if let Some(w) = &wifi
+                && self.desktop.wifi.as_ref().map(|old| &old.state) != Some(&w.state)
+            {
+                self.say_wifi(&w.state);
+            }
+            self.desktop.wifi = wifi;
+            changed = true;
+        }
+        changed
+    }
+
+    fn say_wifi(&self, state: &desktop::WifiState) {
+        use desktop::WifiState::*;
+        match state {
+            Off => say(self.log, format_args!("desktop: Wi-Fi off")),
+            Idle => say(self.log, format_args!("desktop: Wi-Fi not connected")),
+            Scanning => say(self.log, format_args!("desktop: Wi-Fi scanning")),
+            Joining(name) => say(self.log, format_args!("desktop: Wi-Fi joining {name}")),
+            Joined { name, .. } => say(self.log, format_args!("desktop: Wi-Fi joined {name}")),
+            Failed { name, reason } => say(
+                self.log,
+                format_args!("desktop: Wi-Fi could not join {name}: {reason}"),
+            ),
+        }
+    }
+
+    fn close_wifi(&mut self) {
+        self.desktop.wifi_open = false;
+        self.desktop.wifi_entry = None;
+    }
+
+    /// Asks the driver for a scan (it removes the file once it has seen it).
+    fn wifi_scan(&mut self) {
+        if self.wifi_write(oceans_wifi::state::SCAN, b"1\n") {
+            say(self.log, format_args!("desktop: Wi-Fi scan asked for"));
+        }
+    }
+
+    /// A network chosen in the list: the one joined, left; an open one,
+    /// joined; a WPA2 one, its password asked for.
+    fn wifi_choose(&mut self, index: usize) {
+        let Some(wifi) = &self.desktop.wifi else {
+            return;
+        };
+        let Some(network) = wifi.networks.get(index).copied() else {
+            return;
+        };
+        let name = desktop::ssid_name(network.ssid.as_bytes());
+        let joined =
+            matches!(&wifi.state, desktop::WifiState::Joined { name: n, .. } if *n == name);
+        if joined {
+            self.wifi_remove(oceans_wifi::state::SSID);
+            say(self.log, format_args!("desktop: Wi-Fi: leaving {name}"));
+            return;
+        }
+        match network.security {
+            oceans_wifi::Security::Open => self.wifi_join(network.ssid, None),
+            oceans_wifi::Security::Wpa2Personal => {
+                self.desktop.wifi_entry = Some(desktop::WifiEntry {
+                    ssid: network.ssid,
+                    name,
+                    password: String::new(),
+                });
+            }
+            oceans_wifi::Security::Unsupported => self.toast(
+                String::from(
+                    "This network's security is not supported: WPA2-Personal or open only",
+                ),
+                true,
+            ),
+        }
+    }
+
+    /// Sets the network to join: the password first, then the name, which
+    /// the driver acts on. Each ends with a newline, as the shell's `cat`
+    /// shows best (the driver drops it).
+    fn wifi_join(&mut self, ssid: oceans_wifi::state::Ssid, password: Option<&str>) {
+        let line = |bytes: &[u8]| [bytes, b"\n"].concat();
+        let saved = match password {
+            Some(password) => {
+                self.wifi_write(oceans_wifi::state::PASSWORD, &line(password.as_bytes()))
+            }
+            None => {
+                self.wifi_remove(oceans_wifi::state::PASSWORD);
+                true
+            }
+        };
+        if saved && self.wifi_write(oceans_wifi::state::SSID, &line(ssid.as_bytes())) {
+            let name = desktop::ssid_name(ssid.as_bytes());
+            say(self.log, format_args!("desktop: Wi-Fi: joining {name}"));
+            self.desktop.wifi_entry = None;
+        } else {
+            self.toast(String::from("Could not set the Wi-Fi network"), true);
+        }
+    }
+
+    /// A key into the password (ADR-0130): printable ASCII, as WPA2 has it;
+    /// Backspace, Enter (Join), Escape (Cancel). `true` if the screen
+    /// changes.
+    fn wifi_key(&mut self, byte: u8) -> bool {
+        let Some(entry) = self.desktop.wifi_entry.as_mut() else {
+            return false;
+        };
+        match byte {
+            0x1b => self.desktop.wifi_entry = None,
+            b'\r' => {
+                let count = entry.password.chars().count();
+                if count >= 8 {
+                    let (ssid, password) = (entry.ssid, core::mem::take(&mut entry.password));
+                    self.wifi_join(ssid, Some(&password));
+                }
+            }
+            0x08 | 0x7f => {
+                entry.password.pop();
+            }
+            0x20..=0x7e if entry.password.len() < 63 => {
+                let c = self
+                    .desktop
+                    .layout
+                    .character(byte)
+                    .unwrap_or(char::from(byte));
+                if !c.is_ascii() || c.is_ascii_control() {
+                    return false;
+                }
+                if let Some(entry) = self.desktop.wifi_entry.as_mut() {
+                    entry.password.push(c);
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// No input for the time the user chose (ADR-0112): the screen locks.
