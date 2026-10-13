@@ -2395,8 +2395,13 @@ fn qemu_command(
     cmd.args([
         "-machine",
         "q35",
+        // The boot smoke runs dozens of apps, the desktop and Go apps at
+        // once: at 256 MiB only about 20 MiB stayed free, and a Go app
+        // started late failed to get its heap now and then (ADR-0136). A
+        // real machine has gigabytes; the smoke's free-memory line
+        // (`Counter: N MiB free`) still shows what each change costs.
         "-m",
-        "256M",
+        "384M",
         // Four CPUs (ADR-0088).
         "-smp",
         "4",
