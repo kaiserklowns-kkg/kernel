@@ -16,6 +16,8 @@ use alloc::sync::Arc;
 
 use spin::Mutex;
 
+use oceans_input::Event;
+
 use crate::acpi::Acpi;
 use crate::ipc::Notification;
 use crate::process::Process;
@@ -27,6 +29,8 @@ const CAPACITY: usize = 4096;
 const COM1_IRQ: u8 = 4;
 /// The PS/2 keyboard's ISA interrupt line.
 const KEYBOARD_IRQ: u8 = 1;
+/// The PS/2 pointing device's (ADR-0132).
+const POINTER_IRQ: u8 = 12;
 
 struct Input {
     ring: [u8; CAPACITY],
@@ -52,15 +56,33 @@ struct Keys {
     ring: [u8; KEYS_CAPACITY],
     head: usize,
     len: usize,
+    /// The PS/2 pointer's events (ADR-0132), for the same holder: the
+    /// oldest dropped when full.
+    pointer: [Event; POINTER_CAPACITY],
+    pointer_head: usize,
+    pointer_len: usize,
     /// The holder (by address: compared, never dereferenced), and what to
-    /// signal when keys arrive.
+    /// signal when keys or pointer events arrive.
     holder: Option<(usize, Arc<Notification>, u64)>,
 }
+
+const POINTER_CAPACITY: usize = oceans_abi::display::MAX_POINTER_EVENTS;
+/// The PS/2 pointer's device number in its events (USB pointers count up
+/// from 1).
+const PS2_POINTER: u8 = 0xff;
+const NO_EVENT: Event = Event {
+    time_ms: 0,
+    device: 0,
+    kind: oceans_input::Kind::Motion { dx: 0, dy: 0 },
+};
 
 static KEYS: Mutex<Keys> = Mutex::new(Keys {
     ring: [0; KEYS_CAPACITY],
     head: 0,
     len: 0,
+    pointer: [NO_EVENT; POINTER_CAPACITY],
+    pointer_head: 0,
+    pointer_len: 0,
     holder: None,
 });
 
@@ -112,8 +134,81 @@ pub fn init(acpi: Option<&Acpi>) {
     );
     match result {
         Ok(()) => klog::info!("console input: PS/2 keyboard (IRQ {KEYBOARD_IRQ}, GSI {gsi})"),
-        Err(problem) => klog::info!("no keyboard input: {problem}"),
+        Err(problem) => {
+            klog::info!("no keyboard input: {problem}");
+            return;
+        }
     }
+
+    // A pointing device on the same controller: a laptop's touchpad, or a
+    // PS/2 mouse (ADR-0132).
+    let Some((gsi, flags)) = acpi.isa_irq(POINTER_IRQ) else {
+        return;
+    };
+    let Some(io_apic) = acpi.io_apic_for(gsi) else {
+        return;
+    };
+    let result = arch::enable_pointer(
+        io_apic.address,
+        io_apic.gsi_base,
+        gsi,
+        oceans_acpi::active_low(flags),
+        oceans_acpi::level_triggered(flags),
+        on_pointer,
+    );
+    match result {
+        Ok(wheel) => klog::info!(
+            "pointer: PS/2 (IRQ {POINTER_IRQ}, GSI {gsi}){}",
+            if wheel { ", with a wheel" } else { "" }
+        ),
+        Err(problem) => klog::info!("no PS/2 pointer: {problem}"),
+    }
+}
+
+/// A PS/2 pointer event (interrupt context, interrupts disabled): queued
+/// for the keyboard's holder (the desktop), dropped without one.
+fn on_pointer(kind: oceans_input::Kind) {
+    let mut keys = KEYS.lock();
+    let keys = &mut *keys;
+    let Some((_, notification, bits)) = &keys.holder else {
+        return;
+    };
+    crate::random::sample();
+    let event = Event {
+        time_ms: crate::time::uptime_ms(),
+        device: PS2_POINTER,
+        kind,
+    };
+    if keys.pointer_len == POINTER_CAPACITY {
+        keys.pointer_head = (keys.pointer_head + 1) % POINTER_CAPACITY;
+        keys.pointer_len -= 1;
+    }
+    keys.pointer[(keys.pointer_head + keys.pointer_len) % POINTER_CAPACITY] = event;
+    keys.pointer_len += 1;
+    notification.signal(*bits);
+}
+
+/// Takes queued pointer events for `holder` (`DISPLAY_POINTER`), encoded,
+/// as many as fit `out`; `None` if it does not hold the keyboard.
+pub fn read_pointer(holder: &Process, out: &mut [u8]) -> Option<usize> {
+    use oceans_input::EVENT_SIZE;
+    arch::without_interrupts(|| {
+        let mut keys = KEYS.lock();
+        if !keys
+            .holder
+            .as_ref()
+            .is_some_and(|(who, _, _)| *who == identity(holder))
+        {
+            return None;
+        }
+        let count = (out.len() / EVENT_SIZE).min(keys.pointer_len);
+        for chunk in out.as_chunks_mut::<EVENT_SIZE>().0.iter_mut().take(count) {
+            chunk.copy_from_slice(&keys.pointer[keys.pointer_head].encode());
+            keys.pointer_head = (keys.pointer_head + 1) % POINTER_CAPACITY;
+            keys.pointer_len -= 1;
+        }
+        Some(count)
+    })
 }
 
 /// The serial line's diagnostic key, Ctrl+\\ (0x1C): the kernel logs what
@@ -191,6 +286,7 @@ pub fn take_keyboard(holder: &Process, notification: Arc<Notification>, bits: u6
         let mut keys = KEYS.lock();
         keys.head = 0;
         keys.len = 0;
+        keys.pointer_len = 0;
         keys.holder.replace((identity(holder), notification, bits))
     });
     // Dropped with interrupts enabled, outside the lock.
@@ -232,6 +328,7 @@ pub fn process_exited(process: &Process) {
             return None;
         }
         keys.len = 0;
+        keys.pointer_len = 0;
         keys.holder.take()
     });
     drop(old);

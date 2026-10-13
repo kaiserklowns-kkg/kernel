@@ -29,9 +29,10 @@
 /// a function without MSI-X, and says which it bound); 19 = ADR-0125 (49:
 /// writing the PCI Express power and request-size fields); 20 = ADR-0126
 /// (the boot disk and partition in the `BOOT` record); 21 = ADR-0127 (the
-/// install boot mode). Versions only add; existing numbers keep their
+/// install boot mode); 22 = ADR-0132 (50: the PS/2 pointer's events to the
+/// desktop). Versions only add; existing numbers keep their
 /// meaning.
-pub const ABI_VERSION: u64 = 21;
+pub const ABI_VERSION: u64 = 22;
 
 /// System call numbers.
 pub mod nr {
@@ -273,6 +274,17 @@ pub mod nr {
     /// other bits are kept. `MissingRights` for anything else. Needs
     /// `MANAGE`.
     pub const DEVICE_CONFIG_WRITE: u64 = 49;
+
+    // ABI 22 (ADR-0132)
+
+    /// `(display, ptr, capacity) -> count` — takes queued events of the
+    /// PS/2 pointing device (a laptop's touchpad, a PS/2 mouse), each an
+    /// `oceans_input::Event` of `EVENT_SIZE` (32) bytes, as many as fit
+    /// `capacity` bytes, without waiting (0: none). They queue for the
+    /// keyboard's holder, whose `DISPLAY_KEYBOARD` notification is
+    /// signalled as they arrive; only it may take them (else `Busy`).
+    /// Needs `READ`.
+    pub const DISPLAY_POINTER: u64 = 50;
 }
 
 /// How `DEVICE_IRQ` delivers a device's interrupt (ABI 18, ADR-0124).
@@ -308,6 +320,9 @@ pub mod display {
     pub const MAX_TEXT: usize = 64 * 1024;
     /// Key bytes queued for `DISPLAY_KEYS`; more are dropped.
     pub const MAX_KEYS: usize = 1024;
+    /// PS/2 pointer events queued for `DISPLAY_POINTER` (ADR-0132); the
+    /// oldest are dropped.
+    pub const MAX_POINTER_EVENTS: usize = 64;
     /// The byte keyboards send for Ctrl+Tab (ADR-0059): the desktop moves
     /// the keyboard focus to the next window. (ASCII RS; no other key
     /// sends it.)

@@ -19,6 +19,7 @@ oceans-capability.workspace = true
 oceans-elf.workspace = true
 oceans-frame-allocator.workspace = true
 oceans-heap.workspace = true
+oceans-input.workspace = true
 oceans-memory-map.workspace = true
 oceans-pci.workspace = true
 oceans-random.workspace = true

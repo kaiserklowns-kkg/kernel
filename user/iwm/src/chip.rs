@@ -32,6 +32,8 @@ const TX_QUEUES: [u8; 5] = [1, 5, 6, 7, 8];
 const TX_SLOT: usize = 2048;
 /// Frames received and not yet looked at, at most.
 const INBOX: usize = 256;
+/// Packets remembered for the log.
+const RX_SEEN: usize = 8;
 /// REMOVE_STA: `[sta_id, reserved 3]`.
 const REMOVE_STA: u8 = 0x19;
 
@@ -97,6 +99,11 @@ pub struct Chip<'a> {
     time_event: Option<u32>,
     /// What the join set up, to take down before the next.
     joined: bool,
+    /// Packets the RX ring delivered, and the last few (code, flags,
+    /// queue): what the log shows when an answer does not come.
+    rx_count: u64,
+    rx_seen: Vec<(u8, u8, u8)>,
+    int_seen: core::cell::Cell<u32>,
 }
 
 /// A network heard, and when its frame arrived (the chip's clock).
@@ -156,6 +163,9 @@ impl<'a> Chip<'a> {
             inbox: VecDeque::new(),
             time_event: None,
             joined: false,
+            rx_count: 0,
+            rx_seen: Vec::new(),
+            int_seen: core::cell::Cell::new(0),
         };
         for (name, dma) in [
             ("chunk", &chip.chunk),
@@ -417,6 +427,7 @@ impl<'a> Chip<'a> {
     fn causes(&self) -> Result<(u32, u32)> {
         let int = self.read(reg::INT);
         let fh = self.read(reg::FH_INT_STATUS);
+        self.int_seen.set(self.int_seen.get() | int);
         if int == u32::MAX || int & 0xffff_fff0 == 0xa5a5_a5a0 {
             return Err("the chip stopped answering".into());
         }
@@ -512,12 +523,8 @@ impl<'a> Chip<'a> {
         while self.alive.is_none() {
             self.service_rx()?;
             if oceans_rt::clock_ms() > deadline {
-                return Err(alloc::format!(
-                    "{name}: no ALIVE (INT {:#x}, GP_CNTRL {:#x}, load status {:#x})",
-                    self.read(reg::INT),
-                    self.read(reg::GP_CNTRL),
-                    self.read(reg::FH_UCODE_LOAD_STATUS)
-                ));
+                // The registers and what RX saw follow (`report`).
+                return Err(alloc::format!("{name}: no ALIVE within {TIMEOUT_MS} ms"));
             }
             oceans_rt::sleep_ms(1);
         }
@@ -594,6 +601,38 @@ impl<'a> Chip<'a> {
     }
 
     fn handle(&mut self, packet: &rx::Packet<'_>) {
+        // What arrived, for the log when something does not.
+        self.rx_count += 1;
+        if self.rx_seen.len() == RX_SEEN {
+            self.rx_seen.remove(0);
+        }
+        self.rx_seen.push((packet.code, packet.flags, packet.qid));
+        // The firmware's own notifications, by their code alone: as iwm
+        // does, whatever the queue bit says (the firmware does not set its
+        // "originated here" bit on every one, ALIVE among them). Only group
+        // 0 has these codes.
+        let group0 = packet.flags & 0x3f == 0;
+        match packet.code {
+            cmd::ALIVE if group0 => {
+                self.alive = alive::parse(packet.payload);
+                if self.alive.is_none() {
+                    self.step(format_args!(
+                        "an ALIVE of {} bytes, a layout not known",
+                        packet.payload.len()
+                    ));
+                }
+                return;
+            }
+            cmd::INIT_COMPLETE if group0 => {
+                self.init_complete = true;
+                return;
+            }
+            cmd::CALIB_RES_PHY_DB if group0 => {
+                self.phy_db.push(packet.payload.to_vec());
+                return;
+            }
+            _ => {}
+        }
         // Received frames and scan notifications, whatever the queue bits.
         match packet.code {
             code::RX_PHY => {
@@ -646,22 +685,34 @@ impl<'a> Chip<'a> {
             }
             return;
         }
-        match packet.code {
-            cmd::ALIVE => self.alive = alive::parse(packet.payload),
-            cmd::INIT_COMPLETE => self.init_complete = true,
-            cmd::CALIB_RES_PHY_DB => self.phy_db.push(packet.payload.to_vec()),
-            cmd::REPLY_ERROR => {
-                let error = packet
-                    .payload
-                    .get(..4)
-                    .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-                let command = packet.payload.get(4).copied().unwrap_or(0);
-                self.step(format_args!(
-                    "the firmware refused command {command:#x} (error {error:#x})"
-                ));
-            }
-            _ => {}
+        if packet.code == cmd::REPLY_ERROR {
+            let error = packet
+                .payload
+                .get(..4)
+                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            let command = packet.payload.get(4).copied().unwrap_or(0);
+            self.step(format_args!(
+                "the firmware refused command {command:#x} (error {error:#x})"
+            ));
         }
+    }
+
+    /// What the RX side did: packets, the last few, where the chip's
+    /// closed index is, every interrupt cause seen.
+    fn rx_summary(&self) -> String {
+        let mut text = alloc::format!(
+            "RX: {} packets, closed {}, causes seen {:#x}",
+            self.rx_count,
+            self.rx_status.read::<u16>(0) & 0xfff,
+            self.int_seen.get()
+        );
+        if !self.rx_seen.is_empty() {
+            text.push_str(", last (code/flags/queue):");
+            for (code, flags, qid) in &self.rx_seen {
+                text.push_str(&alloc::format!(" {code:02x}/{flags:02x}/{qid:02x}"));
+            }
+        }
+        text
     }
 
     /// Sends a command on queue 0; with `wait`, its answer's payload.
@@ -1409,14 +1460,18 @@ impl<'a> Chip<'a> {
 
     /// What tells why a step failed.
     pub fn report(&self) {
+        // Short lines: a photograph of the screen is sometimes the log.
         self.step(format_args!(
-            "registers: INT {:#x}, INT_MASK {:#x}, GP_CNTRL {:#x}, HW_IF {:#x}, load status {:#x}, RX closed {}",
+            "registers: INT {:#x}, INT_MASK {:#x}, GP_CNTRL {:#x}",
             self.read(reg::INT),
             self.read(reg::INT_MASK),
             self.read(reg::GP_CNTRL),
+        ));
+        self.step(format_args!(
+            "registers: HW_IF {:#x}, load status {:#x}",
             self.read(reg::HW_IF_CONFIG),
             self.read(reg::FH_UCODE_LOAD_STATUS),
-            self.rx_status.read::<u16>(0) & 0xfff
         ));
+        self.step(format_args!("{}", self.rx_summary()));
     }
 }

@@ -423,6 +423,24 @@ pub fn display_keyboard(display: Handle, notification: Handle, bits: u64) -> Res
     .map(drop)
 }
 
+/// Queued events of the PS/2 pointing device (ABI 22, ADR-0132), encoded
+/// `oceans_input::Event`s of 32 bytes each, as many as fit `buffer`,
+/// without waiting; returns how many (0: none).
+pub fn display_pointer(display: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    call(
+        nr::DISPLAY_POINTER,
+        [
+            display.0,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+        ],
+    )
+    .map(|(count, _)| count as usize)
+}
+
 /// Queued key bytes, without waiting; returns how many (0: none).
 pub fn display_keys(display: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
     call(

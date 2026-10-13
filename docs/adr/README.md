@@ -138,5 +138,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0129](0129-wi-fi.md) | Wi-Fi: the Intel Wireless 8260 (`iwm`, Intel's firmware as a module), WPA2-Personal in software (`oceans-wpa`), iwm between the stack and the wired NIC; the network in `/system/wifi` | Accepted |
 | [0130](0130-wi-fi-panel.md) | Choosing a Wi-Fi network in Control Center: files in `/system/wifi` between the driver and the desktop; the wallpaper a module of the boot image | Accepted |
 | [0131](0131-oceans-setup-on-linux.md) | Oceans Setup on Linux (`OceansSetup-linux`, in a terminal: the installer staged in Linux's own EFI system partition, boot entries through efivarfs; `cargo xtask setup-linux` to try it) | Accepted |
+| [0132](0132-ps2-touchpad.md) | The PS/2 touchpad and mouse (ABI 22): the i8042's auxiliary port in the kernel (the wheel knock, IRQ 12 on the keyboard's vector), `oceans_input::ps2`, `DISPLAY_POINTER` to the desktop; the keyboard no longer blocked by touchpad bytes | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

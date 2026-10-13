@@ -391,7 +391,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("nvme: the controller is shut down"),
     Expect::Contains("ahci: the disk is in standby"),
     Expect::Contains("init: core stopped"),
-    Expect::Contains("(ABI 21)"),
+    Expect::Contains("(ABI 22)"),
     Expect::Contains("fs: formatted a blank disk"),
     // The SATA disk (ADR-0069): identified, formatted, written.
     Expect::Contains("ahci: port 0: QEMU HARDDISK (serial oceans-sata, firmware "),
@@ -606,6 +606,39 @@ pub fn setup_linux(profile: Profile) -> Result {
     );
     println!("    chmod +x {}", release::SETUP_LINUX);
     println!("    {command}");
+    Ok(())
+}
+
+/// `cargo xtask test-update`: `build/test-update/oceans-VERSION.opk`, this
+/// tree as a system update signed with the test's release key: what a PC
+/// installed from `setup-linux`'s test release accepts (`update apply`).
+/// `OCEANS_TEST_VERSION` names it (default 0.1.1): it must be newer than
+/// the one running.
+pub fn test_update(profile: Profile) -> Result {
+    let version = env::var("OCEANS_TEST_VERSION").unwrap_or_else(|_| "0.1.1".to_string());
+    let key = release::test_release_key();
+    let keys = release::ImageKeys::release(&key);
+    let esp = build_image_for(profile, None, Setup::Hardware, &keys)?;
+    let package = system_package(
+        &esp,
+        &version,
+        &key,
+        "Oceans, a test update for a PC installed from a test release",
+        None,
+    )?;
+    let dir = root().join("build").join("test-update");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let name = format!("oceans-{version}.opk");
+    fs::write(dir.join(&name), &package).map_err(|e| format!("{name}: {e}"))?;
+    println!(
+        "{} is ready ({} bytes). On the PC, once it is on the network:",
+        dir.join(&name).display(),
+        package.len()
+    );
+    println!("    run fetch out use:net use:fs -- URL/{name} /home/{name}");
+    println!("    run update out use:fs -- apply /home/{name}");
+    println!("    reboot");
     Ok(())
 }
 

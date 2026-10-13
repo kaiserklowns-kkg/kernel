@@ -693,6 +693,7 @@ dependencies = [
  "oceans-elf",
  "oceans-frame-allocator",
  "oceans-heap",
+ "oceans-input",
  "oceans-memory-map",
  "oceans-pci",
  "oceans-random",

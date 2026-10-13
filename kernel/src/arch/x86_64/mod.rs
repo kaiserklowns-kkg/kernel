@@ -375,6 +375,40 @@ pub fn enable_keyboard(
     }
 }
 
+/// Sets up the pointing device on the PS/2 controller's auxiliary port (a
+/// mouse, or a laptop's touchpad; ADR-0132), routes its interrupt (global
+/// system interrupt `gsi`) to the keyboard's vector (one handler drains
+/// both), and starts its reports, which become events for `sink`. After
+/// `enable_keyboard`. `Ok(wheel)`.
+pub fn enable_pointer(
+    io_apic_address: u64,
+    gsi_base: u32,
+    gsi: u32,
+    active_low: bool,
+    level_triggered: bool,
+    sink: fn(oceans_input::Kind),
+) -> Result<bool, &'static str> {
+    let wheel = without_interrupts(|| keyboard::aux_init(sink)).ok_or("no PS/2 pointing device")?;
+    let io = io_apic(io_apic_address, gsi_base)?;
+    let routed = without_interrupts(|| {
+        io.lock().route(
+            gsi,
+            interrupts::VECTOR_KEYBOARD,
+            active_low,
+            level_triggered,
+            apic::id(),
+        )
+    });
+    if !routed {
+        return Err("the I/O APIC does not serve the pointer's interrupt");
+    }
+    if without_interrupts(keyboard::aux_start) {
+        Ok(wheel)
+    } else {
+        Err("the pointing device did not start reporting")
+    }
+}
+
 /// Routes the serial console's interrupt (global system interrupt `gsi` on
 /// the I/O APIC at `io_apic`) to this CPU and delivers every received byte
 /// to `sink`, in interrupt context. Requires the kernel page tables.

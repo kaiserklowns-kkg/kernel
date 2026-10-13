@@ -71,6 +71,13 @@ pub fn init() -> bool {
     if read(STATUS) == 0xff {
         return false; // nothing on the bus
     }
+    // The auxiliary port (a laptop's PS/2 touchpad) off: nothing here reads
+    // it (IRQ 12), and the controller has one output byte for both ports, so
+    // a touchpad byte nobody takes stops the keyboard's too.
+    if !wait(INPUT_FULL, false) {
+        return false;
+    }
+    write(COMMAND, 0xa7);
     // Drop stale bytes.
     for _ in 0..32 {
         if read(STATUS) & OUTPUT_FULL == 0 {
@@ -79,7 +86,8 @@ pub fn init() -> bool {
         let _ = read(DATA);
     }
     // Configuration byte: keyboard interrupt on, keyboard clock on, keep
-    // translation to set 1.
+    // translation to set 1; the auxiliary port's interrupt off and its
+    // clock stopped.
     if !wait(INPUT_FULL, false) {
         return false;
     }
@@ -87,7 +95,7 @@ pub fn init() -> bool {
     if !wait(OUTPUT_FULL, true) {
         return false;
     }
-    let config = (read(DATA) | 0x01 | 0x40) & !0x10;
+    let config = (read(DATA) | 0x01 | 0x40 | 0x20) & !(0x10 | 0x02);
     if !wait(INPUT_FULL, false) {
         return false;
     }
@@ -103,7 +111,113 @@ pub fn init() -> bool {
     true
 }
 
-/// Interrupt context: decodes waiting scancodes into bytes for `sink`.
+// ---- The auxiliary port: a PS/2 mouse, or a laptop's touchpad (ADR-0132) --
+
+/// Its packets, decoded; where its events go. Locked in interrupt context
+/// (and at set-up, before its interrupt is routed).
+static POINTER: spin::Mutex<Option<Pointer>> = spin::Mutex::new(None);
+
+struct Pointer {
+    decoder: oceans_input::ps2::Decoder,
+    tracker: oceans_input::Tracker,
+    sink: fn(oceans_input::Kind),
+}
+
+/// The controller's configuration byte, changed: `set` bits on, `clear`
+/// bits off.
+fn configure(set: u8, clear: u8) -> bool {
+    if !wait(INPUT_FULL, false) {
+        return false;
+    }
+    write(COMMAND, 0x20);
+    if !wait(OUTPUT_FULL, true) {
+        return false;
+    }
+    let config = (read(DATA) | set) & !clear;
+    if !wait(INPUT_FULL, false) {
+        return false;
+    }
+    write(COMMAND, 0x60);
+    if !wait(INPUT_FULL, false) {
+        return false;
+    }
+    write(DATA, config);
+    wait(INPUT_FULL, false)
+}
+
+/// A byte from the auxiliary device (a command's answer), if one comes.
+fn aux_read() -> Option<u8> {
+    for _ in 0..4 {
+        if wait(OUTPUT_FULL, true) {
+            let from_aux = read(STATUS) & FROM_AUX != 0;
+            let byte = read(DATA);
+            if from_aux {
+                return Some(byte);
+            }
+        }
+    }
+    None
+}
+
+/// Sends `byte` to the auxiliary device; whether it acknowledged it.
+fn aux_command(byte: u8) -> bool {
+    if !wait(INPUT_FULL, false) {
+        return false;
+    }
+    write(COMMAND, 0xd4);
+    if !wait(INPUT_FULL, false) {
+        return false;
+    }
+    write(DATA, byte);
+    aux_read() == Some(oceans_input::ps2::command::ACK)
+}
+
+/// Finds and sets up a pointing device on the auxiliary port, its reports
+/// still off (its interrupt is routed first: `aux_start`). `Some(wheel)`
+/// if one answered.
+pub fn aux_init(sink: fn(oceans_input::Kind)) -> Option<bool> {
+    use oceans_input::ps2::{WHEEL_ID, WHEEL_KNOCK, command};
+    if !wait(INPUT_FULL, false) {
+        return None;
+    }
+    write(COMMAND, 0xa8); // the port on
+    // Its clock running, its interrupt still off.
+    if !configure(0, 0x20 | 0x02) || !aux_command(command::SET_DEFAULTS) {
+        return None;
+    }
+    let knocked = WHEEL_KNOCK
+        .iter()
+        .all(|&rate| aux_command(command::SET_SAMPLE_RATE) && aux_command(rate));
+    let wheel = knocked && aux_command(command::GET_ID) && aux_read() == Some(WHEEL_ID);
+    *POINTER.lock() = Some(Pointer {
+        decoder: oceans_input::ps2::Decoder::new(wheel),
+        tracker: oceans_input::Tracker::new(),
+        sink,
+    });
+    Some(wheel)
+}
+
+/// The pointing device reports, on its interrupt (routed by now). Called
+/// with interrupts disabled.
+pub fn aux_start() -> bool {
+    configure(0x02, 0) && aux_command(oceans_input::ps2::command::ENABLE_REPORTING)
+}
+
+fn pointer_byte(byte: u8) {
+    let mut pointer = POINTER.lock();
+    let Some(pointer) = pointer.as_mut() else {
+        return;
+    };
+    if let Some(sample) = pointer.decoder.feed(byte) {
+        let sink = pointer.sink;
+        pointer
+            .tracker
+            .update(&sample, oceans_input::Axes::Relative, sink);
+    }
+}
+
+/// Interrupt context (the keyboard's interrupt or the pointer's): key
+/// bytes for `sink`, the pointing device's to its decoder.
 pub fn drain(sink: fn(u8)) {
     for _ in 0..16 {
         let status = read(STATUS);
@@ -111,9 +225,9 @@ pub fn drain(sink: fn(u8)) {
             return;
         }
         let code = read(DATA);
-        if status & FROM_AUX == 0
-            && let Some(byte) = translate(code)
-        {
+        if status & FROM_AUX != 0 {
+            pointer_byte(code);
+        } else if let Some(byte) = translate(code) {
             sink(byte);
         }
     }

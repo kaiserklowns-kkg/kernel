@@ -10,10 +10,14 @@
 //!   reports: buttons held, motion or position, wheel turns) into events,
 //!   reporting only what changed.
 //!
+//! - [`ps2`]: PS/2 mice and touchpads (their packets, the wheel knock).
+//!
 //! Devices are untrusted: nothing here panics on any input, and decoding
 //! rejects unknown event kinds instead of guessing.
 
 #![no_std]
+
+pub mod ps2;
 
 /// Bytes per encoded event.
 pub const EVENT_SIZE: usize = 32;

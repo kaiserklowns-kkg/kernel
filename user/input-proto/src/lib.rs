@@ -17,7 +17,7 @@
 
 use oceans_rt::{Error, Handle, rights};
 
-use oceans_input::EVENT_SIZE;
+pub use oceans_input::EVENT_SIZE;
 pub use oceans_input::{Event, Kind};
 
 /// Operations (request labels).

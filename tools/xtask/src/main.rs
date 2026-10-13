@@ -1107,7 +1107,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 21)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 22)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1272,7 +1272,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 21)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 22)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -1619,6 +1619,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: app.oceans.greeter-service exited with code 0"),
     Expect::Line("  app.oceans.greeter  1.0.0  Greeter"),
     Expect::Contains("lsusb: requests `use:usb`"),
+    // The PS/2 pointer (ADR-0132): QEMU's PS/2 mouse answers the wheel's
+    // knock; its port no longer stops the keyboard.
+    Expect::Contains("pointer: PS/2 (IRQ 12, GSI 12), with a wheel"),
     Expect::Contains(
         "xhci: port 5: 0627:0001 QEMU USB Keyboard (480 Mb/s), keyboard (console input)",
     ),
@@ -1740,6 +1743,8 @@ commands:
             trusting only the release key (ADR-0072)
   setup-linux  build/setup-linux: Oceans Setup for Linux and a test release
             of this tree, to try installing over Linux (ADR-0131)
+  test-update  build/test-update: this tree as an update for a PC installed
+            from that test release (OCEANS_TEST_VERSION, default 0.1.1)
 
 environment:
   OCEANS_QEMU   path to qemu-system-x86_64
@@ -1781,6 +1786,7 @@ fn main() -> ExitCode {
         Some("smoke-secure-boot") => secure_boot::smoke_secure_boot(profile),
         Some("release") => release::release(),
         Some("setup-linux") => hardware::setup_linux(profile),
+        Some("test-update") => hardware::test_update(profile),
         Some("help" | "--help" | "-h") | None => {
             println!("{USAGE}");
             Ok(())

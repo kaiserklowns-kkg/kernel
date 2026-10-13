@@ -363,6 +363,8 @@ fn main(start: Start) -> i64 {
         }
         if bits & KEYS != 0 {
             dirty |= service.keys();
+            // The PS/2 pointer (a touchpad, ADR-0132) comes with the keys.
+            dirty |= service.ps2_pointer(&canvas);
         }
         if bits & TICK != 0 {
             let _ = oceans_rt::timer_set(notification, TICK, TICK_MS);
@@ -465,6 +467,25 @@ impl Service {
             .collect();
         self.desktop.draw(canvas, oceans_rt::clock_ms(), &views);
         canvas.present();
+    }
+
+    /// The PS/2 pointing device's events (ABI 22, ADR-0132), queued by the
+    /// kernel with the keys: handled as a USB pointer's are.
+    fn ps2_pointer(&mut self, canvas: &Canvas) -> bool {
+        const EVENT: usize = oceans_input_proto::EVENT_SIZE;
+        let mut dirty = false;
+        let mut buffer = [0u8; 16 * EVENT];
+        loop {
+            let count = match oceans_rt::display_pointer(self.display, &mut buffer) {
+                Ok(0) | Err(_) => return dirty,
+                Ok(count) => count,
+            };
+            for record in buffer.as_chunks::<EVENT>().0.iter().take(count) {
+                if let Some(event) = oceans_input_proto::Event::decode(record) {
+                    dirty |= self.pointer(event.kind, event.time_ms, canvas);
+                }
+            }
+        }
     }
 
     /// A pointer event; `true` if the screen must change.

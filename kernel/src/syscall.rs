@@ -80,6 +80,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DISPLAY_TEXT => display_text(&process, a0, a1, a2),
         nr::DISPLAY_KEYBOARD => display_keyboard(&process, a0, a1, a2),
         nr::DISPLAY_KEYS => display_keys(&process, a0, a1, a2),
+        nr::DISPLAY_POINTER => display_pointer(&process, a0, a1, a2),
         nr::LOG_READ => log_read(&process, a0, a1, a2, a3),
         nr::SYSTEM_POWER => system_power(&process, a0, a1),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
@@ -754,6 +755,18 @@ fn display_keys(process: &Process, raw: u64, ptr: u64, capacity: u64) -> Syscall
     let mut buffer = [0u8; oceans_abi::display::MAX_KEYS];
     let count = console::read_keys(process, &mut buffer[..capacity]).ok_or(Error::Busy)?;
     process.copy_to_user(ptr, &buffer[..count])?;
+    Ok((count as u64, 0))
+}
+
+// ---- ABI 22: the PS/2 pointer to the desktop (ADR-0132) ------------------
+
+fn display_pointer(process: &Process, raw: u64, ptr: u64, capacity: u64) -> SyscallResult {
+    check_display(process, raw, Rights::READ)?;
+    const MAX: usize = oceans_abi::display::MAX_POINTER_EVENTS * oceans_input::EVENT_SIZE;
+    let capacity = usize::try_from(capacity).unwrap_or(usize::MAX).min(MAX);
+    let mut buffer = [0u8; MAX];
+    let count = console::read_pointer(process, &mut buffer[..capacity]).ok_or(Error::Busy)?;
+    process.copy_to_user(ptr, &buffer[..count * oceans_input::EVENT_SIZE])?;
     Ok((count as u64, 0))
 }
 
