@@ -232,18 +232,31 @@ impl Canvas {
     }
 
     /// The Oceans logo (ADR-0117), `size × size` logical pixels from (`x`,
-    /// `y`), blended over what is there: made from its 512-pixel picture
-    /// at the size the scale needs, once for each size (ADR-0136).
+    /// `y`), blended over what is there: made at the size the scale needs,
+    /// once for each size (ADR-0136), from its 80-pixel copy (RGBA, made
+    /// from `oceans-logo.png`): as large as it is drawn at 200 %, and small
+    /// enough to keep in the program rather than decode the photograph's
+    /// 512 pixels into memory the desktop would keep.
     pub fn logo(&mut self, x: i32, y: i32, size: i32) {
-        const PICTURE: &[u8] = include_bytes!("../assets/oceans-logo.png");
+        const SIDE: u32 = 80;
+        const PICTURE: &[u8] = include_bytes!("../assets/oceans-logo-80.rgba");
         let to = self.scale.rect(Rect::new(x, y, size, size));
         if to.w <= 0 {
             return;
         }
         if self.logo.as_ref().is_none_or(|(side, _)| *side != to.w) {
-            self.logo = oceans_image::decode(PICTURE)
-                .ok()
-                .map(|(_, image)| (to.w, oceans_image::scale(&image, to.w as u32, to.w as u32)));
+            let image = oceans_image::Image {
+                width: SIDE,
+                height: SIDE,
+                pixels: PICTURE
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|p| u32::from_be_bytes([p[3], p[0], p[1], p[2]]))
+                    .collect(),
+            };
+            let side = to.w as u32;
+            self.logo = Some((to.w, oceans_image::scale(&image, side, side)));
         }
         let Some((side, pixels)) = &self.logo else {
             return;

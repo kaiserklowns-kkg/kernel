@@ -86,8 +86,12 @@ Everything is laid out in **logical pixels**, as before, and drawn at a
   the scale makes it.
 - **The Terminal.** It takes the bitmap font nearest the scale (16, 20,
   24 or 32).
-- **The Oceans logo.** It is made from its 512-pixel picture at the size
-  needed, once per size, and the 40-pixel copy goes.
+- **The Oceans logo.** It is made at the size needed, once per size, from
+  an 80-pixel copy kept in the program (as large as it is drawn at 200 %,
+  smoothly enlarged beyond). It replaces the 40-pixel copy.
+  - **Why not the 512-pixel picture.** Decoding it at start kept about
+    2 MiB in the desktop's heap. On CI's 256 MiB machine that left a Go app
+    started late in the smoke test without memory.
 
 ### Which scale
 
