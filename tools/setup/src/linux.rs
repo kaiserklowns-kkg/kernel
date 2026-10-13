@@ -270,26 +270,20 @@ fn random(bytes: &mut [u8]) -> Result<(), String> {
 /// Downloads a file of the latest release (curl, else wget).
 fn download(name: &str) -> Result<Vec<u8>, String> {
     let url = format!("{}{name}", release::RELEASES);
-    let path = std::env::temp_dir().join(format!("oceans-setup-{}.part", std::process::id()));
-    let fetched = Command::new("curl")
-        .args(["-fsSL", "-o"])
-        .arg(&path)
-        .arg(&url)
-        .status()
-        .is_ok_and(|s| s.success())
-        || Command::new("wget")
-            .args(["-q", "-O"])
-            .arg(&path)
+    // Straight into memory: no file (as root, a file at a known path in a
+    // shared temporary directory could be another user's symlink).
+    let fetch = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
             .arg(&url)
-            .status()
-            .is_ok_and(|s| s.success());
-    if !fetched {
-        let _ = std::fs::remove_file(&path);
-        return Err(format!("{url} could not be downloaded (with curl or wget)"));
-    }
-    let bytes = std::fs::read(&path).map_err(|e| format!("{url}: {e}"))?;
-    let _ = std::fs::remove_file(&path);
-    Ok(bytes)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| out.stdout)
+    };
+    fetch("curl", &["-fsSL"])
+        .or_else(|| fetch("wget", &["-q", "-O", "-"]))
+        .ok_or_else(|| format!("{url} could not be downloaded (with curl or wget)"))
 }
 
 fn read_variable(name: &str) -> Option<Vec<u8>> {
