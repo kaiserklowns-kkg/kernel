@@ -43,6 +43,65 @@ fn events_round_trip_and_unknown_kinds_are_refused() {
 }
 
 #[test]
+fn pixels_follow_the_scale() {
+    use crate::Scale;
+    use proto::Pixels;
+    let at = |percent| Pixels::of(760, 520, Scale::new(percent).unwrap());
+    assert_eq!((at(100).width, at(100).height), (760, 520));
+    assert_eq!((at(125).width, at(125).height), (950, 650));
+    assert_eq!((at(200).width, at(200).height), (1520, 1040));
+    assert_eq!(at(150).bytes(), 1140 * 780 * 4);
+    let pixels = at(175);
+    assert_eq!(Pixels::decode(&pixels.encode()), Some(pixels));
+    let mut bad = pixels.encode();
+    bad[4] = 99;
+    assert_eq!(Pixels::decode(&bad), None);
+    assert_eq!(Pixels::decode(&bad[..5]), None);
+}
+
+#[test]
+fn a_new_scale_rearranges_and_resizes_every_window() {
+    // 1280 × 800 at 100 %, then the same screen as if at 125 %.
+    let mut m = Manager::new(Rect::new(0, 28, 1280, 692), 2 * 1280 * 800);
+    m.set_screen(Rect::new(0, 0, 1280, 800));
+    let fixed = m.open(1, "settings", "", 760, 520).unwrap();
+    let wide = m.open(2, "files", "", 900, 600).unwrap();
+    m.set_resizable(2, wide, 600, 320).unwrap();
+    let tiled = m.open(3, "editor", "", 700, 500).unwrap();
+    m.set_resizable(3, tiled, 480, 300).unwrap();
+    assert!(m.tile(tiled, Some(Tile::Left)));
+    m.take_events(1, 99);
+    m.take_events(2, 99);
+    m.take_events(3, 99);
+
+    let area = Rect::new(0, 28, 1024, 532);
+    m.rearrange(area, Rect::new(0, 0, 1024, 640), 2 * 1024 * 640);
+    for frame in m.frames() {
+        let o = frame.outer();
+        assert!(
+            o.x >= area.x && o.y >= area.y && o.x + o.w <= area.x + area.w,
+            "{frame:?}"
+        );
+    }
+    let get = |id| m.frames().iter().find(|f| f.id == id).unwrap().clone();
+    // The fixed window keeps its size; the resizable one shrinks to fit.
+    assert_eq!((get(fixed).width, get(fixed).height), (760, 520));
+    assert!(get(wide).height + TITLE_HEIGHT + 1 <= area.h);
+    // The tiled one is still the left half.
+    assert_eq!(get(tiled).tile, Some(Tile::Left));
+    assert!(get(tiled).outer().w <= area.w / 2);
+    // Each app hears of it, to take pixels at the new scale.
+    for owner in 1..=3 {
+        assert!(
+            m.take_events(owner, 99)
+                .iter()
+                .any(|e| e.kind == kind::RESIZE),
+            "{owner}"
+        );
+    }
+}
+
+#[test]
 fn open_requests_are_bounded() {
     let request = OpenRequest {
         bits: 1,

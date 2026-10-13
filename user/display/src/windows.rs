@@ -10,8 +10,8 @@ use alloc::vec::Vec;
 use oceans_core_proto::{display_grant, field, op as core_op, parts};
 use oceans_rt::{Handle, Received};
 use oceans_window::proto::{
-    Event, MAX_CLIPBOARD, MAX_EVENTS, NOTIFY_INTERVAL_MS, OpenRequest, Status, notification_text,
-    op, open_name, pixel_bytes,
+    Event, MAX_CLIPBOARD, MAX_EVENTS, NOTIFY_INTERVAL_MS, OpenRequest, Pixels as PixelSize, Screen,
+    Status, notification_text, op, open_name,
 };
 
 use super::{Service, prot, rights, say};
@@ -58,10 +58,12 @@ impl Pixels {
     }
 }
 
-/// Pixel memory for a `width × height` window: mapped here to be read,
+/// Pixel memory of `size` (the screen's pixels, ADR-0136): mapped here to
+/// be read,
 /// and an end for the app to draw through. `fill` paints it first.
-fn share_pixels(width: u16, height: u16, fill: Option<u32>) -> Option<(Pixels, Handle)> {
-    let size = pixel_bytes(width, height);
+fn share_pixels(size: &PixelSize, fill: Option<u32>) -> Option<(Pixels, Handle)> {
+    let (width, height) = (size.width, size.height);
+    let size = size.bytes();
     let memory = oceans_rt::memory_create(size as u64).ok()?;
     if let Some(colour) = fill
         && let Ok(address) = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
@@ -267,6 +269,18 @@ impl Service {
                     close_all(handles);
                     self.open_file(got.badge, data)
                 }
+                op::SCREEN => {
+                    close_all(handles);
+                    let (w, h) = self.screen_pixels;
+                    let screen = Screen {
+                        width: w as u16,
+                        height: h as u16,
+                        scale: self.scale,
+                        automatic: crate::Scale::auto(w, h, self.screen_mm),
+                    };
+                    let _ = oceans_rt::ipc_reply_msg(Status::Ok as u64, &screen.encode(), &[]);
+                    return false;
+                }
                 op::OPENERS => {
                     close_all(handles);
                     let Some(name) = open_name(data) else {
@@ -363,11 +377,16 @@ impl Service {
             Ok(id) => id,
             Err(status) => return refuse(status),
         };
-        let Some((pixels, theirs)) = share_pixels(request.width, request.height, None) else {
+        // The screen's pixels at the scale in use (ADR-0136).
+        let size = PixelSize::of(request.width, request.height, self.scale);
+        let Some((pixels, theirs)) = share_pixels(&size, None) else {
             let _ = self.windows.close(badge, id);
             return refuse(Status::NoMemory);
         };
-        if oceans_rt::ipc_reply_msg(Status::Ok as u64, &id.to_le_bytes(), &[theirs]).is_err() {
+        let mut reply = [0u8; 4 + PixelSize::SIZE];
+        reply[..4].copy_from_slice(&id.to_le_bytes());
+        reply[4..].copy_from_slice(&size.encode());
+        if oceans_rt::ipc_reply_msg(Status::Ok as u64, &reply, &[theirs]).is_err() {
             let _ = oceans_rt::close(theirs);
             let _ = self.windows.close(badge, id);
             pixels.release();
@@ -466,13 +485,11 @@ impl Service {
             Ok(size) => size,
             Err(status) => return reply(status),
         };
-        let Some((pixels, theirs)) = share_pixels(width, height, Some(WINDOW_COLOUR)) else {
+        let size = PixelSize::of(width, height, self.scale);
+        let Some((pixels, theirs)) = share_pixels(&size, Some(WINDOW_COLOUR)) else {
             return reply(Status::NoMemory);
         };
-        let mut size = [0u8; 4];
-        size[..2].copy_from_slice(&width.to_le_bytes());
-        size[2..].copy_from_slice(&height.to_le_bytes());
-        if oceans_rt::ipc_reply_msg(Status::Ok as u64, &size, &[theirs]).is_err() {
+        if oceans_rt::ipc_reply_msg(Status::Ok as u64, &size.encode(), &[theirs]).is_err() {
             let _ = oceans_rt::close(theirs);
             pixels.release();
             return false;

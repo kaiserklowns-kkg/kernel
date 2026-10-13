@@ -178,11 +178,23 @@ pub mod op {
     /// The desktop ran a while (ADR-0122): this boot finished, and the
     /// count of unfinished ones starts again.
     pub const BOOT_OK: u64 = 44;
+    /// → `[percent u16]` (ADR-0136): the interface's scale the user chose
+    /// for the screen, one of [`crate::SCALE_CHOICES`], or 0: automatic, as
+    /// the screen's density suggests. The machine's, not an account's: the
+    /// lock screen is drawn at it too.
+    pub const SCALE: u64 = 45;
+    /// data = `[percent u16]` (0 or one of [`crate::SCALE_CHOICES`]), kept
+    /// across reboots.
+    pub const SET_SCALE: u64 = 46;
 }
 
 /// How many accents there are to choose from (ADR-0113;
 /// `oceans_draw::theme::ACCENTS` holds them).
 pub const ACCENT_COUNT: u8 = 6;
+
+/// The scales offered, in percent (ADR-0136; `oceans_window::Scale::CHOICES`
+/// holds the same).
+pub const SCALE_CHOICES: [u16; 7] = [100, 125, 150, 175, 200, 250, 300];
 
 /// The times the screen may lock after (ADR-0112), in minutes; 0 is never
 /// (`oceans_account::LOCK_CHOICES` keeps the same).
@@ -245,7 +257,8 @@ pub mod access {
             | op::USERS
             | op::LAYOUT
             | op::MODE
-            | op::BOOT_OK => QUERY,
+            | op::BOOT_OK
+            | op::SCALE => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -268,7 +281,8 @@ pub mod access {
             | op::ADD_USER
             | op::REMOVE_USER
             | op::SIGN_IN
-            | op::SET_LAYOUT => DECIDE,
+            | op::SET_LAYOUT
+            | op::SET_SCALE => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

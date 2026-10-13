@@ -9,3 +9,6 @@ rust-version.workspace = true
 [dependencies]
 oceans-window.workspace = true
 ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"] }
+# Icons' outlines (ADR-0136), as ab_glyph fills glyphs'.
+ab_glyph_rasterizer = { version = "0.1.10", default-features = false, features = ["libm"] }
+libm = "0.2.16"

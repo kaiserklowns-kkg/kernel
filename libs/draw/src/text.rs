@@ -8,6 +8,8 @@ use alloc::vec::Vec;
 
 use ab_glyph::{Font as _, FontRef, PxScale, ScaleFont as _, point};
 
+use crate::Scale;
+
 static LATIN_REGULAR: &[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
 static LATIN_BOLD: &[u8] = include_bytes!("../fonts/NotoSans-Bold.ttf");
 static THAI_REGULAR: &[u8] = include_bytes!("../fonts/NotoSansThai-Regular.ttf");
@@ -61,6 +63,9 @@ fn thai(c: char) -> bool {
 pub struct Typesetter {
     faces: [FontRef<'static>; 4],
     glyphs: BTreeMap<(Style, char), Glyph>,
+    /// The scale glyphs are rasterized at (ADR-0136): their pixels are the
+    /// screen's, their sizes the styles' at it.
+    scale: Scale,
 }
 
 impl Typesetter {
@@ -74,7 +79,20 @@ impl Typesetter {
                 FontRef::try_from_slice(THAI_BOLD).ok()?,
             ],
             glyphs: BTreeMap::new(),
+            scale: Scale::ONE,
         })
+    }
+
+    pub fn scale(&self) -> Scale {
+        self.scale
+    }
+
+    /// Glyphs from now on at `scale`; the ones kept at another go.
+    pub fn set_scale(&mut self, scale: Scale) {
+        if scale != self.scale {
+            self.scale = scale;
+            self.glyphs.clear();
+        }
     }
 
     fn face(&self, style: Style, c: char) -> &FontRef<'static> {
@@ -101,15 +119,12 @@ impl Typesetter {
         }
         // Noto Sans Thai draws smaller than Noto Sans at the same size:
         // Thai is scaled up to match, on the Latin font's baseline.
-        let px = if thai(c) {
-            style.px() * 1.15
-        } else {
-            style.px()
-        };
+        let size = style.px() * f32::from(self.scale.percent()) / 100.0;
+        let px = if thai(c) { size * 1.15 } else { size };
         let scale = PxScale::from(px);
         let scaled = face.as_scaled(scale);
         let latin = &self.faces[usize::from(style.bold())];
-        let ascent = latin.as_scaled(PxScale::from(style.px())).ascent();
+        let ascent = latin.as_scaled(PxScale::from(size)).ascent();
         // Rounded (no `f32::round` without std).
         let advance = (scaled.h_advance(id) + 0.5) as i32;
         let Some(outline) =
@@ -144,8 +159,10 @@ impl Typesetter {
         }
     }
 
-    /// The width of `text` in `style`.
+    /// The width of `text` in `style`, in logical pixels: what
+    /// [`crate::Surface::text`] at this scale takes.
     pub fn measure(&mut self, text: &str, style: Style) -> i32 {
-        text.chars().map(|c| self.glyph(style, c).advance).sum()
+        let pixels: i32 = text.chars().map(|c| self.glyph(style, c).advance).sum();
+        self.scale.logical_len(pixels)
     }
 }

@@ -32,7 +32,9 @@
 pub mod op {
     /// data = `[bits u64][width u16][height u16][title]`, handles =
     /// `[notification]` (signalled with `bits` when events are queued) →
-    /// data = `[window u32]`, handles = `[pixels]`.
+    /// data = `[window u32]` and a [`super::Pixels`], handles = `[pixels]`.
+    /// The size asked for is in logical pixels (ADR-0136); the pixels are
+    /// the screen's, at the scale the reply says.
     pub const OPEN: u64 = 1;
     /// data = `[window u32]`: the pixels are ready to be shown.
     pub const PRESENT: u64 = 2;
@@ -60,8 +62,9 @@ pub mod op {
     /// [`super::MIN_HEIGHT`] up to its size now).
     pub const RESIZABLE: u64 = 8;
     /// After a [`super::kind::RESIZE`] event: data = `[window u32]` →
-    /// data = `[width u16][height u16]`, handles = `[pixels]`: new pixels
-    /// at the window's size now, which replace the old ones.
+    /// data = a [`super::Pixels`], handles = `[pixels]`: new pixels
+    /// at the window's size now, and the scale now (ADR-0136: it comes
+    /// after the user changes the scale too), which replace the old ones.
     pub const RESIZE: u64 = 9;
     /// data = `[app id length u8][app id][name]`: opens the file `name`
     /// (in Home, as `folder/file.txt`) in the app with that id, or in the
@@ -83,6 +86,10 @@ pub mod op {
     /// title of 1 to [`super::MAX_NOW_PLAYING`] bytes (none when stopped
     /// and empty). Only for a window that asked for the media keys.
     pub const NOW_PLAYING: u64 = 13;
+    /// → a [`super::Screen`] (ADR-0136): the screen's pixels, the scale in
+    /// use and the one the screen's density suggests, for Settings to offer
+    /// the scales that fit.
+    pub const SCREEN: u64 = 14;
 }
 
 /// The most text the clipboard holds, in bytes.
@@ -342,6 +349,99 @@ impl<'a> OpenRequest<'a> {
 /// Bytes of a window's pixel memory.
 pub fn pixel_bytes(width: u16, height: u16) -> usize {
     usize::from(width) * usize::from(height) * 4
+}
+
+/// A window's pixels, as `OPEN` and `RESIZE` hand them over (ADR-0136):
+/// `width × height` of the screen's pixels, for content of the window's
+/// logical size drawn at `scale`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pixels {
+    pub width: u16,
+    pub height: u16,
+    pub scale: crate::Scale,
+}
+
+impl Pixels {
+    pub const SIZE: usize = 6;
+
+    /// The pixels for content of `width × height` logical pixels at
+    /// `scale`.
+    pub fn of(width: u16, height: u16, scale: crate::Scale) -> Self {
+        let device = |v: u16| scale.len(i32::from(v)).clamp(1, i32::from(u16::MAX)) as u16;
+        Self {
+            width: device(width),
+            height: device(height),
+            scale,
+        }
+    }
+
+    pub fn encode(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        out[..2].copy_from_slice(&self.width.to_le_bytes());
+        out[2..4].copy_from_slice(&self.height.to_le_bytes());
+        out[4..].copy_from_slice(&self.scale.percent().to_le_bytes());
+        out
+    }
+
+    /// `None` if short or of a scale not offered.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let word = |i: usize| Some(u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?));
+        Some(Self {
+            width: word(0)?,
+            height: word(2)?,
+            scale: crate::Scale::new(word(4)?)?,
+        })
+    }
+
+    pub fn bytes(&self) -> usize {
+        pixel_bytes(self.width, self.height)
+    }
+}
+
+/// The screen, as `SCREEN` says (ADR-0136).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Screen {
+    /// Its own pixels.
+    pub width: u16,
+    pub height: u16,
+    /// The scale drawn at, and the one automatic chooses for it.
+    pub scale: crate::Scale,
+    pub automatic: crate::Scale,
+}
+
+impl Screen {
+    pub const SIZE: usize = 8;
+
+    pub fn encode(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        for (i, word) in [
+            self.width,
+            self.height,
+            self.scale.percent(),
+            self.automatic.percent(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            out[2 * i..2 * i + 2].copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let word = |i: usize| Some(u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?));
+        Some(Self {
+            width: word(0)?,
+            height: word(2)?,
+            scale: crate::Scale::new(word(4)?)?,
+            automatic: crate::Scale::new(word(6)?)?,
+        })
+    }
+
+    /// The scales it can take (`crate::Scale::choices`).
+    pub fn choices(&self) -> impl Iterator<Item = crate::Scale> {
+        crate::Scale::choices(i32::from(self.width), i32::from(self.height))
+    }
 }
 
 /// A file name `OPEN_FILE` accepts (ADR-0099): a path inside Home, of

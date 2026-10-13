@@ -142,5 +142,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0133](0133-shell-line-editing.md) | The shell's history and Tab completion (`oceans-line`: Up/Down recall lines, Tab completes commands, programs and paths) | Accepted |
 | [0134](0134-larger-files.md) | Files up to 256 MiB (OceansFS's per-file limit raised from 16 MiB; the format unchanged) | Accepted |
 | [0135](0135-mp3-and-radio.md) | MP3 and the radio in Music (`oceans-mp3` on nanomp3-core, `oceans-web` for apps, `ICY` heads; stations kept in `Music/Stations.txt`) | Accepted |
+| [0136](0136-interface-scale.md) | The interface's scale (ABI 23): logical pixels drawn sharp at 100–300 % (`Scale`, `Surface::scaled`, window pixels at the scale), automatic from the panel's EDID size, Settings → Displays and `scale`; status icons drawn from outlines (`Path`, `oceans_draw::icon`) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

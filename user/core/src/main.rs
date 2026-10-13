@@ -85,6 +85,26 @@ const USER_FILE: &str = "user";
 const APPEARANCE_FILE: &str = "appearance";
 /// The keyboard layout in use (ADR-0116): `0` English, `1` Thai.
 const LAYOUT_FILE: &str = "layout";
+/// The interface's scale (ADR-0136), in `/system`: the percent, or `0`
+/// for automatic. The machine's, for every account.
+const SCALE_FILE: &str = "scale";
+
+/// A scale `SET_SCALE` takes: automatic (0) or one offered.
+fn valid_scale(percent: u16) -> bool {
+    percent == 0 || oceans_core_proto::SCALE_CHOICES.contains(&percent)
+}
+
+/// A scale as the log says it.
+struct ScaleName(u16);
+
+impl core::fmt::Display for ScaleName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            0 => f.write_str("automatic"),
+            percent => write!(f, "{percent}%"),
+        }
+    }
+}
 /// Boots that started and did not finish (ADR-0122): Core counts each, the
 /// desktop clears it once it ran a while.
 const BOOTS_FILE: &str = "boots";
@@ -767,6 +787,22 @@ impl Core {
         );
         self.pinned_reply(&pinned, reply);
         Ok(())
+    }
+
+    /// The scale chosen (ADR-0136), from `/system/scale`: 0, automatic,
+    /// until one is.
+    fn scale(&self) -> u16 {
+        read_path(&self.system_dir, SCALE_FILE)
+            .ok()
+            .and_then(|bytes| {
+                core::str::from_utf8(&bytes)
+                    .ok()?
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+            })
+            .filter(|&percent| valid_scale(percent))
+            .unwrap_or(0)
     }
 
     /// The appearance and accent the user chose (ADR-0113), from
@@ -1588,6 +1624,22 @@ impl Core {
                         self.boot_finished();
                         Ok(())
                     }
+                    // The interface's scale (ADR-0136), the machine's.
+                    op::SCALE => {
+                        reply.extend_from_slice(&self.scale().to_le_bytes());
+                        Ok(())
+                    }
+                    op::SET_SCALE => match data {
+                        &[low, high] if valid_scale(u16::from_le_bytes([low, high])) => {
+                            let percent = u16::from_le_bytes([low, high]);
+                            let text = alloc::format!("{percent}\n");
+                            write_file(&self.system_dir, SCALE_FILE, text.as_bytes())
+                                .map_err(io)?;
+                            say(self.log, format_args!("core: scale {}", ScaleName(percent)));
+                            Ok(())
+                        }
+                        _ => Err(Status::BadRequest.into()),
+                    },
                     // The network, read only, for the desktop (ADR-0118).
                     op::NET_READER => {
                         let net = self.net.ok_or(Status::NotFound)?;

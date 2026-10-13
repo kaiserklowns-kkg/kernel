@@ -5,7 +5,8 @@
 
 #![no_std]
 
-pub use oceans_window::proto::{self, Event, Status, kind};
+pub use oceans_window::Scale;
+pub use oceans_window::proto::{self, Event, Pixels, Screen, Status, kind};
 
 use oceans_rt::{Error, Handle, prot, rights};
 use proto::{MAX_EVENTS, OpenRequest, op};
@@ -18,18 +19,36 @@ pub enum WindowError {
     Refused(Status),
 }
 
+/// Maps the pixel memory `memory` (closed here) if it holds `pixels`.
+fn map_pixels(memory: Handle, pixels: &Pixels) -> Result<*mut u32, WindowError> {
+    let size = oceans_rt::memory_size(memory).unwrap_or(0) as usize;
+    let mapped = if size >= pixels.bytes() {
+        oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
+    } else {
+        Err(Error::InvalidArgument)
+    };
+    let _ = oceans_rt::close(memory);
+    Ok(mapped.map_err(WindowError::Ipc)?.cast())
+}
+
 /// A window of this app's, mapped for drawing.
 pub struct Window {
     windows: Handle,
     pub id: u32,
+    /// The pixels' size: the screen's pixels (ADR-0136), the window's
+    /// logical size at `scale`.
     pub width: usize,
     pub height: usize,
+    /// The interface's scale the pixels are for: draw at it
+    /// (`oceans_draw::Surface::scaled`).
+    pub scale: Scale,
     pixels: *mut u32,
 }
 
 impl Window {
-    /// Opens a window of `width × height` pixels through `windows` (the
-    /// `use windows` end); events for it signal `bits` on `notification`.
+    /// Opens a window of `width × height` logical pixels through `windows`
+    /// (the `use windows` end); events for it signal `bits` on
+    /// `notification`. Its pixels are the screen's, at the scale in use.
     pub fn open(
         windows: Handle,
         notification: Handle,
@@ -48,7 +67,7 @@ impl Window {
         .ok_or(WindowError::Refused(Status::BadRequest))?;
         let shared = oceans_rt::duplicate(notification, rights::SIGNAL | rights::TRANSFER)
             .map_err(WindowError::Ipc)?;
-        let mut reply = [0u8; 8];
+        let mut reply = [0u8; 4 + Pixels::SIZE];
         let mut handles = [Handle(0); 1];
         let got = oceans_rt::ipc_call_msg(
             windows,
@@ -60,7 +79,8 @@ impl Window {
         )
         .map_err(WindowError::Ipc)?;
         let status = Status::from_label(got.label);
-        if status != Status::Ok || got.handles_len != 1 || got.data_len < 4 {
+        let pixels = Pixels::decode(&reply[4..got.data_len.max(4)]);
+        let (Status::Ok, 1, Some(pixels)) = (status, got.handles_len, pixels) else {
             for &handle in &handles[..got.handles_len] {
                 let _ = oceans_rt::close(handle);
             }
@@ -69,16 +89,14 @@ impl Window {
             } else {
                 status
             }));
-        }
-        let memory = handles[0];
-        let mapped = oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE);
-        let _ = oceans_rt::close(memory);
+        };
         Ok(Self {
             windows,
             id: u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]),
-            width: usize::from(width),
-            height: usize::from(height),
-            pixels: mapped.map_err(WindowError::Ipc)?.cast(),
+            width: usize::from(pixels.width),
+            height: usize::from(pixels.height),
+            scale: pixels.scale,
+            pixels: map_pixels(handles[0], &pixels)?,
         })
     }
 
@@ -106,11 +124,11 @@ impl Window {
         }
     }
 
-    /// After a [`kind::RESIZE`] event: pixels at the window's new size, in
-    /// place of the old ones (`width` and `height` follow). Draw and
-    /// present them.
+    /// After a [`kind::RESIZE`] event: pixels at the window's new size and
+    /// the scale now (ADR-0136), in place of the old ones (`width`,
+    /// `height` and `scale` follow). Draw and present them.
     pub fn resize(&mut self) -> Result<(), WindowError> {
-        let mut reply = [0u8; 4];
+        let mut reply = [0u8; Pixels::SIZE];
         let mut handles = [Handle(0); 1];
         let got = oceans_rt::ipc_call_msg(
             self.windows,
@@ -122,7 +140,8 @@ impl Window {
         )
         .map_err(WindowError::Ipc)?;
         let status = Status::from_label(got.label);
-        if status != Status::Ok || got.handles_len != 1 || got.data_len < 4 {
+        let pixels = Pixels::decode(&reply[..got.data_len]);
+        let (Status::Ok, 1, Some(pixels)) = (status, got.handles_len, pixels) else {
             for &handle in &handles[..got.handles_len] {
                 let _ = oceans_rt::close(handle);
             }
@@ -131,22 +150,13 @@ impl Window {
             } else {
                 status
             }));
-        }
-        let width = u16::from_le_bytes([reply[0], reply[1]]);
-        let height = u16::from_le_bytes([reply[2], reply[3]]);
-        let memory = handles[0];
-        let size = oceans_rt::memory_size(memory).unwrap_or(0) as usize;
-        let mapped = if size >= proto::pixel_bytes(width, height) {
-            oceans_rt::memory_map(memory, 0, prot::READ | prot::WRITE)
-        } else {
-            Err(oceans_rt::Error::InvalidArgument)
         };
-        let _ = oceans_rt::close(memory);
-        let address = mapped.map_err(WindowError::Ipc)?;
+        let address = map_pixels(handles[0], &pixels)?;
         let _ = oceans_rt::memory_unmap(self.pixels.cast());
-        self.pixels = address.cast();
-        self.width = usize::from(width);
-        self.height = usize::from(height);
+        self.pixels = address;
+        self.width = usize::from(pixels.width);
+        self.height = usize::from(pixels.height);
+        self.scale = pixels.scale;
         Ok(())
     }
 
@@ -372,6 +382,19 @@ pub fn now_playing(windows: Handle, id: u32, state: u8, title: &str) -> Result<(
     .map_err(WindowError::Ipc)?;
     match Status::from_label(got.label) {
         Status::Ok => Ok(()),
+        status => Err(WindowError::Refused(status)),
+    }
+}
+
+/// The screen (ADR-0136): its pixels, the scale in use and the one
+/// automatic chooses. For Settings.
+pub fn screen(windows: Handle) -> Result<Screen, WindowError> {
+    let mut reply = [0u8; Screen::SIZE];
+    let got = oceans_rt::ipc_call_msg(windows, op::SCREEN, &[], &[], &mut reply, &mut [])
+        .map_err(WindowError::Ipc)?;
+    match Status::from_label(got.label) {
+        Status::Ok => Screen::decode(&reply[..got.data_len.min(reply.len())])
+            .ok_or(WindowError::Refused(Status::BadRequest)),
         status => Err(WindowError::Refused(status)),
     }
 }

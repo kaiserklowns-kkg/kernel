@@ -5,6 +5,8 @@
 //! - **Network:** the addresses, the router, the DNS server, the hardware
 //!   address (ADR-0096).
 //! - **Sound:** the output and the input (ADR-0096).
+//! - **Displays** (ADR-0136): the screen's resolution, and the interface's
+//!   scale: automatic (as the screen's density suggests) or one that fits.
 //! - **Apps:** the installed apps; for the one chosen, what it is, each
 //!   permission and its decision (allow, deny, ask again), and removing
 //!   it. Decisions are made through Core and audited as made in Settings.
@@ -36,7 +38,9 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 520;
-const SECTIONS: [&str; 6] = ["General", "Network", "Sound", "Apps", "Users", "Account"];
+const SECTIONS: [&str; 7] = [
+    "General", "Network", "Sound", "Displays", "Apps", "Users", "Account",
+];
 /// The Account section's fields (ADR-0111).
 const NAME_FIELD: u32 = 10;
 const CURRENT_FIELD: u32 = 11;
@@ -104,6 +108,8 @@ struct Settings {
     users: Users,
     /// The appearance and accent (ADR-0113), as Core keeps them.
     appearance: (u8, u8),
+    /// The scale chosen (ADR-0136), as Core keeps it: 0 automatic.
+    scale: u16,
 }
 
 impl Settings {
@@ -160,6 +166,11 @@ impl Settings {
             && got.len == 2
         {
             self.appearance = (reply[0], reply[1]);
+        }
+        if let Ok(got) = core.call(op::SCALE, &[], &[], &mut reply)
+            && got.len == 2
+        {
+            self.scale = u16::from_le_bytes([reply[0], reply[1]]);
         }
         self.chosen = self.chosen.filter(|&i| i < self.apps.len());
         self.detail = self
@@ -255,6 +266,25 @@ impl Settings {
             Ok(_) => {
                 self.appearance = (dark, accent);
                 oceans_ui::theme::set(oceans_ui::theme::Appearance::from_byte(dark), accent);
+            }
+            Err((error, _)) => {
+                self.message = alloc::format!("Not saved: {}", error.message());
+            }
+        }
+    }
+
+    /// `SET_SCALE` (ADR-0136): Core keeps it; the desktop takes it up
+    /// within a moment, and every window, this one too, is drawn again at
+    /// it.
+    fn set_scale(&mut self, percent: u16) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 8];
+        match core.call(op::SET_SCALE, &percent.to_le_bytes(), &[], &mut reply) {
+            Ok(_) => {
+                self.scale = percent;
+                self.message.clear();
             }
             Err((error, _)) => {
                 self.message = alloc::format!("Not saved: {}", error.message());
@@ -463,6 +493,77 @@ fn general(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     ui.y = y + 46;
     if let Some((dark, accent)) = chosen {
         settings.set_appearance(dark, accent);
+    }
+}
+
+/// The screen (ADR-0136): its resolution, and the interface's scale, as
+/// the desktop draws it. Automatic follows the screen's density; the
+/// others are offered only where the desktop still fits.
+fn displays(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
+    ui.heading("Displays");
+    ui.space(6);
+    let Some(screen) = ui.screen() else {
+        ui.muted("The screen's settings are not available to Settings.");
+        return;
+    };
+    let (w, h) = (i32::from(screen.width), i32::from(screen.height));
+    let mut line = String::new();
+    let _ = write!(line, "{w} × {h}");
+    ui.row("Resolution", &line);
+    line.clear();
+    let scale = screen.scale;
+    let _ = write!(
+        line,
+        "{}% ({}), looks like {} × {}",
+        scale.percent(),
+        if settings.scale == 0 {
+            "automatic"
+        } else {
+            "chosen"
+        },
+        scale.logical_fit(w),
+        scale.logical_fit(h)
+    );
+    ui.row("Scale", &line);
+    line.clear();
+    if settings.core.is_none() {
+        return;
+    }
+    ui.space(10);
+    ui.heading("Interface size");
+    ui.muted("Larger makes text and controls bigger; smaller fits more on the screen.");
+    let x = ui.area.x;
+    let mut chosen = None;
+    let _ = write!(line, "Automatic ({}%)", screen.automatic.percent());
+    let y = ui.y;
+    if ui.button_in(Rect::new(x, y, 168, 30), &line, settings.scale == 0) {
+        chosen = Some(0);
+    }
+    // The choices, as many to a row as fit.
+    let (step, width) = (80, 72);
+    let per_row = (ui.area.w / step).max(1);
+    let mut row_y = y + 40;
+    for (i, choice) in screen.choices().enumerate() {
+        let i = i as i32;
+        if i > 0 && i % per_row == 0 {
+            row_y += 38;
+        }
+        line.clear();
+        let _ = write!(line, "{}%", choice.percent());
+        let r = Rect::new(x + (i % per_row) * step, row_y, width, 30);
+        if ui.button_in(r, &line, settings.scale == choice.percent()) {
+            chosen = Some(choice.percent());
+        }
+    }
+    ui.y = row_y + 42;
+    if !settings.message.is_empty() {
+        let message = settings.message.clone();
+        ui.muted(&message);
+    }
+    if let Some(percent) = chosen
+        && percent != settings.scale
+    {
+        settings.set_scale(percent);
     }
 }
 
@@ -812,8 +913,9 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         0 => general(ui, settings),
         1 => network(ui, settings),
         2 => sound(ui, settings),
-        3 => apps(ui, settings),
-        4 => users(ui, settings),
+        3 => displays(ui, settings),
+        4 => apps(ui, settings),
+        5 => users(ui, settings),
         _ => account(ui, settings),
     }
 }
@@ -836,6 +938,7 @@ fn main(start: Start) -> i64 {
         account: Account::default(),
         users: Users::default(),
         appearance: (0, 0),
+        scale: 0,
     };
     oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut settings, frame)
 }

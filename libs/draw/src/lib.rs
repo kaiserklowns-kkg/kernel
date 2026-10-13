@@ -2,9 +2,15 @@
 //! draw with, on any buffer of `0x00RRGGBB` pixels. Host-tested.
 //!
 //! - [`Surface`]: a pixel buffer borrowed for drawing: fills, rounded
-//!   rectangles, translucent tints, anti-aliased circles, soft shadows.
+//!   rectangles, translucent tints, anti-aliased circles, soft shadows,
+//!   and filled outlines ([`Path`]: the system's icons, [`icon`]).
 //! - [`Typesetter`]: interface text (ADR-0077), Noto Sans with Noto Sans
-//!   Thai, rasterized with `ab_glyph` once per character and style.
+//!   Thai, rasterized with `ab_glyph` once per character, style and scale.
+//!
+//! **Scale** (ADR-0136): a surface is given in logical pixels, the units
+//! everything is laid out in, and draws them at its [`Scale`]: shapes,
+//! curves and text are drawn at the buffer's own resolution, so a 125 %
+//! interface is larger and still sharp. At 100 % nothing changes.
 //!
 //! The display service draws the desktop with it, and apps draw their
 //! windows with it (through `oceans-ui`), so both look the same.
@@ -13,10 +19,13 @@
 
 extern crate alloc;
 
+pub mod icon;
+mod path;
 mod text;
 pub mod theme;
 
-pub use oceans_window::Rect;
+pub use oceans_window::{Rect, Scale};
+pub use path::Path;
 pub use text::{Glyph, Style, Typesetter};
 
 /// A colour, 0xRRGGBB.
@@ -64,29 +73,71 @@ fn corner_inset(dy: i32, height: i32, radius: i32) -> i32 {
     }
 }
 
-/// A pixel buffer borrowed for drawing: `width × height` pixels, row by
-/// row, `0x00RRGGBB`. Everything is clipped to it.
+/// `r` grown by `by` pixels on every side (shrunk if negative).
+fn grow(r: Rect, by: i32) -> Rect {
+    Rect::new(r.x - by, r.y - by, r.w + 2 * by, r.h + 2 * by)
+}
+
+/// A pixel buffer borrowed for drawing: `width × height` pixels at its
+/// scale, row by row, `0x00RRGGBB`. Everything is clipped to it.
 pub struct Surface<'a> {
+    /// Its size in logical pixels (ADR-0136), what is laid out on it.
     pub width: i32,
     pub height: i32,
+    /// Its size in its own pixels.
+    device_width: i32,
+    device_height: i32,
+    scale: Scale,
     pixels: &'a mut [u32],
 }
 
 impl<'a> Surface<'a> {
-    /// `None` if `pixels` is not `width × height` pixels.
+    /// `None` if `pixels` is not `width × height` pixels. At 100 %.
     pub fn new(pixels: &'a mut [u32], width: usize, height: usize) -> Option<Self> {
+        Self::scaled(pixels, width, height, Scale::ONE)
+    }
+
+    /// `width × height` device pixels drawn at `scale`: its logical size
+    /// is theirs at that scale.
+    pub fn scaled(
+        pixels: &'a mut [u32],
+        width: usize,
+        height: usize,
+        scale: Scale,
+    ) -> Option<Self> {
+        let (w, h) = (i32::try_from(width).ok()?, i32::try_from(height).ok()?);
         (pixels.len() == width * height).then_some(Self {
-            width: width as i32,
-            height: height as i32,
+            width: scale.logical_len(w),
+            height: scale.logical_len(h),
+            device_width: w,
+            device_height: h,
+            scale,
             pixels,
         })
     }
 
-    pub fn pixel(&self, x: i32, y: i32) -> Option<Rgb> {
-        (x >= 0 && y >= 0 && x < self.width && y < self.height)
-            .then(|| Rgb(self.pixels[(y * self.width + x) as usize]))
+    pub fn scale(&self) -> Scale {
+        self.scale
     }
 
+    /// Its size in its own pixels.
+    pub fn device_size(&self) -> (i32, i32) {
+        (self.device_width, self.device_height)
+    }
+
+    /// Where logical `r` lies in the buffer's pixels: for drawing pixels
+    /// of one's own (a photograph) at the buffer's resolution.
+    pub fn device(&self, r: Rect) -> Rect {
+        self.scale.rect(r)
+    }
+
+    /// The pixel at (`x`, `y`) of the buffer (device pixels).
+    pub fn pixel(&self, x: i32, y: i32) -> Option<Rgb> {
+        (x >= 0 && y >= 0 && x < self.device_width && y < self.device_height)
+            .then(|| Rgb(self.pixels[(y * self.device_width + x) as usize]))
+    }
+
+    /// The buffer's pixels, `device_size` of them.
     pub fn pixels(&mut self) -> &mut [u32] {
         self.pixels
     }
@@ -94,24 +145,28 @@ impl<'a> Surface<'a> {
     fn clip(&self, r: Rect) -> Option<(i32, i32, i32, i32)> {
         let x0 = r.x.max(0);
         let y0 = r.y.max(0);
-        let x1 = (r.x + r.w).min(self.width);
-        let y1 = (r.y + r.h).min(self.height);
+        let x1 = (r.x + r.w).min(self.device_width);
+        let y1 = (r.y + r.h).min(self.device_height);
         (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
     }
 
     fn blend(&mut self, x: i32, y: i32, colour: Rgb, alpha: u32) {
-        if x >= 0 && y >= 0 && x < self.width && y < self.height {
-            let at = (y * self.width + x) as usize;
+        if x >= 0 && y >= 0 && x < self.device_width && y < self.device_height {
+            let at = (y * self.device_width + x) as usize;
             self.pixels[at] = colour.over(Rgb(self.pixels[at]), alpha).0;
         }
     }
 
     pub fn fill(&mut self, r: Rect, colour: Rgb) {
+        self.fill_px(self.scale.rect(r), colour);
+    }
+
+    fn fill_px(&mut self, r: Rect, colour: Rgb) {
         let Some((x0, y0, x1, y1)) = self.clip(r) else {
             return;
         };
         for y in y0..y1 {
-            let row = (y * self.width) as usize;
+            let row = (y * self.device_width) as usize;
             self.pixels[row + x0 as usize..row + x1 as usize].fill(colour.0);
         }
     }
@@ -120,11 +175,15 @@ impl<'a> Surface<'a> {
     /// pixels outside the circle are left as they are, and the edge pixel
     /// of each corner row is blended for a smoother curve.
     pub fn round_fill(&mut self, r: Rect, radius: i32, colour: Rgb) {
+        self.round_fill_px(self.scale.rect(r), self.scale.len(radius), colour);
+    }
+
+    fn round_fill_px(&mut self, r: Rect, radius: i32, colour: Rgb) {
         let radius = radius.min(r.w / 2).min(r.h / 2).max(0);
         for dy in 0..r.h {
             let inset = corner_inset(dy, r.h, radius);
             let y = r.y + dy;
-            self.fill(Rect::new(r.x + inset, y, r.w - 2 * inset, 1), colour);
+            self.fill_px(Rect::new(r.x + inset, y, r.w - 2 * inset, 1), colour);
             if inset > 0 {
                 self.blend(r.x + inset - 1, y, colour, 110);
                 self.blend(r.x + r.w - inset, y, colour, 110);
@@ -135,6 +194,10 @@ impl<'a> Surface<'a> {
     /// `colour` laid over `r` with `alpha` (0..=255), with rounded corners
     /// of `radius`: a translucent surface.
     pub fn tint(&mut self, r: Rect, radius: i32, colour: Rgb, alpha: u32) {
+        self.tint_px(self.scale.rect(r), self.scale.len(radius), colour, alpha);
+    }
+
+    fn tint_px(&mut self, r: Rect, radius: i32, colour: Rgb, alpha: u32) {
         let radius = radius.min(r.w / 2).min(r.h / 2).max(0);
         for dy in 0..r.h {
             let inset = corner_inset(dy, r.h, radius);
@@ -142,15 +205,23 @@ impl<'a> Surface<'a> {
             let Some((x0, y0, x1, _)) = self.clip(row) else {
                 continue;
             };
-            let at = (y0 * self.width) as usize;
+            let at = (y0 * self.device_width) as usize;
             for pixel in &mut self.pixels[at + x0 as usize..at + x1 as usize] {
                 *pixel = colour.over(Rgb(*pixel), alpha).0;
             }
         }
     }
 
-    /// A one-pixel outline with rounded corners.
+    /// A one-pixel outline with rounded corners (as thick as one logical
+    /// pixel is).
     pub fn outline(&mut self, r: Rect, radius: i32, colour: Rgb, alpha: u32) {
+        let (r, radius) = (self.scale.rect(r), self.scale.len(radius));
+        for i in 0..self.scale.len(1) {
+            self.outline_px(grow(r, -i), (radius - i).max(0), colour, alpha);
+        }
+    }
+
+    fn outline_px(&mut self, r: Rect, radius: i32, colour: Rgb, alpha: u32) {
         let radius = radius.min(r.w / 2).min(r.h / 2).max(0);
         for dy in 0..r.h {
             let inset = corner_inset(dy, r.h, radius);
@@ -166,24 +237,32 @@ impl<'a> Surface<'a> {
         }
     }
 
-    /// A filled circle of radius `r` around (`cx`, `cy`), its edge
-    /// anti-aliased (four samples a pixel).
+    /// A filled circle of radius `r` around the middle of pixel (`cx`,
+    /// `cy`), its edge anti-aliased (sixteen samples a pixel).
     pub fn circle(&mut self, cx: i32, cy: i32, r: i32, colour: Rgb) {
-        let r4 = r * 4;
-        for y in cy - r - 1..=cy + r + 1 {
-            for x in cx - r - 1..=cx + r + 1 {
+        let s = self.scale;
+        // In eighths of a device pixel: the middle of the logical pixel,
+        // and the radius at the scale.
+        let cx8 = (s.device(cx) + s.device(cx + 1)) * 4;
+        let cy8 = (s.device(cy) + s.device(cy + 1)) * 4;
+        let r8 = (i64::from(r) * i64::from(s.percent()) * 8 / 100) as i32;
+        let reach = r8 / 8 + 2;
+        let (px, py) = (cx8 / 8, cy8 / 8);
+        let r2 = i64::from(r8) * i64::from(r8);
+        for y in py - reach..=py + reach {
+            for x in px - reach..=px + reach {
                 let mut inside = 0;
-                for sy in 0..2 {
-                    for sx in 0..2 {
-                        let dx = (x - cx) * 4 + sx * 2 - 1;
-                        let dy = (y - cy) * 4 + sy * 2 - 1;
-                        if dx * dx + dy * dy <= r4 * r4 {
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let dx = i64::from(x * 8 + sx * 2 + 1 - cx8);
+                        let dy = i64::from(y * 8 + sy * 2 + 1 - cy8);
+                        if dx * dx + dy * dy <= r2 {
                             inside += 1;
                         }
                     }
                 }
                 if inside > 0 {
-                    self.blend(x, y, colour, inside * 255 / 4);
+                    self.blend(x, y, colour, inside * 255 / 16);
                 }
             }
         }
@@ -192,16 +271,18 @@ impl<'a> Surface<'a> {
     /// A soft shadow under `r`: darker near it, fading over `spread`
     /// pixels, a little lower than the surface.
     pub fn shadow(&mut self, r: Rect, spread: i32, strength: u32) {
-        let spread = spread.max(1);
+        let r = self.scale.rect(r);
+        let spread = self.scale.len(spread).max(1);
+        let corner = self.scale.len(6);
         for step in (1..=spread).rev() {
-            self.tint(
+            self.tint_px(
                 Rect::new(
                     r.x - step,
                     r.y - step + spread / 2,
                     r.w + 2 * step,
                     r.h + 2 * step,
                 ),
-                step + 6,
+                step + corner,
                 Rgb(0),
                 strength / spread as u32,
             );
@@ -226,8 +307,11 @@ impl<'a> Surface<'a> {
         colour: Rgb,
         clip: Rect,
     ) -> i32 {
-        let (x, y) = at;
-        let mut pen = x;
+        typesetter.set_scale(self.scale);
+        let clip = self.scale.rect(clip);
+        let start = self.scale.device(at.0);
+        let y = self.scale.device(at.1);
+        let mut pen = start;
         for c in text.chars() {
             if pen >= clip.x + clip.w {
                 break;
@@ -244,7 +328,7 @@ impl<'a> Surface<'a> {
             }
             pen += glyph.advance;
         }
-        pen
+        at.0 + self.scale.logical_len(pen - start)
     }
 }
 

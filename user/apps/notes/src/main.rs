@@ -81,6 +81,10 @@ fn main(start: Start) -> i64 {
                 match event.kind {
                     kind::KEY => notes.key(event.key),
                     kind::FOCUS => notes.focused = event.pressed,
+                    // New pixels: a new scale (ADR-0136).
+                    kind::RESIZE => {
+                        let _ = notes.window.resize();
+                    }
                     kind::CLOSE => {
                         let _ = notes.window.close();
                         return 0;
@@ -121,19 +125,38 @@ impl Notes {
         self.len = 0;
     }
 
+    /// Draws the window: its pixels are the screen's, so lengths are
+    /// taken at the window's scale (ADR-0136), and the font at the size
+    /// nearest it.
     fn draw(&mut self) {
         let width = self.window.width;
+        let scale = self.window.scale;
+        let px = |v: usize| scale.len(v as i32) as usize;
+        let size = match px(16) {
+            32.. => RasterHeight::Size32,
+            24..=31 => RasterHeight::Size24,
+            20..=23 => RasterHeight::Size20,
+            _ => RasterHeight::Size16,
+        };
+        let (margin, line_height) = (px(MARGIN), px(LINE_HEIGHT));
         let pixels = self.window.pixels();
         pixels.fill(PAPER);
-        let mut y = MARGIN;
+        let mut y = margin;
         for &(line, len) in &self.lines[..self.kept] {
-            text(pixels, width, MARGIN, y, &line[..len], FAINT);
-            y += LINE_HEIGHT;
+            text(pixels, width, (margin, y), size, &line[..len], FAINT);
+            y += line_height;
         }
-        let end = text(pixels, width, MARGIN, y, &self.line[..self.len], INK);
+        let end = text(
+            pixels,
+            width,
+            (margin, y),
+            size,
+            &self.line[..self.len],
+            INK,
+        );
         if self.focused {
-            for row in y..y + 16 {
-                for x in end..end + 2 {
+            for row in y..y + size.val() {
+                for x in end..end + px(2) {
                     if let Some(pixel) = pixels.get_mut(row * width + x) {
                         *pixel = CARET;
                     }
@@ -144,13 +167,20 @@ impl Notes {
     }
 }
 
-/// Draws ASCII `bytes` at `x`, `y`; returns where the next character goes.
-fn text(pixels: &mut [u32], width: usize, x: usize, y: usize, bytes: &[u8], color: u32) -> usize {
-    let advance = get_raster_width(FontWeight::Regular, RasterHeight::Size16);
+/// Draws ASCII `bytes` at `x`, `y` in the font of `size`; returns where
+/// the next character goes.
+fn text(
+    pixels: &mut [u32],
+    width: usize,
+    (x, y): (usize, usize),
+    size: RasterHeight,
+    bytes: &[u8],
+    color: u32,
+) -> usize {
+    let advance = get_raster_width(FontWeight::Regular, size);
     let mut pen = x;
     for &byte in bytes {
-        if let Some(glyph) = get_raster(char::from(byte), FontWeight::Regular, RasterHeight::Size16)
-        {
+        if let Some(glyph) = get_raster(char::from(byte), FontWeight::Regular, size) {
             for (gy, row) in glyph.raster().iter().enumerate() {
                 for (gx, &alpha) in row.iter().enumerate() {
                     let (px, py) = (pen + gx, y + gy);

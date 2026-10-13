@@ -714,8 +714,9 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"cat /system/wifi/password\r\n",
     b"write /system/wifi/status joined 6f6365616e73 -48 6\r\n",
     b"@wait desktop: Wi-Fi joined oceans",
-    // The panel shows it: the network's bars (from 947,126) in the accent.
-    b"@screen 963 133 2f7cf6 Wi-Fi panel, joined",
+    // The panel shows it: the network's Wi-Fi fan (ADR-0136, 18 pixels
+    // from 947,123), its outer band (at -48 dBm, lit) in the accent.
+    b"@screen 956 126 2f7cf6 Wi-Fi panel, joined",
     b"@monitor mouse_move 34 -118",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
@@ -804,6 +805,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey meta_l",
     b"@screen 1200 400 262629 Launchpad, dark",
     b"@monitor sendkey esc",
+    // The scale (ADR-0136): QEMU's 1280 × 800 screen at 100 dpi is 100 %,
+    // automatic. 150 % is kept by Core but does not fit it, so the desktop
+    // stays at 100 % (every pixel probed here is where it was); then back
+    // to automatic.
+    b"scale 150\r\n",
+    b"@wait core: scale 150%",
+    b"scale auto\r\n",
+    b"@wait core: scale automatic",
     // Several users (ADR-0115): the administrator adds Kim. The user's menu
     // (ADR-0121), from its icon in the top bar (1156,14), has Switch
     // User (its second item, at 1060,125): the lock screen, where Right
@@ -1124,7 +1133,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 22)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 23)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1292,7 +1301,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 22)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 23)"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -1427,6 +1436,11 @@ const SHELL_EXPECT: &[Expect] = &[
     // Dark (ADR-0113): kept by Core, followed by the desktop.
     Expect::Line("appearance: dark, blue"),
     Expect::Contains("core: appearance dark, accent 0"),
+    // The scale (ADR-0136): kept by Core, and back to automatic.
+    Expect::Line("scale: 150%"),
+    Expect::Contains("core: scale 150%"),
+    Expect::Line("scale: automatic"),
+    Expect::Contains("core: scale automatic"),
     // Several users (ADR-0115): added, listed, signed in with their own
     // Home (the apps stopped first), back, and removed.
     Expect::Line("user: added kim (Kim); its Home is /users/kim"),
@@ -1481,6 +1495,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("gohello: System API calls verified"),
     Expect::Contains("ai: ready; 7 tools; no model configured yet"),
     Expect::Contains("framebuffer taken over; desktop ready with "),
+    // The scale (ADR-0136): automatic on QEMU's screen, 100 %.
+    Expect::Contains("display: scale 100% (automatic), 1280x800 pixels"),
     Expect::Contains("app: network for app.oceans.hello will be asked again"),
     Expect::Contains("desktop: permission dialog for app.oceans.hello: network"),
     Expect::Contains("desktop: network allowed for app.oceans.hello in the dialog"),
@@ -1775,6 +1791,7 @@ environment:
   OCEANS_QEMU_EXTRA extra QEMU arguments, e.g. \"-cpu max\"
   OCEANS_NIC    the network card for `run`: virtio (default) or e1000e
   OCEANS_BUN    path to bun, which builds the web experience (ui/)
+  OCEANS_RESOLUTION a screen size Limine sets, e.g. 1920x1080 (to try a scale)
   OCEANS_BRIDGE_PORT the host port `run` forwards to the web experience (8080)
   OCEANS_RELEASE_KEY the release key file for `release` (`oceans keygen`;
                 kept outside the repository)
@@ -2130,6 +2147,11 @@ fn build_image_for(
         ));
         if !line.is_empty() {
             conf.push_str(&format!("    cmdline: {line}\n"));
+        }
+        // A screen size to boot with (ADR-0136), e.g. 1920x1080 to try a
+        // scale on QEMU, whose firmware otherwise keeps 1280 × 800.
+        if let Ok(resolution) = env::var("OCEANS_RESOLUTION") {
+            conf.push_str(&format!("    resolution: {resolution}\n"));
         }
         conf.push_str("    module_path: boot():/boot/initrd\n");
     }

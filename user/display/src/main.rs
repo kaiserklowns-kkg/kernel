@@ -71,7 +71,7 @@ use oceans_package::Permission;
 use oceans_rt::{Buffer, Directory, Handle, Start, prot, rights};
 use oceans_window::{Focus, KeyRoute, Manager, VolumeKey};
 
-use canvas::Canvas;
+use canvas::{Canvas, Scale};
 use desktop::{App, Desktop, Dialog, Hit, Question, Terminal, Toast, WindowView};
 use windows::{Owner, Pixels};
 
@@ -158,6 +158,13 @@ struct Service {
     /// never), as Core keeps it.
     last_input_ms: u64,
     lock_after: u8,
+    /// The interface's scale (ADR-0136): the one drawn at, the user's
+    /// choice as Core keeps it (0: automatic), and the screen's size in
+    /// millimetres and pixels, which the automatic one follows.
+    scale: Scale,
+    scale_chosen: u16,
+    screen_mm: Option<(u16, u16)>,
+    screen_pixels: (i32, i32),
 }
 
 fn main(start: Start) -> i64 {
@@ -220,7 +227,11 @@ fn main(start: Start) -> i64 {
     // SAFETY: `base` maps `size` bytes of the module, read-only, until it
     // is unmapped below, after the last use of the slice.
     let bytes = photo.map(|(base, size)| unsafe { core::slice::from_raw_parts(base, size) });
-    canvas.set_wallpaper(desktop::wallpaper(canvas.width, canvas.height, bytes));
+    canvas.set_wallpaper(desktop::wallpaper(
+        canvas.device_width,
+        canvas.device_height,
+        bytes,
+    ));
     if let Some((base, _)) = photo {
         let _ = oceans_rt::memory_unmap(base);
     }
@@ -262,6 +273,7 @@ fn main(start: Start) -> i64 {
         sysinfo: directory.find("sysinfo", "sysinfo"),
         desktop: Desktop {
             pointer: (canvas.width / 2, canvas.height / 2),
+            pointer_device: (canvas.device_width / 2, canvas.device_height / 2),
             terminal_focused: true,
             can_power: directory.find("power", "power").is_some(),
             // Until Core says otherwise (without Core, no one else).
@@ -285,6 +297,11 @@ fn main(start: Start) -> i64 {
         wifi_refreshed_ms: 0,
         started_ms: oceans_rt::clock_ms(),
         boot_reported: false,
+        scale: Scale::ONE,
+        scale_chosen: 0,
+        screen_mm: (info.mm_width > 0 && info.mm_height > 0)
+            .then_some((info.mm_width, info.mm_height)),
+        screen_pixels: (canvas.device_width, canvas.device_height),
     };
     // Full screen covers all of it (ADR-0107).
     service
@@ -311,6 +328,10 @@ fn main(start: Start) -> i64 {
     }
     service.refresh_user();
     service.refresh_appearance();
+    // The scale (ADR-0136) before the first frame: drawn at it from the
+    // start.
+    service.refresh_scale();
+    service.apply_scale(&mut canvas);
     service.refresh_layout();
     service.refresh_volume();
     service.refresh_network();
@@ -403,6 +424,10 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_apps();
                 dirty |= service.refresh_user();
                 dirty |= service.refresh_appearance();
+                if service.refresh_scale() {
+                    service.apply_scale(&mut canvas);
+                    dirty = true;
+                }
                 dirty |= service.refresh_volume();
                 dirty |= service.refresh_network();
                 dirty |= service.refresh_wifi();
@@ -492,17 +517,32 @@ impl Service {
     fn pointer(&mut self, kind: Kind, time_ms: u64, canvas: &Canvas) -> bool {
         self.last_input_ms = oceans_rt::clock_ms();
         let (w, h) = (canvas.width, canvas.height);
-        let (x, y) = self.desktop.pointer;
-        match kind {
-            Kind::Motion { dx, dy } => {
-                self.desktop.pointer = ((x + dx).clamp(0, w - 1), (y + dy).clamp(0, h - 1));
-            }
+        // The pointer moves over the screen's own pixels (ADR-0136), so a
+        // larger scale does not make it coarser or faster; what it points
+        // at is the logical pixel there.
+        let (dw, dh) = (canvas.device_width, canvas.device_height);
+        let (x, y) = self.desktop.pointer_device;
+        let moved_to = match kind {
+            Kind::Motion { dx, dy } => Some(((x + dx).clamp(0, dw - 1), (y + dy).clamp(0, dh - 1))),
             Kind::Absolute { x, y, x_max, y_max } if x_max > 0 && y_max > 0 => {
-                let scale = |v: u32, max: u32, size: i32| {
+                let at = |v: u32, max: u32, size: i32| {
                     (u64::from(v) * (size as u64 - 1) / u64::from(max)) as i32
                 };
-                self.desktop.pointer = (scale(x, x_max, w), scale(y, y_max, h));
+                Some((at(x, x_max, dw), at(y, y_max, dh)))
             }
+            _ => None,
+        };
+        if let Some((x, y)) = moved_to {
+            let scale = canvas.scale();
+            self.desktop.pointer_device = (x, y);
+            self.desktop.pointer = (
+                scale.logical(x).clamp(0, w - 1),
+                scale.logical(y).clamp(0, h - 1),
+            );
+        }
+        match kind {
+            Kind::Motion { .. } => {}
+            Kind::Absolute { .. } if moved_to.is_some() => {}
             // Locked (ADR-0110): clicks reach nothing but the accounts'
             // pictures, which choose one (ADR-0115).
             Kind::Button {
@@ -1213,6 +1253,62 @@ impl Service {
             ),
         );
         true
+    }
+
+    /// The scale to draw at (ADR-0136): the one the user chose, if this
+    /// screen can take it, else the one its density suggests. `true` if
+    /// it is not the one drawn at now.
+    fn refresh_scale(&mut self) -> bool {
+        if let Some(core) = self.core {
+            let mut reply = [0u8; 2];
+            if let Ok(got) = core.call(op::SCALE, &[], &[], &mut reply)
+                && got.len == 2
+            {
+                self.scale_chosen = u16::from_le_bytes(reply);
+            }
+        }
+        self.wanted_scale() != self.scale
+    }
+
+    fn wanted_scale(&self) -> Scale {
+        let (w, h) = self.screen_pixels;
+        Scale::new(self.scale_chosen)
+            .filter(|s| s.fits(w, h))
+            .unwrap_or_else(|| Scale::auto(w, h, self.screen_mm))
+    }
+
+    /// Draws at the scale wanted from now on: the desktop's logical size
+    /// follows, the windows are put back inside it and every app makes
+    /// its pixels again (`Manager::rearrange`).
+    fn apply_scale(&mut self, canvas: &mut Canvas) {
+        let scale = self.wanted_scale();
+        self.scale = scale;
+        canvas.set_scale(scale);
+        let (w, h) = (canvas.width, canvas.height);
+        self.windows.rearrange(
+            desktop::area(w, h),
+            oceans_window::Rect::new(0, 0, w, h),
+            2 * (w * h) as usize,
+        );
+        let (x, y) = self.desktop.pointer_device;
+        self.desktop.pointer = (scale.logical(x), scale.logical(y));
+        let (dw, dh) = self.screen_pixels;
+        let size = match self.screen_mm {
+            Some((mw, mh)) => alloc::format!("{mw}x{mh} mm"),
+            None => String::from("size unknown"),
+        };
+        say(
+            self.log,
+            format_args!(
+                "display: scale {}% ({}), {dw}x{dh} pixels ({size}) as {w}x{h}",
+                scale.percent(),
+                if self.scale_chosen == 0 {
+                    "automatic"
+                } else {
+                    "chosen"
+                },
+            ),
+        );
     }
 
     /// From Control Center (ADR-0118): Core keeps the appearance for the

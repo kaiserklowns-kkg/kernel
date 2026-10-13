@@ -93,3 +93,68 @@ fn text_is_measured_drawn_and_thai_has_glyphs() {
     );
     assert!(s.pixels().iter().all(|&p| p == 0));
 }
+
+#[test]
+fn scaled_surfaces_draw_logical_pixels_at_their_resolution() {
+    let s2 = Scale::new(200).unwrap();
+    let mut pixels = vec![0u32; 40 * 20];
+    let mut s = Surface::scaled(&mut pixels, 40, 20, s2).unwrap();
+    // Laid out in logical pixels: half the buffer's.
+    assert_eq!((s.width, s.height), (20, 10));
+    s.fill(Rect::new(1, 1, 2, 2), WHITE);
+    assert_eq!(s.pixel(1, 1), Some(Rgb(0)));
+    assert_eq!(s.pixel(2, 2), Some(WHITE));
+    assert_eq!(s.pixel(5, 5), Some(WHITE));
+    assert_eq!(s.pixel(6, 6), Some(Rgb(0)));
+    assert_eq!(s.device(Rect::new(1, 1, 2, 2)), Rect::new(2, 2, 4, 4));
+
+    // At 125 %, a window of 761 logical pixels is 951 and back.
+    let s125 = Scale::new(125).unwrap();
+    let mut pixels = vec![0u32; 951];
+    let s = Surface::scaled(&mut pixels, 951, 1, s125).unwrap();
+    assert_eq!(s.width, 761);
+}
+
+#[test]
+fn text_keeps_its_logical_width_at_any_scale() {
+    let mut typesetter = Typesetter::new().unwrap();
+    let at_one = typesetter.measure("Oceans ทะเล", Style::Body);
+    for percent in Scale::CHOICES {
+        typesetter.set_scale(Scale::new(percent).unwrap());
+        let width = typesetter.measure("Oceans ทะเล", Style::Body);
+        assert!(
+            (width - at_one).abs() <= 3,
+            "{percent}: {width} vs {at_one}"
+        );
+    }
+    // The glyphs themselves are larger: drawn at the scale.
+    typesetter.set_scale(Scale::new(200).unwrap());
+    let big = typesetter.glyph(Style::Body, 'O').height;
+    typesetter.set_scale(Scale::ONE);
+    let small = typesetter.glyph(Style::Body, 'O').height;
+    assert!(big >= small * 2 - 1, "{big} {small}");
+
+    // Drawn text ends where it was measured to.
+    let s2 = Scale::new(150).unwrap();
+    let mut pixels = vec![0u32; 300 * 60];
+    let mut s = Surface::scaled(&mut pixels, 300, 60, s2).unwrap();
+    let clip = Rect::new(0, 0, 200, 40);
+    let end = s.text(&mut typesetter, (10, 5), "Oceans", Style::Body, WHITE, clip);
+    assert_eq!(end - 10, typesetter.measure("Oceans", Style::Body));
+    assert_eq!(typesetter.scale(), s2);
+}
+
+#[test]
+fn paths_fill_and_cut_holes() {
+    let mut pixels = vec![0u32; 30 * 30];
+    let mut s = Surface::new(&mut pixels, 30, 30).unwrap();
+    let mut ring = Path::new();
+    ring.circle(15.0, 15.0, 12.0, false)
+        .circle(15.0, 15.0, 6.0, true);
+    s.fill_path(&ring, 0, 0, WHITE);
+    assert_eq!(s.pixel(15, 15), Some(Rgb(0)));
+    assert_eq!(s.pixel(15, 6), Some(WHITE));
+    assert_eq!(s.pixel(0, 0), Some(Rgb(0)));
+    // Off the surface: nothing, and no panic.
+    s.fill_path(&ring, 100, -100, WHITE);
+}

@@ -152,6 +152,10 @@ extern "C" fn kernel_entry() -> ! {
                 red_shift: fb.red_mask_shift(),
                 green_shift: fb.green_mask_shift(),
                 blue_shift: fb.blue_mask_shift(),
+                mm: fb
+                    .edid()
+                    .and_then(oceans_abi::display::edid_size_mm)
+                    .unwrap_or((0, 0)),
             });
         }
 

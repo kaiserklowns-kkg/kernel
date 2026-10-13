@@ -391,7 +391,7 @@ const HW_EXPECT: &[Expect] = &[
     Expect::Contains("nvme: the controller is shut down"),
     Expect::Contains("ahci: the disk is in standby"),
     Expect::Contains("init: core stopped"),
-    Expect::Contains("(ABI 22)"),
+    Expect::Contains("(ABI 23)"),
     Expect::Contains("fs: formatted a blank disk"),
     // The SATA disk (ADR-0069): identified, formatted, written.
     Expect::Contains("ahci: port 0: QEMU HARDDISK (serial oceans-sata, firmware "),

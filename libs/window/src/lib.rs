@@ -19,6 +19,9 @@ extern crate alloc;
 pub mod dock;
 pub mod layout;
 pub mod proto;
+pub mod scale;
+
+pub use scale::Scale;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
@@ -453,6 +456,43 @@ impl Manager {
     /// The whole screen, which full screen covers (ADR-0107).
     pub fn set_screen(&mut self, screen: Rect) {
         self.screen = screen;
+    }
+
+    /// The scale changed (ADR-0136): the screen and the area are other
+    /// logical sizes now, and the windows' pixels must be made again.
+    /// Tiled windows take their part of the new area; the others keep
+    /// their size where it fits (a resizable one shrinks to it) and are
+    /// moved back inside it. Every window is told (`kind::RESIZE`), even
+    /// one of the same size, so its app takes pixels at the new scale.
+    pub fn rearrange(&mut self, area: Rect, screen: Rect, pixel_budget: usize) {
+        self.area = area;
+        self.screen = screen;
+        self.pixel_budget = pixel_budget;
+        self.drag = None;
+        self.resize = None;
+        self.snap = None;
+        for index in 0..self.frames.len() {
+            let id = self.frames[index].id;
+            if let Some(tile) = self.frames[index].tile
+                && let Some((x, y, w, h)) = self.tile_geometry(id, tile)
+            {
+                let frame = &mut self.frames[index];
+                (frame.x, frame.y, frame.width, frame.height) = (x, y, w, h);
+            } else {
+                let (largest_w, largest_h) = self.largest(id);
+                let frame = &mut self.frames[index];
+                if let Some((min_w, min_h)) = frame.min {
+                    frame.width = frame.width.min(largest_w).max(min_w);
+                    frame.height = frame.height.min(largest_h).max(min_h);
+                }
+                let outer = frame.outer();
+                let right = area.x + area.w - outer.w;
+                let bottom = area.y + area.h - outer.h;
+                frame.x = frame.x.min(right).max(area.x);
+                frame.y = frame.y.min(bottom).max(area.y);
+            }
+            self.tell_size(index);
+        }
     }
 
     pub fn focus(&self) -> Focus {

@@ -78,6 +78,9 @@ pub struct Framebuffer {
     pub red_shift: u8,
     pub green_shift: u8,
     pub blue_shift: u8,
+    /// The screen's size in millimetres, from its EDID (ADR-0136); 0 when
+    /// it did not say.
+    pub mm: (u16, u16),
 }
 
 /// Protocol-neutral facts the kernel needs from the bootloader.

@@ -20,11 +20,13 @@
 //! - notifications at the top right, system dialogs in the middle.
 //!
 //! Every position is a function of the screen's size, so the smoke test
-//! finds things where the layout puts them.
+//! finds things where the layout puts them. Positions and sizes are in
+//! logical pixels (ADR-0136): the canvas draws them at the scale.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use oceans_draw::{Surface, icon};
 use oceans_wifi::Security;
 use oceans_wifi::state::{Listed, Ssid};
 use oceans_window::{BUTTON_STEP, CLOSE_SIZE, Frame, TITLE_HEIGHT, dock};
@@ -253,7 +255,11 @@ pub struct Terminal {
 
 #[derive(Default)]
 pub struct Desktop {
+    /// Where the pointer is, in logical pixels: what it points at.
     pub pointer: (i32, i32),
+    /// And in the screen's own pixels (ADR-0136), where its arrow is drawn:
+    /// it moves by them, however large the scale.
+    pub pointer_device: (i32, i32),
     pub apps: Vec<App>,
     pub toast: Option<Toast>,
     pub dialog: Option<Dialog>,
@@ -1353,7 +1359,8 @@ impl Desktop {
             self.draw_dialog(canvas, dialog);
         }
 
-        canvas.cursor(self.pointer.0, self.pointer.1, WHITE, BLACK);
+        let (x, y) = self.pointer_device;
+        canvas.cursor(x, y, WHITE, BLACK);
     }
 
     /// The Terminal: the console's text, the rows that fit, ending at the
@@ -1441,7 +1448,7 @@ impl Desktop {
         // network, the user (ADR-0121), the speaker, the keyboard layout.
         let bell = bell_button(w);
         lit(canvas, bell, self.notices_open);
-        bell_icon(canvas, bell.x + bell.w / 2, bell.y + bell.h / 2, WHITE);
+        glyph(canvas, bell, BAR_ICON, |s, r| icon::bell(s, r, WHITE));
         if self.unread > 0 {
             let count = alloc::format!("{}", self.unread.min(99));
             let cw = canvas.measure(&count, Font::Body);
@@ -1460,21 +1467,18 @@ impl Desktop {
         }
         let cc = status_icon(w, ICON_CONTROL);
         lit(canvas, cc, self.volume_open);
-        control_icon(canvas, cc.x + cc.w / 2, cc.y + cc.h / 2, WHITE);
-        if let Some(network) = &self.network {
+        glyph(canvas, cc, BAR_ICON, |s, r| icon::controls(s, r, WHITE));
+        if self.network.is_some() || self.wifi.is_some() {
             let r = status_icon(w, ICON_NETWORK);
             lit(canvas, r, false);
-            network_icon(canvas, r.x + r.w / 2, r.y + r.h / 2, WHITE);
-            if !network.connected {
-                // Not connected: struck through.
-                for i in 0..14 {
-                    canvas.fill(Rect::new(r.x + 7 + i, r.y + 5 + i, 2, 1), WHITE);
-                }
-            }
+            let link = self.link();
+            glyph(canvas, r, BAR_ICON, |s, r| {
+                link.draw(s, r, WHITE, BAR_FAINT)
+            });
         }
         let user = status_icon(w, ICON_USER);
         lit(canvas, user, self.user_menu_open);
-        user_icon(canvas, user.x + user.w / 2, user.y + user.h / 2, WHITE);
+        glyph(canvas, user, BAR_ICON, |s, r| icon::user(s, r, WHITE));
         if let Some((level, muted)) = self.volume {
             let button = volume_button(w);
             lit(canvas, button, false);
@@ -1901,7 +1905,7 @@ impl Desktop {
             canvas.circle(cx, cy, r.w / 2, fill);
             let ink = if *on { WHITE } else { colour::text() };
             match i {
-                0 => network_icon(canvas, cx, cy, ink),
+                0 => glyph_at(canvas, (cx, cy), 20, |s, r| icon::wifi(s, r, 3, ink, ink)),
                 1 => moon_icon(canvas, cx, cy, ink, fill),
                 2 => lock_icon(canvas, cx, cy, ink, fill),
                 _ => gear_icon(canvas, cx, cy, ink, fill),
@@ -2616,57 +2620,85 @@ fn draw_volume_shown(canvas: &mut Canvas, (level, muted): (u8, bool)) {
     }
 }
 
+/// The side of the top bar's icons (ADR-0136), as other systems draw them
+/// in a bar of its height.
+const BAR_ICON: i32 = 18;
+/// What is off in a top bar icon (a weak signal's bands), over the shade.
+const BAR_FAINT: Rgb = Rgb(0x8e_8e_93);
+/// What is off in an icon on a light panel.
+const PANEL_FAINT: Rgb = Rgb(0xb8_b8_be);
+
+/// An icon of `oceans_draw::icon`, `side` pixels square, centred in `r`.
+fn glyph(canvas: &mut Canvas, r: Rect, side: i32, draw: impl FnOnce(&mut Surface<'_>, Rect)) {
+    let at = Rect::new(r.x + (r.w - side) / 2, r.y + (r.h - side) / 2, side, side);
+    canvas.with_surface(|s| draw(s, at));
+}
+
+/// The same, centred on (`cx`, `cy`).
+fn glyph_at(
+    canvas: &mut Canvas,
+    (cx, cy): (i32, i32),
+    side: i32,
+    draw: impl FnOnce(&mut Surface<'_>, Rect),
+) {
+    glyph(
+        canvas,
+        Rect::new(cx - side / 2, cy - side / 2, side, side),
+        side,
+        draw,
+    );
+}
+
 /// A speaker centred in `r` (ADR-0100): a body and a cone, then up to three
-/// bars for the level, or a cross when muted.
+/// waves for the level, or a cross when muted.
 fn speaker(canvas: &mut Canvas, r: Rect, level: u8, muted: bool, ink: Rgb) {
-    let (cx, cy) = (r.x + r.w / 2 - 6, r.y + r.h / 2);
-    canvas.fill(Rect::new(cx - 5, cy - 3, 4, 7), ink);
-    for i in 0..5 {
-        canvas.fill(Rect::new(cx - 1 + i, cy - 3 - i, 1, 7 + 2 * i), ink);
-    }
-    if muted || level == 0 {
-        for i in 0..7 {
-            canvas.fill(Rect::new(cx + 7 + i, cy - 3 + i, 2, 1), ink);
-            canvas.fill(Rect::new(cx + 13 - i, cy - 3 + i, 2, 1), ink);
+    glyph(canvas, r, BAR_ICON, |s, r| {
+        icon::speaker(s, r, level, muted, ink)
+    });
+}
+
+/// How the machine is connected, as the top bar shows it (ADR-0136).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// Joined to a Wi-Fi network, its signal's bars lit (1 to 3).
+    Wifi(u8),
+    /// Wi-Fi is on and joined to nothing, and no cable is connected.
+    WifiOff,
+    /// Through a cable; struck through when not connected.
+    Ethernet(bool),
+}
+
+impl Link {
+    fn draw(self, s: &mut Surface<'_>, r: Rect, ink: Rgb, faint: Rgb) {
+        match self {
+            Self::Wifi(bars) => icon::wifi(s, r, bars, ink, faint),
+            Self::WifiOff => icon::wifi_off(s, r, ink, faint),
+            Self::Ethernet(connected) => icon::ethernet(s, r, connected, ink),
         }
-        return;
-    }
-    let bars = match level {
-        0..=33 => 1,
-        34..=66 => 2,
-        _ => 3,
-    };
-    for i in 0..bars {
-        let h = 4 + 3 * i;
-        canvas.fill(Rect::new(cx + 7 + 3 * i, cy - h / 2, 2, h), ink);
     }
 }
 
-/// The network (ADR-0118): three nodes joined, about 18 pixels.
-fn network_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
-    canvas.round_fill(Rect::new(cx - 3, cy - 9, 7, 6), 1, ink);
-    canvas.round_fill(Rect::new(cx - 9, cy + 3, 7, 6), 1, ink);
-    canvas.round_fill(Rect::new(cx + 3, cy + 3, 7, 6), 1, ink);
-    canvas.fill(Rect::new(cx, cy - 3, 1, 3), ink);
-    canvas.fill(Rect::new(cx - 6, cy, 13, 1), ink);
-    canvas.fill(Rect::new(cx - 6, cy, 1, 3), ink);
-    canvas.fill(Rect::new(cx + 6, cy, 1, 3), ink);
+impl Desktop {
+    /// The connection to show: Wi-Fi when joined, else a cable that
+    /// works, else Wi-Fi off when there is Wi-Fi, else a cable that does
+    /// not.
+    pub fn link(&self) -> Link {
+        let connected = self.network.as_ref().is_some_and(|n| n.connected);
+        match self.wifi.as_ref().map(|w| &w.state) {
+            Some(WifiState::Joined { rssi, .. }) => Link::Wifi(icon::wifi_bars(*rssi)),
+            _ if connected => Link::Ethernet(true),
+            Some(WifiState::Off) | None => Link::Ethernet(false),
+            Some(_) => Link::WifiOff,
+        }
+    }
 }
 
-/// A network's signal (ADR-0130): four bars, as many lit as it is strong
-/// (-55 dBm and above all four, below -85 one).
+/// A network's signal (ADR-0130): Wi-Fi's fan, as many bands lit as it is
+/// strong.
 fn signal_icon(canvas: &mut Canvas, cx: i32, cy: i32, rssi: i8, ink: Rgb) {
-    let lit = match rssi {
-        -55.. => 4,
-        -65..=-56 => 3,
-        -75..=-66 => 2,
-        _ => 1,
-    };
-    for bar in 0..4 {
-        let h = 4 + bar * 3;
-        let colour = if bar < lit { ink } else { Rgb(0xb8_b8_be) };
-        canvas.round_fill(Rect::new(cx - 9 + bar * 5, cy + 7 - h, 3, h), 1, colour);
-    }
+    glyph_at(canvas, (cx, cy), BAR_ICON, |s, r| {
+        icon::wifi(s, r, icon::wifi_bars(rssi), ink, PANEL_FAINT)
+    });
 }
 
 /// Back: a chevron pointing left, about 12 pixels.
@@ -2736,34 +2768,10 @@ fn folder_icon(canvas: &mut Canvas, r: Rect) {
     canvas.tint(Rect::new(body.x, body.y, body.w, 6), 6, WHITE, 40);
 }
 
-/// The user (ADR-0121): a head and shoulders.
-fn user_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
-    canvas.circle(cx, cy - 4, 4, ink);
-    canvas.round_fill(Rect::new(cx - 7, cy + 2, 15, 7), 4, ink);
-}
-
-/// The notifications (ADR-0119): a bell.
-fn bell_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
-    canvas.circle(cx, cy - 2, 6, ink);
-    canvas.fill(Rect::new(cx - 6, cy - 2, 13, 6), ink);
-    canvas.round_fill(Rect::new(cx - 8, cy + 3, 17, 3), 1, ink);
-    canvas.circle(cx, cy + 7, 2, ink);
-    canvas.fill(Rect::new(cx, cy - 10, 1, 3), ink);
-}
-
-/// Control Center's icon in the top bar (ADR-0118): two switches.
-fn control_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
-    for (dy, knob) in [(-4, -4), (4, 4)] {
-        canvas.round_fill(Rect::new(cx - 9, cy + dy - 3, 18, 7), 3, ink);
-        canvas.circle(cx + knob, cy + dy, 2, BLACK);
-    }
-}
-
 /// The Oceans logo (ADR-0117): the wave in a circle, made from the logo
 /// the project chose, 40 pixels, centred in `r` (Wave's button).
 fn oceans_logo(canvas: &mut Canvas, r: Rect) {
-    const LOGO: &[u8] = include_bytes!("../assets/oceans-logo-40.rgba");
-    canvas.image(r.x + (r.w - 40) / 2, r.y + (r.h - 40) / 2, 40, LOGO);
+    canvas.logo(r.x + (r.w - 40) / 2, r.y + (r.h - 40) / 2, 40);
 }
 
 /// A window's frame (the Terminal's too): a soft shadow, a rounded border
@@ -2868,20 +2876,11 @@ fn draw_content(canvas: &mut Canvas, view: &WindowView<'_>) {
     let frame = view.frame;
     let content = frame.content();
     match view.pixels {
+        // The app's pixels are the screen's, at the scale (ADR-0136); of
+        // another size (a resize or a new scale the app has not caught up
+        // with), as much as fits, the rest in the windows' colour.
         Some((pixels, width, height)) if frame.presented => {
-            // Pixels of another size (a resize the app has not caught up
-            // with): as much as fits, the rest in the windows' colour.
-            let w = content.w.min(width as i32);
-            let h = content.h.min(height as i32);
-            canvas.blit(Rect::new(content.x, content.y, w, h), pixels, width);
-            canvas.fill(
-                Rect::new(content.x + w, content.y, content.w - w, content.h),
-                colour::idle_title(),
-            );
-            canvas.fill(
-                Rect::new(content.x, content.y + h, w, content.h - h),
-                colour::idle_title(),
-            );
+            canvas.blit_window(content, pixels, width, height, colour::idle_title());
         }
         _ => canvas.fill(content, colour::surface()),
     }

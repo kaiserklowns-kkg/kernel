@@ -239,7 +239,11 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
         whole.w,
         whole.h - TOOLBAR - STATUS,
     );
-    let view = (area.w.max(1) as u32, area.h.max(1) as u32);
+    // The picture is drawn in the window's own pixels (ADR-0136): at
+    // actual size one of its pixels is one of the screen's, whatever the
+    // scale.
+    let device = ui.surface.device(area);
+    let view = (device.w.max(1) as u32, device.h.max(1) as u32);
     if !app.started {
         app.started = true;
         *ui.focus = Some(PICTURE);
@@ -326,15 +330,15 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
     if let Some(shown) = app.shown.as_ref() {
         let (w, h) = (shown.size.0 as i32, shown.size.1 as i32);
         let limit = |size: i32, room: i32, pan: i32| pan.clamp(0, (size - room).max(0));
-        app.pan = (limit(w, area.w, app.pan.0), limit(h, area.h, app.pan.1));
-        let x0 = area.x + ((area.w - w) / 2).max(0);
-        let y0 = area.y + ((area.h - h) / 2).max(0);
-        let surface_width = ui.surface.width;
+        app.pan = (limit(w, device.w, app.pan.0), limit(h, device.h, app.pan.1));
+        let x0 = device.x + ((device.w - w) / 2).max(0);
+        let y0 = device.y + ((device.h - h) / 2).max(0);
+        let surface_width = ui.surface.device_size().0;
         let pixels = ui.surface.pixels();
-        for row in 0..h.min(area.h) {
+        for row in 0..h.min(device.h) {
             let sy = row + app.pan.1;
             let y = y0 + row;
-            for column in 0..w.min(area.w) {
+            for column in 0..w.min(device.w) {
                 let sx = column + app.pan.0;
                 let x = x0 + column;
                 let pixel = shown.scaled[(sy * w + sx) as usize];

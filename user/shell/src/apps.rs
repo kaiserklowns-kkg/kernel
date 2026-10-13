@@ -733,6 +733,43 @@ impl Shell {
         ));
     }
 
+    /// `scale [auto | PERCENT]` (ADR-0136): the interface's scale, kept by
+    /// Core; the desktop takes it up if the screen can (else automatic).
+    pub(super) fn scale(&self, words: &[&str]) {
+        const USAGE: &str = "usage: scale [auto | 100 | 125 | 150 | 175 | 200 | 250 | 300]\r\n";
+        let Some(core) = self.core() else {
+            return self.print(format_args!(
+                "scale: this shell cannot reach Oceans Core\r\n"
+            ));
+        };
+        let mut reply = [0u8; 8];
+        let percent = match words {
+            [] => match core.call(op::SCALE, &[], &[], &mut reply) {
+                Ok(got) if got.len == 2 => u16::from_le_bytes([reply[0], reply[1]]),
+                Ok(_) => return self.print(format_args!("scale: no answer\r\n")),
+                Err((error, _)) => {
+                    return self.print(format_args!("scale: {}\r\n", error.message()));
+                }
+            },
+            ["auto"] => 0,
+            [word] => match word.trim_end_matches('%').parse::<u16>() {
+                Ok(percent) if oceans_core_proto::SCALE_CHOICES.contains(&percent) => percent,
+                _ => return self.print(format_args!("{USAGE}")),
+            },
+            _ => return self.print(format_args!("{USAGE}")),
+        };
+        if !words.is_empty()
+            && let Err((error, _)) =
+                core.call(op::SET_SCALE, &percent.to_le_bytes(), &[], &mut reply)
+        {
+            return self.print(format_args!("scale: {}\r\n", error.message()));
+        }
+        match percent {
+            0 => self.print(format_args!("scale: automatic\r\n")),
+            percent => self.print(format_args!("scale: {percent}%\r\n")),
+        }
+    }
+
     /// `volume [LEVEL | mute | unmute]`: the system volume (ADR-0100), kept
     /// by Core. A level (0 to 100) also unmutes, as volume keys do.
     pub(super) fn volume(&self, words: &[&str]) {

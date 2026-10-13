@@ -34,7 +34,7 @@ use oceans_abi::display::{is_copy, is_cut};
 pub use oceans_access::Role;
 use oceans_access::{Ids, Node, Tree, focus_move, list_key};
 use oceans_display_proto::{Event, Window, events, kind};
-pub use oceans_draw::{Rect, Rgb, Style, Surface, Typesetter, theme};
+pub use oceans_draw::{Path, Rect, Rgb, Scale, Style, Surface, Typesetter, icon, theme};
 use oceans_rt::Directory;
 
 /// The look (ADR-0078): the colours of the theme the window draws with
@@ -238,6 +238,12 @@ impl<'s, 'f> Ui<'s, 'f> {
         if let Some(windows) = self.windows {
             let _ = oceans_display_proto::want_media_keys(windows, self.window);
         }
+    }
+
+    /// The screen the window is on (ADR-0136): its pixels, the scale in
+    /// use and the one automatic chooses. `None` off a window.
+    pub fn screen(&self) -> Option<oceans_display_proto::Screen> {
+        oceans_display_proto::screen(self.windows?).ok()
     }
 
     /// The apps that open files like `name` (ADR-0099), as id and name, the
@@ -708,17 +714,14 @@ fn run_window<S>(
     let mut batch = [Event::default(); 20];
     let mut draw =
         |window: &mut Window, input: &mut Input, focus: &mut Option<u32>, state: &mut S| {
-            let (w, h, id) = (window.width, window.height, window.id);
-            let Some(mut surface) = Surface::new(window.pixels(), w, h) else {
+            let (w, h, id, scale) = (window.width, window.height, window.id, window.scale);
+            // Laid out in logical pixels, drawn at the scale (ADR-0136).
+            let Some(mut surface) = Surface::scaled(window.pixels(), w, h, scale) else {
                 return false;
             };
-            let mut ui = Ui::new(
-                &mut surface,
-                &mut typesetter,
-                input,
-                focus,
-                Rect::new(0, 0, w as i32, h as i32),
-            );
+            typesetter.set_scale(scale);
+            let area = Rect::new(0, 0, surface.width, surface.height);
+            let mut ui = Ui::new(&mut surface, &mut typesetter, input, focus, area);
             ui.windows = Some(windows);
             ui.window = id;
             frame(&mut ui, state);

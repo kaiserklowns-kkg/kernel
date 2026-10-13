@@ -2,12 +2,17 @@
 //! changed to the (uncached, slow) framebuffer. The shapes and interface
 //! text are `oceans-draw`'s (ADR-0080), the same apps draw with; the
 //! Terminal's monospaced bitmap font, the pointer and presenting are here.
+//!
+//! **Scale** (ADR-0136): the desktop is laid out in logical pixels,
+//! `width × height` of them; the back buffer is the screen's own pixels,
+//! and everything is drawn into it at the scale, sharp. Apps' windows come
+//! at the scale already and are copied pixel for pixel.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
-pub use oceans_draw::{Rect, Rgb};
+pub use oceans_draw::{Rect, Rgb, Scale};
 use oceans_draw::{Style, Surface, Typesetter};
 
 /// Text styles: the interface's (proportional, with Thai: ADR-0077), and
@@ -45,22 +50,38 @@ impl Font {
         }
     }
 
-    /// Width of one character cell of the bitmap font.
+    /// Width of one character cell of the bitmap font (logical pixels).
     pub fn advance(self) -> i32 {
         let (weight, height, _) = self.spec();
         get_raster_width(weight, height) as i32
     }
 
-    /// A line's height.
+    /// A line's height (logical pixels).
     pub fn height(self) -> i32 {
         self.spec().2
     }
 }
 
+/// The bitmap font's size for `px` of the screen's pixels: the largest
+/// that is not larger (the Terminal's cells stay their logical size).
+fn raster_for(px: i32) -> RasterHeight {
+    match px {
+        32.. => RasterHeight::Size32,
+        24..=31 => RasterHeight::Size24,
+        20..=23 => RasterHeight::Size20,
+        _ => RasterHeight::Size16,
+    }
+}
+
 /// The back buffer, and what the screen shows now.
 pub struct Canvas {
+    /// The screen in logical pixels (ADR-0136): what the desktop lays out.
     pub width: i32,
     pub height: i32,
+    /// The screen in its own pixels.
+    pub device_width: i32,
+    pub device_height: i32,
+    scale: Scale,
     pixels: Vec<u32>,
     front: Vec<u32>,
     screen: *mut u8,
@@ -71,6 +92,8 @@ pub struct Canvas {
     typesetter: Option<Typesetter>,
     /// The wallpaper, drawn once (empty until set).
     wallpaper: Vec<u32>,
+    /// The logo at the size last drawn: its side and `0xAARRGGBB` pixels.
+    logo: Option<(i32, Vec<u32>)>,
 }
 
 impl Canvas {
@@ -80,6 +103,9 @@ impl Canvas {
         Self {
             width: width as i32,
             height: height as i32,
+            device_width: width as i32,
+            device_height: height as i32,
+            scale: Scale::ONE,
             pixels: vec![0; size],
             // Nothing is known to be on screen: everything is drawn once.
             front: vec![u32::MAX; size],
@@ -92,13 +118,29 @@ impl Canvas {
             ),
             typesetter: Typesetter::new(),
             wallpaper: Vec::new(),
+            logo: None,
+        }
+    }
+
+    pub fn scale(&self) -> Scale {
+        self.scale
+    }
+
+    /// Draws at `scale` from now on: the logical size follows.
+    pub fn set_scale(&mut self, scale: Scale) {
+        self.scale = scale;
+        self.width = scale.logical_fit(self.device_width);
+        self.height = scale.logical_fit(self.device_height);
+        if let Some(typesetter) = self.typesetter.as_mut() {
+            typesetter.set_scale(scale);
         }
     }
 
     /// The back buffer, to draw on.
     fn surface(&mut self) -> Surface<'_> {
-        let (w, h) = (self.width as usize, self.height as usize);
-        Surface::new(&mut self.pixels, w, h).expect("the back buffer is the screen's size")
+        let (w, h) = (self.device_width as usize, self.device_height as usize);
+        Surface::scaled(&mut self.pixels, w, h, self.scale)
+            .expect("the back buffer is the screen's size")
     }
 
     /// The width of `text` in `font`.
@@ -129,70 +171,102 @@ impl Canvas {
         self.surface().shadow(r, spread, strength);
     }
 
+    /// Draws with the shared drawing (`oceans_draw::icon`'s icons).
+    pub fn with_surface(&mut self, draw: impl FnOnce(&mut Surface<'_>)) {
+        draw(&mut self.surface());
+    }
+
     /// Darkens everything (behind a modal dialog).
     pub fn dim(&mut self, shade: Rgb, alpha: u32) {
         self.surface().dim(shade, alpha);
     }
 
-    /// Copies an app's pixels (`width` per row, `0x00RRGGBB`) into `to`,
-    /// clipped to the screen. `pixels` is shared memory the app may be
-    /// writing: a frame may tear, nothing worse.
-    pub fn blit(&mut self, to: Rect, pixels: *const u32, width: usize) {
+    /// An app's window content `to` (logical): its pixels (`width ×
+    /// height`, `0x00RRGGBB`, the screen's, at the scale) copied one for
+    /// one, clipped to the screen; what they do not cover (a resize the
+    /// app has not caught up with) in `rest`. `pixels` is shared memory
+    /// the app may be writing: a frame may tear, nothing worse.
+    pub fn blit_window(
+        &mut self,
+        to: Rect,
+        pixels: *const u32,
+        width: usize,
+        height: usize,
+        rest: Rgb,
+    ) {
+        let to = self.scale.rect(to);
+        let w = to.w.min(width as i32);
+        let h = to.h.min(height as i32);
         let x0 = to.x.max(0);
         let y0 = to.y.max(0);
-        let x1 = (to.x + to.w).min(self.width);
-        let y1 = (to.y + to.h).min(self.height);
+        let x1 = (to.x + w).min(self.device_width);
+        let y1 = (to.y + h).min(self.device_height);
         for y in y0..y1 {
             let source = (y - to.y) as usize * width + (x0 - to.x) as usize;
-            let row = (y * self.width) as usize;
+            let row = (y * self.device_width) as usize;
             for (i, pixel) in self.pixels[row + x0 as usize..row + x1.max(x0) as usize]
                 .iter_mut()
                 .enumerate()
             {
-                // SAFETY: `to` is no larger than the window's `width ×
-                // height` pixels, all mapped; volatile, as another process
-                // writes them.
+                // SAFETY: (x, y) is inside the window's `width × height`
+                // pixels, all mapped; volatile, as another process writes
+                // them.
                 *pixel = unsafe { pixels.add(source + i).read_volatile() } & 0x00ff_ffff;
             }
         }
+        self.fill_device(Rect::new(to.x + w, to.y, to.w - w, to.h), rest);
+        self.fill_device(Rect::new(to.x, to.y + h, w, to.h - h), rest);
     }
 
-    /// Draws a picture of `size × size` pixels from (`x`, `y`): `rgba` is
-    /// its rows, four bytes a pixel with straight alpha, blended over what
-    /// is there and clipped to the screen (ADR-0117: the Oceans logo).
-    pub fn image(&mut self, x: i32, y: i32, size: i32, rgba: &[u8]) {
-        if rgba.len() != (size * size * 4) as usize {
+    /// Fills `r` of the screen's own pixels.
+    fn fill_device(&mut self, r: Rect, colour: Rgb) {
+        let x0 = r.x.max(0);
+        let x1 = (r.x + r.w).min(self.device_width);
+        if x0 >= x1 {
             return;
         }
-        for row in 0..size {
-            let sy = y + row;
-            if !(0..self.height).contains(&sy) {
+        for y in r.y.max(0)..(r.y + r.h).min(self.device_height) {
+            let row = (y * self.device_width) as usize;
+            self.pixels[row + x0 as usize..row + x1 as usize].fill(colour.0);
+        }
+    }
+
+    /// The Oceans logo (ADR-0117), `size × size` logical pixels from (`x`,
+    /// `y`), blended over what is there: made from its 512-pixel picture
+    /// at the size the scale needs, once for each size (ADR-0136).
+    pub fn logo(&mut self, x: i32, y: i32, size: i32) {
+        const PICTURE: &[u8] = include_bytes!("../assets/oceans-logo.png");
+        let to = self.scale.rect(Rect::new(x, y, size, size));
+        if to.w <= 0 {
+            return;
+        }
+        if self.logo.as_ref().is_none_or(|(side, _)| *side != to.w) {
+            self.logo = oceans_image::decode(PICTURE)
+                .ok()
+                .map(|(_, image)| (to.w, oceans_image::scale(&image, to.w as u32, to.w as u32)));
+        }
+        let Some((side, pixels)) = &self.logo else {
+            return;
+        };
+        for (row, line) in pixels.chunks(*side as usize).enumerate() {
+            let dy = to.y + row as i32;
+            if !(0..self.device_height).contains(&dy) {
                 continue;
             }
-            for col in 0..size {
-                let sx = x + col;
-                if !(0..self.width).contains(&sx) {
+            for (col, &argb) in line.iter().enumerate() {
+                let dx = to.x + col as i32;
+                let alpha = argb >> 24;
+                if alpha == 0 || !(0..self.device_width).contains(&dx) {
                     continue;
                 }
-                let at = ((row * size + col) * 4) as usize;
-                let alpha = u32::from(rgba[at + 3]);
-                if alpha == 0 {
-                    continue;
-                }
-                let pixel = &mut self.pixels[(sy * self.width + sx) as usize];
-                let mut out = 0;
-                for (channel, shift) in [(0, 16), (1, 8), (2, 0)] {
-                    let under = (*pixel >> shift) & 0xff;
-                    let over = u32::from(rgba[at + channel]);
-                    out |= ((over * alpha + under * (255 - alpha)) / 255) << shift;
-                }
-                *pixel = out;
+                let at = (dy * self.device_width + dx) as usize;
+                self.pixels[at] = Rgb(argb & 0x00ff_ffff).over(Rgb(self.pixels[at]), alpha).0;
             }
         }
     }
 
-    /// Keeps `pixels` (the whole screen) as the wallpaper: drawn once,
-    /// copied on every frame.
+    /// Keeps `pixels` (the whole screen, its own pixels) as the
+    /// wallpaper: drawn once, copied on every frame.
     pub fn set_wallpaper(&mut self, pixels: Vec<u32>) {
         if pixels.len() == self.pixels.len() {
             self.wallpaper = pixels;
@@ -224,8 +298,9 @@ impl Canvas {
         }
     }
 
-    /// The bitmap font: a fixed cell per character; characters outside
-    /// Basic Latin show as `?`.
+    /// The bitmap font: a fixed cell per character (logical), each drawn
+    /// at the size nearest the scale; characters outside Basic Latin show
+    /// as `?`.
     fn bitmap_text(
         &mut self,
         x: i32,
@@ -235,26 +310,30 @@ impl Canvas {
         colour: Rgb,
         clip: Rect,
     ) -> i32 {
-        let (weight, height, _) = font.spec();
+        let (weight, logical, _) = font.spec();
+        let height = raster_for(self.scale.len(logical.val() as i32));
         let advance = font.advance();
+        let clip = self.scale.rect(clip);
+        let top = self.scale.device(y);
         let mut pen = x;
         for c in text.chars() {
-            if pen >= clip.x + clip.w {
+            let left = self.scale.device(pen);
+            if left >= clip.x + clip.w {
                 break;
             }
             let glyph = get_raster(c, weight, height).or_else(|| get_raster('?', weight, height));
             if let Some(glyph) = glyph.filter(|_| c != ' ') {
                 for (gy, row) in glyph.raster().iter().enumerate() {
                     for (gx, &alpha) in row.iter().enumerate() {
-                        let (px, py) = (pen + gx as i32, y + gy as i32);
+                        let (px, py) = (left + gx as i32, top + gy as i32);
                         if alpha == 0
                             || !clip.contains(px, py)
-                            || px >= self.width
-                            || py >= self.height
+                            || px >= self.device_width
+                            || py >= self.device_height
                         {
                             continue;
                         }
-                        let at = (py * self.width + px) as usize;
+                        let at = (py * self.device_width + px) as usize;
                         self.pixels[at] = colour.over(Rgb(self.pixels[at]), u32::from(alpha)).0;
                     }
                 }
@@ -264,7 +343,8 @@ impl Canvas {
         pen
     }
 
-    /// The pointer: an arrow with its tip at (`x`, `y`).
+    /// The pointer: an arrow with its tip at (`x`, `y`) of the screen's
+    /// pixels (the pointer moves by them), as large as the scale makes it.
     pub fn cursor(&mut self, x: i32, y: i32, fill: Rgb, edge: Rgb) {
         const ARROW: [&[u8]; 16] = [
             b"X",
@@ -284,6 +364,7 @@ impl Canvas {
             b"X    X..X",
             b"      XX",
         ];
+        let s = self.scale;
         for (dy, row) in ARROW.iter().enumerate() {
             for (dx, &cell) in row.iter().enumerate() {
                 let colour = match cell {
@@ -291,7 +372,16 @@ impl Canvas {
                     b'.' => fill,
                     _ => continue,
                 };
-                self.fill(Rect::new(x + dx as i32, y + dy as i32, 1, 1), colour);
+                let cell = s.rect(Rect::new(dx as i32, dy as i32, 1, 1));
+                for py in y + cell.y..y + cell.y + cell.h {
+                    for px in x + cell.x..x + cell.x + cell.w {
+                        if (0..self.device_width).contains(&px)
+                            && (0..self.device_height).contains(&py)
+                        {
+                            self.pixels[(py * self.device_width + px) as usize] = colour.0;
+                        }
+                    }
+                }
             }
         }
     }
@@ -301,9 +391,10 @@ impl Canvas {
     pub fn present(&mut self) -> usize {
         let mut written = 0;
         let (r, g, b) = self.shifts;
-        for y in 0..self.height as usize {
-            let row = y * self.width as usize;
-            for x in 0..self.width as usize {
+        let (width, height) = (self.device_width as usize, self.device_height as usize);
+        for y in 0..height {
+            let row = y * width;
+            for x in 0..width {
                 let value = self.pixels[row + x];
                 if self.front[row + x] == value {
                     continue;

@@ -28,4 +28,4 @@ oceans-net-proto.workspace = true
 # Wi-Fi's panel (ADR-0130): the driver's files in /system/wifi.
 oceans-fs-proto.workspace = true
 oceans-wifi.workspace = true
-noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "bold", "size_16", "size_20", "unicode-basic-latin"] }
+noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "bold", "size_16", "size_20", "size_24", "size_32", "unicode-basic-latin"] }

@@ -367,6 +367,8 @@ pub fn info() -> Option<oceans_abi::display::Info> {
         blue_shift: fb.blue_shift,
         cols: display.cols as u32,
         rows: display.rows as u32,
+        mm_width: fb.mm.0,
+        mm_height: fb.mm.1,
     })
 }
 

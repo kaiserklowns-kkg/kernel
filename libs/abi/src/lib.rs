@@ -30,9 +30,10 @@
 /// writing the PCI Express power and request-size fields); 20 = ADR-0126
 /// (the boot disk and partition in the `BOOT` record); 21 = ADR-0127 (the
 /// install boot mode); 22 = ADR-0132 (50: the PS/2 pointer's events to the
-/// desktop). Versions only add; existing numbers keep their
-/// meaning.
-pub const ABI_VERSION: u64 = 22;
+/// desktop); 23 = ADR-0136 (`DISPLAY_INFO`'s record ends with the screen's
+/// size in millimetres, from its EDID). Versions only add; existing numbers
+/// keep their meaning.
+pub const ABI_VERSION: u64 = 23;
 
 /// System call numbers.
 pub mod nr {
@@ -427,10 +428,40 @@ pub mod display {
         /// The console's text grid.
         pub cols: u32,
         pub rows: u32,
+        /// The screen's size in millimetres, as its EDID says (ABI 23,
+        /// ADR-0136: the desktop's scale follows its density); 0 when it
+        /// did not say.
+        pub mm_width: u16,
+        pub mm_height: u16,
+    }
+
+    /// The image size in millimetres an EDID block gives: its first
+    /// detailed timing's (to the millimetre), else the basic block's (to
+    /// the centimetre). `None` without a believable one (a short or
+    /// headless block, or only an aspect ratio).
+    pub fn edid_size_mm(edid: &[u8]) -> Option<(u16, u16)> {
+        const HEADER: [u8; 8] = [0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0];
+        if edid.len() < 128 || edid[..8] != HEADER {
+            return None;
+        }
+        // The first descriptor is a timing if its pixel clock is not 0.
+        let dtd = &edid[54..72];
+        let timing = dtd[0] != 0 || dtd[1] != 0;
+        let from_timing = timing.then(|| {
+            let w = u16::from(dtd[12]) | u16::from(dtd[14] >> 4) << 8;
+            let h = u16::from(dtd[13]) | u16::from(dtd[14] & 0x0f) << 8;
+            (w, h)
+        });
+        let from_basic = (u16::from(edid[21]) * 10, u16::from(edid[22]) * 10);
+        [from_timing, Some(from_basic)]
+            .into_iter()
+            .flatten()
+            // Both sides, and not an aspect ratio given in place of a size.
+            .find(|&(w, h)| w >= 100 && h >= 50)
     }
 
     impl Info {
-        pub const SIZE: usize = 28;
+        pub const SIZE: usize = 32;
 
         pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
             for (i, value) in [self.width, self.height, self.pitch, self.bpp]
@@ -445,6 +476,8 @@ pub mod display {
             out[19] = 0;
             out[20..24].copy_from_slice(&self.cols.to_le_bytes());
             out[24..28].copy_from_slice(&self.rows.to_le_bytes());
+            out[28..30].copy_from_slice(&self.mm_width.to_le_bytes());
+            out[30..32].copy_from_slice(&self.mm_height.to_le_bytes());
         }
 
         pub fn decode(bytes: &[u8]) -> Option<Self> {
@@ -460,6 +493,8 @@ pub mod display {
                 blue_shift: bytes[18],
                 cols: word(20),
                 rows: word(24),
+                mm_width: u16::from_le_bytes([bytes[28], bytes[29]]),
+                mm_height: u16::from_le_bytes([bytes[30], bytes[31]]),
             })
         }
     }
@@ -940,6 +975,45 @@ pub mod device {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_info_carries_the_screens_size() {
+        use display::{Info, edid_size_mm};
+        let info = Info {
+            width: 1920,
+            height: 1080,
+            pitch: 7680,
+            bpp: 32,
+            red_shift: 16,
+            green_shift: 8,
+            blue_shift: 0,
+            cols: 240,
+            rows: 67,
+            mm_width: 344,
+            mm_height: 194,
+        };
+        let mut out = [0u8; Info::SIZE];
+        info.encode(&mut out);
+        assert_eq!(Info::decode(&out), Some(info));
+
+        // An EDID block: the header, 34 × 19 cm, and a first timing of
+        // 344 × 194 mm (0x158 × 0x0c2).
+        let mut edid = [0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        (edid[21], edid[22]) = (34, 19);
+        (edid[54], edid[55]) = (0x1d, 0x36);
+        (edid[66], edid[67], edid[68]) = (0x58, 0xc2, 0x10);
+        assert_eq!(edid_size_mm(&edid), Some((344, 194)));
+        // Without a timing, the centimetres.
+        (edid[54], edid[55]) = (0, 0);
+        assert_eq!(edid_size_mm(&edid), Some((340, 190)));
+        // An aspect ratio only (16:9), or no header: nothing.
+        (edid[21], edid[22]) = (16, 0);
+        assert_eq!(edid_size_mm(&edid), None);
+        edid[0] = 1;
+        assert_eq!(edid_size_mm(&edid), None);
+        assert_eq!(edid_size_mm(&edid[..100]), None);
+    }
 
     #[test]
     fn the_boot_mode_comes_from_the_command_line() {
