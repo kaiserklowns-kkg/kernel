@@ -495,6 +495,29 @@ impl Pch {
         Ok(mac)
     }
 
+    /// Full speed while running: low-power link-up and gigabit-off cleared
+    /// in `PHY_CTRL` and in the PHY's OEM bits, and autonegotiation
+    /// restarted to apply them. A system before may have left them set for
+    /// Wake on LAN (Linux does on power-down); the PHY keeps them while
+    /// standby power lasts. Returns what they were (`PHY_CTRL`, OEM bits).
+    pub fn full_speed(&self) -> Result<(u32, u16), &'static str> {
+        let regs = self.regs;
+        let control = regs.read(pch::reg::PHY_CTRL);
+        regs.update(
+            pch::reg::PHY_CTRL,
+            0,
+            pch::reg::D0A_LPLU | pch::reg::GBE_DISABLE,
+        );
+        let _flag = self.flag()?;
+        let oem = self.read_locked(phy::OEM_BITS)?;
+        let mut value = oem & !(phy::OEM_LPLU | phy::OEM_GBE_DISABLE);
+        if !self.reset_blocked {
+            value |= phy::OEM_RESTART_AUTONEG;
+        }
+        self.write_locked(phy::OEM_BITS, value)?;
+        Ok((control, oem))
+    }
+
     /// Autonegotiation, powered up, from the start (PCH §5).
     pub fn restart_autonegotiation(&self) -> Result<(), &'static str> {
         let _flag = self.flag()?;

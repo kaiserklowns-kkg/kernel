@@ -27,8 +27,10 @@ pub use oceans_net_proto::Mac;
 
 /// The notification bit of the device's interrupt and of the polling tick.
 pub const IRQ: u64 = 1;
-/// The polling interval without an interrupt.
+/// The polling interval without an interrupt; with one, a tick every
+/// [`TICK_MS`] for what changes without raising it (a link still down).
 pub const POLL_MS: u64 = 10;
+pub const TICK_MS: u64 = 1_000;
 /// The smallest frame a driver passes on or sends (an Ethernet header).
 pub const MIN_FRAME: usize = 14;
 
@@ -208,8 +210,8 @@ struct Session {
 }
 
 /// How [`serve`] reaches the device: its notification is bound to the
-/// endpoint already; without an interrupt, it is ticked every
-/// [`POLL_MS`].
+/// endpoint already; it is ticked every [`POLL_MS`] without an interrupt,
+/// every [`TICK_MS`] with one.
 pub struct Events {
     pub handle: Handle,
     pub interrupts: bool,
@@ -222,9 +224,8 @@ pub fn serve(nic: &mut impl Nic, name: &str, log: Handle, server: Handle, events
     let mut next_badge = 1;
     let mut session: Option<Session> = None;
     loop {
-        if !events.interrupts {
-            let _ = oceans_rt::timer_set(events.handle, IRQ, POLL_MS);
-        }
+        let tick = if events.interrupts { TICK_MS } else { POLL_MS };
+        let _ = oceans_rt::timer_set(events.handle, IRQ, tick);
         let got = match oceans_rt::ipc_receive_msg(server, &mut data, &mut handles) {
             Ok(got) => got,
             Err(error) => {

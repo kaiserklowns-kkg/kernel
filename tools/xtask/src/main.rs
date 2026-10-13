@@ -1750,9 +1750,10 @@ impl Expect {
 }
 /// Each smoke boot, start to finish. Boot 1 runs ~150 scripted steps, many
 /// with QEMU monitor pauses; CI runners without KVM are slow.
-/// 900 s since ADR-0109 (the debug build reached 560 of 600); the kernel's
-/// self-test waits as long (`kernel/src/process/self_test.rs`).
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(900);
+/// 1200 s since ADR-0141 (the debug build passed 900 on a machine also
+/// building other work; 900 since ADR-0109); the kernel's self-test waits as
+/// long (`kernel/src/process/self_test.rs`).
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(1200);
 /// How long the last command waits for the host's echo probes.
 const PROBE_WAIT: Duration = Duration::from_secs(30);
 /// QEMU exit status for `EmulatorExit::Success` (0x10 << 1 | 1).

@@ -61,6 +61,9 @@ const RINGS_SIZE: usize = TX_RING + TX_DESCRIPTORS as usize * DESCRIPTOR_SIZE;
 const MSIX_VECTOR: u16 = 0;
 /// Error statistics are read, and changes logged, at most this often.
 const STATISTICS_MS: u64 = 10_000;
+/// How long the link may stay down before autonegotiation starts again
+/// (a cable plugged back, a switch that gave up).
+const RENEGOTIATE_MS: u64 = 5_000;
 const MTU: u16 = 1500;
 
 /// Bring-up timeouts (Intel's 82574 initialisation uses the same bounds).
@@ -128,6 +131,10 @@ struct Driver {
     counters: Counters,
     reported: Counters,
     next_statistics: u64,
+    /// While the link is down: when autonegotiation is restarted next, and
+    /// how often it has been.
+    next_renegotiation: u64,
+    renegotiations: u32,
 }
 
 impl Driver {
@@ -274,6 +281,8 @@ impl Driver {
             counters: Counters::default(),
             reported: Counters::default(),
             next_statistics: oceans_rt::clock_ms() + STATISTICS_MS,
+            next_renegotiation: oceans_rt::clock_ms() + RENEGOTIATE_MS,
+            renegotiations: 0,
         };
         say(
             log,
@@ -291,6 +300,24 @@ impl Driver {
                 }
             ),
         );
+        if let Some(pch) = &driver.pch {
+            use oceans_e1000e::pch::{phy, reg as pch_reg};
+            match pch.full_speed() {
+                Ok((control, oem))
+                    if control & (pch_reg::D0A_LPLU | pch_reg::GBE_DISABLE) != 0
+                        || oem & (phy::OEM_LPLU | phy::OEM_GBE_DISABLE) != 0 =>
+                {
+                    say(
+                        log,
+                        format_args!(
+                            "low-power link-up was on (PHY_CTRL {control:#x}, OEM {oem:#x}): off"
+                        ),
+                    );
+                }
+                Ok(_) => {}
+                Err(problem) => say(log, format_args!("full speed: {problem}")),
+            }
+        }
         driver.link = Link::from_status(regs.read(reg::STATUS));
         match driver.link {
             Link::Up { .. } => say(log, format_args!("link {}", driver.link)),
@@ -377,6 +404,7 @@ impl Nic for Driver {
             self.counters.overruns += 1;
         }
         let link = Link::from_status(self.regs.read(reg::STATUS));
+        let now = oceans_rt::clock_ms();
         if link != self.link {
             self.link = link;
             say(self.log, format_args!("link {link}"));
@@ -385,9 +413,30 @@ impl Nic for Driver {
             {
                 say(self.log, format_args!("tuning for the link: {problem}"));
             }
+            self.next_renegotiation = now + RENEGOTIATE_MS;
+            self.renegotiations = 0;
+        }
+        // Down for a while: negotiate again (the serving loop ticks every
+        // second). Said once each time it goes down.
+        if self.link == Link::Down && now >= self.next_renegotiation {
+            self.next_renegotiation = now + RENEGOTIATE_MS;
+            self.renegotiations += 1;
+            let restarted = match &self.pch {
+                Some(pch) => pch.restart_autonegotiation(),
+                None => restart_autonegotiation(self.regs),
+            };
+            match restarted {
+                Ok(()) if self.renegotiations == 1 => {
+                    say(
+                        self.log,
+                        format_args!("link still down: autonegotiating again"),
+                    );
+                }
+                Ok(()) => {}
+                Err(problem) => say(self.log, format_args!("autonegotiation: {problem}")),
+            }
         }
         self.reclaim_transmitted();
-        let now = oceans_rt::clock_ms();
         if now >= self.next_statistics {
             self.next_statistics = now + STATISTICS_MS;
             self.report_errors();

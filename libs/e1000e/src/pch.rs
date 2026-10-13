@@ -138,6 +138,8 @@ pub mod reg {
     /// The 82574's `IVAR`.
     pub const FEXTNVM7: usize = 0x00e4;
     pub const EXTCNF_CTRL: usize = 0x0f00;
+    /// `PHY_CTRL`: the PHY's power settings, in D0 and out of it.
+    pub const PHY_CTRL: usize = 0x0f10;
     pub const EXTCNF_SIZE: usize = 0x0f08;
     pub const IOSFPC: usize = 0x0f28;
     pub const PBA: usize = 0x1000;
@@ -204,6 +206,11 @@ pub mod reg {
     pub const PHYPD_CTRL_P1: u32 = 1 << 23;
     /// `FEXTNVM`: the NVM holds PHY settings for software to replay.
     pub const SW_CONFIG: u32 = 1 << 27;
+    /// `PHY_CTRL`: in D0, low-power link-up (the lowest speed both ends
+    /// have) and gigabit off. Set for Wake on LAN, they make a running
+    /// system's link 10 Mb/s.
+    pub const D0A_LPLU: u32 = 1 << 1;
+    pub const GBE_DISABLE: u32 = 1 << 3;
     /// `FEXTNVM4`: beacon duration 8 µs.
     pub const BEACON_DURATION_MASK: u32 = 7;
     pub const BEACON_DURATION_8US: u32 = 7;
@@ -274,6 +281,13 @@ pub mod phy {
     pub const CONTROL: PhyReg = PhyReg::new(0, 0);
     pub const ID1: PhyReg = PhyReg::new(0, 2);
     pub const ID2: PhyReg = PhyReg::new(0, 3);
+    /// `HV_OEM_BITS`: the PHY's own low-power link-up and gigabit-off
+    /// bits (what `PHY_CTRL` asks for, applied), and the restart of
+    /// autonegotiation that applies them.
+    pub const OEM_BITS: PhyReg = PhyReg::new(0, 25);
+    pub const OEM_LPLU: u16 = 0x0004;
+    pub const OEM_GBE_DISABLE: u16 = 0x0040;
+    pub const OEM_RESTART_AUTONEG: u16 = 0x0400;
     /// `CV_SMB_CTRL`: bit 0 forces SMBus mode.
     pub const SMB_CTRL: PhyReg = PhyReg::new(769, 23);
     pub const SMB_FORCE: u16 = 1 << 0;

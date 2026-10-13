@@ -363,7 +363,11 @@ pub fn block() {
 /// CPU) or was interrupted, it is woken the ordinary way instead.
 pub fn block_and_switch_to(next: Arc<Thread>) {
     if interrupted() {
-        // `next` stays registered; give the CPU to whoever is ready.
+        // The caller took `next` off the endpoint's receivers: woken, it
+        // looks again (and finds the call gone, or registers anew). Left
+        // alone it would sleep there unreachable, and every later call to
+        // that endpoint with it.
+        wake(next);
         return;
     }
     schedule_to(Some(next), Reason::Block);
@@ -584,6 +588,11 @@ fn schedule_to(target: Option<Arc<Thread>>, reason: Reason) {
                 .as_ref()
                 .is_some_and(|current| current.interrupted.load(Ordering::Acquire))
         {
+            // A direct switch's target was taken off its wait list for
+            // us: it must not be dropped with the switch.
+            if let Some(target) = target {
+                wake_locked(scheduler, target);
+            }
             return;
         }
         if matches!(reason, Reason::Block) {
