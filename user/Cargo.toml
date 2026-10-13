@@ -53,6 +53,7 @@ oceans-gpt = { path = "../libs/gpt" }
 oceans-install = { path = "../libs/install" }
 oceans-iwm = { path = "../libs/iwm" }
 oceans-wifi = { path = "../libs/wifi" }
+oceans-line = { path = "../libs/line" }
 oceans-wpa = { path = "../libs/wpa" }
 oceans-window = { path = "../libs/window" }
 oceans-hardware = { path = "../libs/hardware" }

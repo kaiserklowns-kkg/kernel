@@ -5,8 +5,9 @@
 //! command line**: `run hello-client log use:echo`.
 //!
 //! The shell does its own terminal handling (the kernel delivers raw bytes,
-//! ADR-0017): echo, backspace, Ctrl-C, Ctrl-U, CR/LF, and it ignores ANSI
-//! escape sequences such as arrow keys.
+//! ADR-0017): echo, backspace, Ctrl-C, Ctrl-U, CR/LF; Up and Down walk the
+//! lines entered and Tab completes commands, programs and paths (ADR-0133);
+//! other ANSI escape sequences are ignored.
 //!
 //! Handles: whatever `services.conf` grants (at least `log` and `console`),
 //! plus init's handle directory as the last handle.
@@ -24,6 +25,7 @@ use core::fmt::{self, Write};
 use oceans_elf::{Executable, Limits};
 use oceans_fs_proto::tree::{self, Copier, CopyError, Side, Totals};
 use oceans_fs_proto::{FsError, Kind, MAX_NAME, Node, Shared, Status, flags};
+use oceans_line::{History, Matches};
 use oceans_rt::{Buffer, Directory, Error, Handle, Start, prot, rights};
 
 oceans_rt::entry!(main);
@@ -43,6 +45,39 @@ const CTRL_U: u8 = 0x15;
 const BACKSPACE: u8 = 0x08;
 const DELETE: u8 = 0x7f;
 const ESCAPE: u8 = 0x1b;
+const TAB: u8 = 0x09;
+/// The arrows as the desktop's Terminal sends them (`display::KEY_UP`,
+/// `KEY_DOWN`, ADR-0084); a serial terminal sends `ESC [ A` and `ESC [ B`.
+const KEY_UP: u8 = 0x80;
+const KEY_DOWN: u8 = 0x81;
+/// Command lines kept for Up and Down.
+const HISTORY: usize = 32;
+/// The shell's own commands, for Tab (programs come from `/bin`).
+const BUILTINS: [&str; 23] = [
+    "help",
+    "echo",
+    "grants",
+    "call",
+    "run",
+    "ls",
+    "cat",
+    "write",
+    "mkdir",
+    "rm",
+    "mv",
+    "cp",
+    "sync",
+    "shutdown",
+    "reboot",
+    "app",
+    "volume",
+    "user",
+    "appearance",
+    "ai",
+    "ui",
+    "clear",
+    "exit",
+];
 
 struct Shell {
     log: Handle,
@@ -52,6 +87,8 @@ struct Shell {
     /// Console input typed ahead, shared by the command line and questions
     /// asked while a command runs (consent, ADR-0047).
     input: RefCell<Input>,
+    /// Command lines entered, for Up and Down (ADR-0133).
+    history: RefCell<History<HISTORY>>,
 }
 
 fn main(start: Start) -> i64 {
@@ -69,6 +106,7 @@ fn main(start: Start) -> i64 {
         console,
         directory,
         input: RefCell::new(Input::new()),
+        history: RefCell::new(History::new()),
     };
     let _ = oceans_rt::debug_write(log, "shell: ready");
     // Recovery mode (ADR-0122): what can be done from here.
@@ -132,10 +170,11 @@ impl Shell {
         let mut line = [0u8; LINE_MAX];
         loop {
             self.write(PROMPT);
-            let len = self.read_line(&mut self.input.borrow_mut(), &mut line);
+            let len = self.read_line(&mut self.input.borrow_mut(), &mut line, true);
             let Some(len) = len else {
                 return 4; // console unreadable
             };
+            self.history.borrow_mut().push(&line[..len]);
             let Ok(text) = core::str::from_utf8(&line[..len]) else {
                 self.print(format_args!("error: input is not UTF-8\r\n"));
                 continue;
@@ -151,23 +190,56 @@ impl Shell {
     fn ask(&self, question: &str) -> Option<bool> {
         self.write(question.as_bytes());
         let mut line = [0u8; LINE_MAX];
-        let len = self.read_line(&mut self.input.borrow_mut(), &mut line)?;
+        let len = self.read_line(&mut self.input.borrow_mut(), &mut line, false)?;
         let answer = core::str::from_utf8(&line[..len]).unwrap_or("").trim();
         Some(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
     }
 
     /// Reads one edited line. `None` if the console cannot be read. Bytes
-    /// typed ahead (after Enter) stay in `input` for the next line.
-    fn read_line(&self, input: &mut Input, line: &mut [u8; LINE_MAX]) -> Option<usize> {
+    /// typed ahead (after Enter) stay in `input` for the next line. A
+    /// `command` line also has Up and Down (the history) and Tab
+    /// (completion, ADR-0133).
+    fn read_line(
+        &self,
+        input: &mut Input,
+        line: &mut [u8; LINE_MAX],
+        command: bool,
+    ) -> Option<usize> {
         let mut len = 0;
         let mut escape = false;
         loop {
-            let byte = input.next(self.console)?;
-            // Swallow ANSI escape sequences (ESC [ ... final byte).
+            let mut byte = input.next(self.console)?;
+            // ANSI escape sequences (ESC [ ... final byte, or ESC O x): the
+            // arrows Up and Down are kept, the rest swallowed.
             if escape {
-                if (0x40..=0x7e).contains(&byte) && byte != b'[' {
+                if (0x40..=0x7e).contains(&byte) && byte != b'[' && byte != b'O' {
                     escape = false;
+                    match byte {
+                        b'A' => byte = KEY_UP,
+                        b'B' => byte = KEY_DOWN,
+                        _ => continue,
+                    }
+                } else {
+                    continue;
                 }
+            }
+            if command && (byte == KEY_UP || byte == KEY_DOWN) {
+                let mut history = self.history.borrow_mut();
+                let recalled = if byte == KEY_UP {
+                    history.older(&line[..len])
+                } else {
+                    history.newer()
+                };
+                if let Some(recalled) = recalled {
+                    let recalled = &recalled[..recalled.len().min(LINE_MAX)];
+                    self.replace_line(len, recalled);
+                    line[..recalled.len()].copy_from_slice(recalled);
+                    len = recalled.len();
+                }
+                continue;
+            }
+            if command && byte == TAB {
+                len = self.complete(line, len);
                 continue;
             }
             // Enter is CR, LF or CR LF: a LF right after a CR is the same key.
@@ -203,6 +275,95 @@ impl Shell {
                 }
                 _ => {} // other control bytes and overflow
             }
+        }
+    }
+
+    /// The line shown (`shown` characters) replaced by `with`.
+    fn replace_line(&self, shown: usize, with: &[u8]) {
+        let mut text = Buffer::<{ 3 * LINE_MAX + LINE_MAX }>::new();
+        for _ in 0..shown {
+            let _ = text.write_str("\x08 \x08");
+        }
+        if let Ok(with) = core::str::from_utf8(with) {
+            let _ = text.write_str(with);
+        }
+        self.write(text.as_bytes());
+    }
+
+    /// Tab (ADR-0133): the last word completed: the first word from the
+    /// shell's commands and `/bin`'s programs, `run`'s program from `/bin`,
+    /// any other word as a path. One match is completed (a space after it,
+    /// `/` after a directory); several are completed as far as they agree,
+    /// and listed when they do not. The line's new length.
+    fn complete(&self, line: &mut [u8; LINE_MAX], len: usize) -> usize {
+        let start = oceans_line::last_word(&line[..len]);
+        let word = &line[start..len];
+        let before = core::str::from_utf8(&line[..start]).unwrap_or("");
+        let first = before.trim().is_empty();
+        let program = first || before.trim() == "run";
+        // A path: its directory, listed; the name after its last `/`.
+        let (directory, name_at) = match word.iter().rposition(|&b| b == b'/') {
+            Some(slash) => (
+                core::str::from_utf8(&word[..slash + 1]).unwrap_or(""),
+                slash + 1,
+            ),
+            None if program => ("bin", 0),
+            None => ("", 0),
+        };
+        let mut matches = Matches::new(&word[name_at..]);
+        if program && name_at == 0 && first {
+            for command in BUILTINS {
+                matches.offer(command.as_bytes(), false);
+            }
+        }
+        self.each_entry(directory, |name, dir| matches.offer(name, dir));
+        let mut more = [0u8; oceans_line::MAX + 1];
+        let added = matches.completion(&mut more);
+        let added = added.min(LINE_MAX - len);
+        if added > 0 {
+            line[len..len + added].copy_from_slice(&more[..added]);
+            self.write(&more[..added]);
+            return len + added;
+        }
+        if matches.count() > 1 {
+            // Several, parting here: listed, then the line again.
+            let mut list = Buffer::<1024>::new();
+            let _ = list.write_str("\r\n");
+            let mut each = |name: &[u8], dir: bool| {
+                if matches.fits(name) {
+                    let _ = list.write_str(core::str::from_utf8(name).unwrap_or("?"));
+                    let _ = list.write_str(if dir { "/  " } else { "  " });
+                }
+            };
+            if program && name_at == 0 && first {
+                for command in BUILTINS {
+                    each(command.as_bytes(), false);
+                }
+            }
+            self.each_entry(directory, &mut each);
+            let _ = list.write_str("\r\n");
+            self.write(list.as_bytes());
+            self.write(PROMPT);
+            self.write(&line[..len]);
+        }
+        len
+    }
+
+    /// Calls `f` with each entry's name and whether it is a directory, of
+    /// the directory `path` (nothing if it cannot be opened).
+    fn each_entry(&self, path: &str, mut f: impl FnMut(&[u8], bool)) {
+        let Ok((directory, owned)) = self.open_directory(path, 0) else {
+            return;
+        };
+        let mut name = [0u8; MAX_NAME];
+        for index in 0..1024 {
+            match directory.entry(index, &mut name) {
+                Ok(Some((kind, len))) => f(&name[..len], kind == Kind::Directory),
+                _ => break,
+            }
+        }
+        if owned {
+            directory.close();
         }
     }
 
@@ -269,7 +430,9 @@ impl Shell {
     fn help(&self) {
         // Written directly: it is longer than the formatting buffer.
         self.write(
-            b"commands:\r\n\
+            b"Tab completes a command, a program or a path; Up and Down recall\r\n\
+             earlier lines.\r\n\
+             commands:\r\n\
              \x20 help                       this list\r\n\
              \x20 echo TEXT                  print TEXT\r\n\
              \x20 grants                     capabilities this shell holds\r\n\

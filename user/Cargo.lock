@@ -933,6 +933,10 @@ name = "oceans-iwm"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-line"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-net"
 version = "0.1.0"
 dependencies = [
@@ -1400,6 +1404,7 @@ dependencies = [
  "oceans-core-proto",
  "oceans-elf",
  "oceans-fs-proto",
+ "oceans-line",
  "oceans-net-proto",
  "oceans-package",
  "oceans-rt",

@@ -139,5 +139,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0130](0130-wi-fi-panel.md) | Choosing a Wi-Fi network in Control Center: files in `/system/wifi` between the driver and the desktop; the wallpaper a module of the boot image | Accepted |
 | [0131](0131-oceans-setup-on-linux.md) | Oceans Setup on Linux (`OceansSetup-linux`, in a terminal: the installer staged in Linux's own EFI system partition, boot entries through efivarfs; `cargo xtask setup-linux` to try it) | Accepted |
 | [0132](0132-ps2-touchpad.md) | The PS/2 touchpad and mouse (ABI 22): the i8042's auxiliary port in the kernel (the wheel knock, IRQ 12 on the keyboard's vector), `oceans_input::ps2`, `DISPLAY_POINTER` to the desktop; the keyboard no longer blocked by touchpad bytes | Accepted |
+| [0133](0133-shell-line-editing.md) | The shell's history and Tab completion (`oceans-line`: Up/Down recall lines, Tab completes commands, programs and paths) | Accepted |
+| [0134](0134-larger-files.md) | Files up to 256 MiB (OceansFS's per-file limit raised from 16 MiB; the format unchanged) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

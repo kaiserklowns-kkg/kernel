@@ -1,0 +1,9 @@
+[package]
+name = "oceans-line"
+description = "Line editing for the shell: history and Tab completion, without allocation (ADR-0133)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

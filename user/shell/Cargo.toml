@@ -18,3 +18,4 @@ oceans-core-proto.workspace = true
 oceans-net-proto.workspace = true
 oceans-package.workspace = true
 oceans-rt.workspace = true
+oceans-line.workspace = true

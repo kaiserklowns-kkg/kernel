@@ -182,12 +182,20 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"help\r\n",
     b"echo hello from the shell\r\n",
     b"echo abc\x7fd\r\n",
+    // Line editing (ADR-0133): Tab completes a command; Up recalls the last
+    // line, which is then added to.
+    b"ech\ttab-completed\r\n",
+    b"echo recalled\r\n",
+    b"\x1b[A-again\r\n",
     b"grants\r\n",
     b"call echo ping\r\n",
     // Filesystem (ADR-0019).
     b"ls /bin\r\n",
     b"mkdir /docs\r\n",
     b"write /docs/note.txt hello filesystem\r\n",
+    // Tab completes a path too.
+    b"write /docs/tabbed.txt path completed\r\n",
+    b"cat /docs/tab\t\r\n",
     b"cat /docs/note.txt\r\n",
     b"ls /docs\r\n",
     b"rm /docs/note.txt\r\n",
@@ -1260,6 +1268,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("run PROGRAM [GRANT...]"),
     Expect::Line("hello from the shell"),
     Expect::Line("abd"),
+    Expect::Line("tab-completed"),
+    Expect::Line("recalled-again"),
+    Expect::Line("path completed"),
     Expect::Contains("use fs"),
     Expect::Line("PING"),
     Expect::Line("  hello-client"),

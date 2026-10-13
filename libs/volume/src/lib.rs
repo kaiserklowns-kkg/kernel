@@ -68,7 +68,9 @@ pub const MAX_NAME: usize = 128;
 pub const MAX_NODES: usize = 4096;
 /// Deepest directory nesting (the root is depth 0).
 pub const MAX_DEPTH: usize = 32;
-pub const MAX_FILE_SIZE: u64 = 16 * 1024 * 1024;
+/// Largest file (ADR-0134): an update package or a video fits. Its block
+/// list (8 bytes a block, 512 KiB at most) fits the metadata many times.
+pub const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 /// Bytes of volatile (in-memory) file contents.
 pub const MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 /// Smallest volume `format` accepts.
@@ -1686,6 +1688,29 @@ mod tests {
         let mut read = vec![0u8; big.len()];
         again.read(id, 0, &mut read).unwrap();
         assert_eq!(read, big);
+    }
+
+    #[test]
+    fn files_larger_than_16_mib_survive_a_remount() {
+        let (mut volume, _) = Volume::open(MemDisk::new(256), true).unwrap();
+        let big = file(&mut volume, ROOT, "big", b"start");
+        let far = 40 * 1024 * 1024;
+        assert_eq!(volume.write(big, far, b"end").unwrap(), 3);
+        assert_eq!(
+            volume.truncate(big, MAX_FILE_SIZE + 1),
+            Err(FsError::NoSpace)
+        );
+        volume.commit().unwrap();
+        let mut again = reopen(volume.device().unwrap());
+        let big = again.lookup(ROOT, "big").unwrap();
+        assert_eq!(again.size(big).unwrap(), far + 3);
+        let mut out = [0u8; 5];
+        again.read(big, 0, &mut out).unwrap();
+        assert_eq!(&out, b"start");
+        again.read(big, far, &mut out[..3]).unwrap();
+        assert_eq!(&out[..3], b"end");
+        again.read(big, far / 2, &mut out).unwrap();
+        assert_eq!(out, [0; 5], "a hole");
     }
 
     #[test]
