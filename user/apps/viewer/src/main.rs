@@ -25,6 +25,7 @@ use oceans_abi::display::{KEY_DOWN, KEY_LEFT, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_RI
 use oceans_fs_proto::{Kind, MAX_NAME, Node};
 use oceans_image::{Format, Image};
 use oceans_rt::{Directory, Start};
+use oceans_ui::layout::Bar;
 use oceans_ui::{Rect, Role, Style, Ui, colour};
 
 oceans_rt::entry!(main);
@@ -252,6 +253,9 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
             app.open(&name, view);
         }
     }
+    // Fitted again when the window's size changed (ADR-0137); nothing to
+    // do when it did not.
+    app.prepare(view);
 
     // The toolbar: the name, Open, Previous, Next, Fit / Actual size.
     let bar = Rect::new(whole.x, whole.y, whole.w, TOOLBAR);
@@ -260,22 +264,34 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
         Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1),
         colour::line(),
     );
-    ui.area = Rect::new(12, 11, 260, 30);
-    ui.y = 11;
+    // Laid out from both ends (ADR-0137): the size button at the right,
+    // the name taking what the others leave (260 at the size the window
+    // opens at), Previous and Next as arrows when the window is narrow.
+    let mut tools = Bar::new(Rect::new(whole.x + 12, whole.y + 11, whole.w - 24, 30), 12);
+    let size_label = if app.fit { "Actual size" } else { "Fit" };
+    let size_button = tools.right(106);
+    let field = tools.left((whole.w - 500).clamp(120, 400));
+    ui.area = field;
+    ui.y = field.y;
     if ui.text_field(NAME, &mut app.name, "Picture name, in Home") {
         let name = app.name.clone();
         app.open(&name, view);
         *ui.focus = Some(PICTURE);
     }
-    let size_label = if app.fit { "Actual size" } else { "Fit" };
+    let mut row = Bar::new(tools.rest(i32::MAX), 8);
+    let (previous, next) = if row.fits(70 + 88 + 64 + 16) {
+        (("Previous", 88), ("Next", 64))
+    } else {
+        (("‹", 36), ("›", 36))
+    };
     let buttons = [
-        ("Open", 284, 70),
-        ("Previous", 362, 88),
-        ("Next", 458, 64),
-        (size_label, 642, 106),
+        ("Open", row.left(70)),
+        (previous.0, row.left(previous.1)),
+        (next.0, row.left(next.1)),
+        (size_label, size_button),
     ];
-    for (text, x, w) in buttons {
-        if !ui.button_in(Rect::new(x, 11, w, 30), text, text == "Open") {
+    for (text, r) in buttons {
+        if !ui.button_in(r, text, text == "Open") {
             continue;
         }
         match text {
@@ -283,8 +299,8 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
                 let name = app.name.clone();
                 app.open(&name, view);
             }
-            "Previous" => app.step(-1, view),
-            "Next" => app.step(1, view),
+            "Previous" | "‹" => app.step(-1, view),
+            "Next" | "›" => app.step(1, view),
             _ => {
                 app.fit = !app.fit;
                 app.pan = (0, 0);

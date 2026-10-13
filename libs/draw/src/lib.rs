@@ -20,6 +20,7 @@
 extern crate alloc;
 
 pub mod icon;
+pub mod layout;
 mod path;
 mod text;
 pub mod theme;

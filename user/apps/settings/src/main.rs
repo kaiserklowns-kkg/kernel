@@ -32,12 +32,18 @@ use oceans_core_proto::{Core, CoreError, Decision, Status, decision, field, op, 
 use oceans_net_proto::{Colons, Dotted};
 use oceans_package::Permission;
 use oceans_rt::{Directory, Handle, Start};
+use oceans_ui::layout::Flow;
 use oceans_ui::{Rect, Style, Ui, colour};
 
 oceans_rt::entry!(main);
 
 const WIDTH: u16 = 760;
 const HEIGHT: u16 = 520;
+/// The smallest it may be resized to (ADR-0137).
+const MIN_SIZE: (u16, u16) = (600, 420);
+/// The widest its pages are laid out: rows of facts stay readable in a
+/// wide window.
+const READABLE: i32 = 720;
 const SECTIONS: [&str; 7] = [
     "General", "Network", "Sound", "Displays", "Apps", "Users", "Account",
 ];
@@ -479,18 +485,20 @@ fn general(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     }
     ui.y = y + 38;
     ui.label("Accent:");
-    let y = ui.y;
+    // On as many lines as the width needs (ADR-0137), room under each
+    // for its colour.
+    let mut flow = Flow::new(Rect::new(x, ui.y, ui.area.w, 0), 30, 6).line_gap(16);
     for (i, &(name, rgb)) in oceans_ui::theme::ACCENTS.iter().enumerate() {
         // A button by the accent's name (the keyboard reaches it,
         // ADR-0106), the one in use filled; the colour itself under it.
-        let r = Rect::new(x + i as i32 * 82, y, 76, 30);
+        let r = flow.next(76);
         if ui.button_in(r, name, usize::from(accent) == i) {
             chosen = Some((dark, i as u8));
         }
         ui.surface
             .round_fill(Rect::new(r.x + 8, r.y + r.h + 4, r.w - 16, 4), 2, rgb);
     }
-    ui.y = y + 46;
+    ui.y = flow.bottom() + 16;
     if let Some((dark, accent)) = chosen {
         settings.set_appearance(dark, accent);
     }
@@ -705,8 +713,8 @@ fn account(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     let mut lock_after = None;
     if account.password_set {
         ui.label("Lock the screen after this many minutes without input:");
-        let y = ui.y;
-        let mut x = ui.area.x;
+        // On as many lines as the width needs (ADR-0137).
+        let mut flow = Flow::new(Rect::new(ui.area.x, ui.y, ui.area.w, 0), 30, 6);
         for &minutes in &oceans_core_proto::LOCK_CHOICES {
             let text = if minutes == 0 {
                 String::from("Never")
@@ -714,12 +722,11 @@ fn account(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
                 alloc::format!("{minutes}")
             };
             let w = if minutes == 0 { 68 } else { 44 };
-            if ui.button_in(Rect::new(x, y, w, 30), &text, minutes == account.lock_after) {
+            if ui.button_in(flow.next(w), &text, minutes == account.lock_after) {
                 lock_after = Some(minutes);
             }
-            x += w + 6;
         }
-        ui.y = y + 38;
+        ui.y = flow.bottom() + 8;
     }
     if !account.message.is_empty() {
         let message = account.message.clone();
@@ -802,7 +809,8 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     // The list on the left, the chosen app on the right.
     let whole = ui.area;
     let top = ui.y;
-    let list_width = 210;
+    // Half of what the margins leave, 210 at the size the window opens at.
+    let list_width = ((whole.w - 112) / 2).clamp(160, 320);
     ui.area = Rect::new(whole.x, top, list_width, whole.h - (top - whole.y));
     let names: Vec<String> = settings
         .apps
@@ -861,15 +869,30 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
             Decision::Denied => "denied",
             Decision::Undecided => "asks at the next start",
         };
+        // The name and what was decided, then the three choices: on the
+        // same line where the width allows, else under them (ADR-0137),
+        // so they never cover the text.
         let row = Rect::new(ui.area.x, ui.y, ui.area.w, 30);
-        ui.text_at(row.x, row.y + 6, name, Style::Body, colour::text(), row);
+        let choices = 3 * 66 - 6;
+        let wide = row.w >= 130 + 170 + 12 + choices;
+        let text_w = if wide { row.w - choices - 12 } else { row.w };
+        let name_clip = Rect::new(row.x, row.y, text_w.min(124), row.h);
+        ui.text_at(
+            row.x,
+            row.y + 6,
+            name,
+            Style::Body,
+            colour::text(),
+            name_clip,
+        );
+        let shown_clip = Rect::new(row.x + 130, row.y, (text_w - 130).max(0), row.h);
         ui.text_at(
             row.x + 130,
             row.y + 6,
             shown,
             Style::Body,
             colour::muted(),
-            row,
+            shown_clip,
         );
         if state != Decision::Automatic {
             let buttons = [
@@ -877,11 +900,16 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
                 ("Deny", decision::DENY),
                 ("Ask", decision::FORGET),
             ];
+            let line = if wide { row.y } else { row.y + 32 };
+            let left = if wide { row.x + row.w - choices } else { row.x };
             for (i, (label, choice)) in buttons.into_iter().enumerate() {
-                let r = Rect::new(row.x + row.w - 3 * 66 + i as i32 * 66, row.y, 60, 28);
+                let r = Rect::new(left + i as i32 * 66, line, 60, 28);
                 if ui.button_in(r, label, false) {
                     decided = Some((permission, choice));
                 }
+            }
+            if !wide {
+                ui.y += 32;
             }
         }
         ui.y += 34;
@@ -909,6 +937,7 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         settings.section = section;
         settings.stale = true;
     }
+    ui.readable(READABLE);
     match settings.section {
         0 => general(ui, settings),
         1 => network(ui, settings),
@@ -940,5 +969,14 @@ fn main(start: Start) -> i64 {
         appearance: (0, 0),
         scale: 0,
     };
-    oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut settings, frame)
+    oceans_ui::run_resizable(
+        &directory,
+        "",
+        WIDTH,
+        HEIGHT,
+        MIN_SIZE,
+        None,
+        &mut settings,
+        frame,
+    )
 }

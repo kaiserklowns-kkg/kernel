@@ -30,6 +30,7 @@ use oceans_abi::display::{is_copy, is_cut};
 use oceans_edit::Editor;
 use oceans_fs_proto::{Kind, Node, flags};
 use oceans_rt::{Directory, Start};
+use oceans_ui::layout::Bar;
 use oceans_ui::{Rect, Role, Style, Ui, colour};
 
 oceans_rt::entry!(main);
@@ -223,14 +224,18 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1),
         colour::line(),
     );
-    ui.area = Rect::new(12, 11, 320, 30);
-    ui.y = 11;
+    // The name takes what the buttons leave (ADR-0137): 320 at the size
+    // the window opens at, from 160 in a narrow one to 480 in a wide one.
+    let mut tools = Bar::new(Rect::new(whole.x + 12, whole.y + 11, whole.w - 24, 30), 12);
+    let field = tools.left((whole.w - 440).clamp(160, 480));
+    ui.area = field;
+    ui.y = field.y;
     if ui.text_field(NAME, &mut app.name, "File name, in Home") && app.may(Pending::Open) {
         app.open();
     }
-    let buttons = [("Open", 344, 72), ("Save", 424, 72), ("New", 504, 64)];
-    for (text, x, w) in buttons {
-        if !ui.button_in(Rect::new(x, 11, w, 30), text, text == "Save") {
+    let mut buttons = Bar::new(tools.rest(i32::MAX), 8);
+    for (text, w) in [("Open", 72), ("Save", 72), ("New", 64)] {
+        if !ui.button_in(buttons.left(w), text, text == "Save") {
             continue;
         }
         match text {

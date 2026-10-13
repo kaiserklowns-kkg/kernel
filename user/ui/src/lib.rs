@@ -34,7 +34,7 @@ use oceans_abi::display::{is_copy, is_cut};
 pub use oceans_access::Role;
 use oceans_access::{Ids, Node, Tree, focus_move, list_key};
 use oceans_display_proto::{Event, Window, events, kind};
-pub use oceans_draw::{Path, Rect, Rgb, Scale, Style, Surface, Typesetter, icon, theme};
+pub use oceans_draw::{Path, Rect, Rgb, Scale, Style, Surface, Typesetter, icon, layout, theme};
 use oceans_rt::Directory;
 
 /// The look (ADR-0078): the colours of the theme the window draws with
@@ -122,6 +122,9 @@ const LINE_HEIGHT: i32 = 22;
 const GAP: i32 = 8;
 const BUTTON_HEIGHT: i32 = 30;
 const ROW_HEIGHT: i32 = 32;
+/// What the desktop keeps of the screen's height for itself: the top bar
+/// and the dock's band (`desktop::MENU_HEIGHT` and `DOCK_RESERVE`).
+const DESKTOP_BARS: i32 = 28 + 80;
 
 impl<'s, 'f> Ui<'s, 'f> {
     pub fn new(
@@ -356,15 +359,19 @@ impl<'s, 'f> Ui<'s, 'f> {
         let r = self.next(ROW_HEIGHT - GAP);
         let said = alloc::format!("{name}: {value}");
         self.auto(Role::Label, &said, r, false);
-        self.text_at(r.x, r.y + 4, name, Style::Body, colour::text(), r);
-        let width = self.measure(value, Style::Body);
+        // The value keeps the right end; the name what is left of it
+        // (ADR-0137), so a narrow window clips them apart.
+        let width = self.measure(value, Style::Body).min(r.w * 2 / 3);
+        let name_clip = Rect::new(r.x, r.y, r.w - width - 12, r.h);
+        self.text_at(r.x, r.y + 4, name, Style::Body, colour::text(), name_clip);
+        let value_clip = Rect::new(r.x + r.w - width, r.y, width, r.h);
         self.text_at(
             r.x + r.w - width,
             r.y + 4,
             value,
             Style::Body,
             colour::muted(),
-            r,
+            value_clip,
         );
         self.surface
             .fill(Rect::new(r.x, r.y + r.h + GAP / 2, r.w, 1), colour::line());
@@ -373,6 +380,19 @@ impl<'s, 'f> Ui<'s, 'f> {
     pub fn separator(&mut self) {
         let r = self.next(1);
         self.surface.fill(r, colour::line());
+    }
+
+    /// How wide a button with `text` is drawn ([`Ui::button`]): for laying
+    /// out toolbars and rows of them ([`layout::Bar`], [`layout::Flow`]).
+    pub fn button_width(&mut self, text: &str) -> i32 {
+        self.measure(text, Style::Strong) + 28
+    }
+
+    /// The area at most `max` wide from its left (ADR-0137): text and
+    /// rows of facts stay readable in a wide window instead of spreading
+    /// across it.
+    pub fn readable(&mut self, max: i32) {
+        self.area.w = self.area.w.min(max);
     }
 
     /// A button as wide as its text; `true` when clicked.
@@ -695,6 +715,25 @@ fn run_window<S>(
         oceans_rt::notification_create(),
     ) else {
         return EXIT_NO_WINDOW;
+    };
+    // A window that can be resized opens as much larger as the screen has
+    // room for (ADR-0137); one of a fixed size keeps it.
+    let (width, height) = match (min, oceans_display_proto::screen(windows)) {
+        (Some(min), Ok(screen)) => {
+            let fit = |pixels: u16| screen.scale.logical_fit(i32::from(pixels));
+            let area = (fit(screen.width), fit(screen.height) - DESKTOP_BARS);
+            let (w, h) = oceans_draw::layout::window_size(
+                (i32::from(width), i32::from(height)),
+                (i32::from(min.0), i32::from(min.1)),
+                area,
+            );
+            let limit = |v: i32, max: u16| v.clamp(1, i32::from(max)) as u16;
+            (
+                limit(w, oceans_display_proto::proto::MAX_WIDTH),
+                limit(h, oceans_display_proto::proto::MAX_HEIGHT),
+            )
+        }
+        _ => (width, height),
     };
     let Ok(mut window) = Window::open(windows, notification, EVENTS, width, height, title) else {
         return EXIT_NO_WINDOW;

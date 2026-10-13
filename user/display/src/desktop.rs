@@ -135,11 +135,8 @@ const WAVE_CREST: i32 = 18;
 /// The screen's bottom band windows leave to Wave's button.
 pub const DOCK_RESERVE: i32 = 80;
 /// Launchpad (ADR-0117): the grid of apps across the screen.
-const TILE_COLUMNS: usize = 7;
 const TILE_WIDTH: i32 = 120;
 const TILE_HEIGHT: i32 = 112;
-/// Tiles shown: the Terminal and up to 20 apps (three rows).
-const MAX_TILES: usize = 21;
 /// Launchpad's search field and its results.
 const SEARCH_WIDTH: i32 = 440;
 const FOUND_WIDTH: i32 = 600;
@@ -360,8 +357,8 @@ pub const MAX_NOTICES: usize = 30;
 
 /// The app Home opens in, on the desktop (ADR-0120).
 const FILES_APP: &str = "app.oceans.files";
-/// The desktop's icons, at most: one column under the top bar.
-const MAX_DESKTOP_ITEMS: usize = 6;
+/// The desktop's icons, at most: Home and every app kept in Wave.
+const MAX_DESKTOP_ITEMS: usize = 1 + oceans_window::dock::MAX_PINNED;
 /// The cards the panel shows, newest first.
 const NOTICE_CARDS: usize = 6;
 
@@ -550,11 +547,14 @@ pub fn user_menu_item(width: i32, items: usize, index: usize) -> Rect {
 }
 
 /// Icon `index` on the desktop (ADR-0120), in a column down its right
-/// side under the top bar: a 48-pixel picture and its name under it.
-pub fn desktop_icon(width: i32, index: usize) -> Rect {
+/// side under the top bar: a 48-pixel picture and its name under it. A
+/// column ends above the dock; the next starts left of it (ADR-0137).
+pub fn desktop_icon(width: i32, height: i32, index: usize) -> Rect {
+    let rows = ((height - MENU_HEIGHT - 14 - DOCK_RESERVE) / 100).max(1) as usize;
+    let (column, row) = ((index / rows) as i32, (index % rows) as i32);
     Rect::new(
-        width - 16 - 96,
-        MENU_HEIGHT + 14 + index as i32 * 100,
+        width - 16 - 96 - column * 104,
+        MENU_HEIGHT + 14 + row * 100,
         96,
         92,
     )
@@ -755,11 +755,13 @@ pub fn wave_zone(width: i32, height: i32, count: usize) -> Rect {
     Rect::new(left, top - 40, right - left, height - (top - 40))
 }
 
-/// The Terminal window, in the middle of the area.
+/// The Terminal window, in the middle of the area: 960 × 600 on a small
+/// screen, seven tenths of the width and three quarters of the height of
+/// a larger one (ADR-0137).
 pub fn terminal(width: i32, height: i32) -> Rect {
     let area = area(width, height);
-    let w = (area.w - 160).min(960);
-    let h = (area.h - 96).min(600);
+    let w = (area.w - 160).min((area.w * 7 / 10).max(960));
+    let h = (area.h - 96).min((area.h * 3 / 4).max(600));
     Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h)
 }
 
@@ -785,12 +787,35 @@ pub fn start_menu(width: i32, height: i32) -> Rect {
     Rect::new(0, MENU_HEIGHT, width, height - MENU_HEIGHT)
 }
 
+/// Launchpad's grid (ADR-0137): as many columns as fit with 200 pixels
+/// kept free at either side (seven on a 1280-wide screen, from three to
+/// ten), as many rows as fit above Restart and Shut Down.
+fn tile_grid(width: i32, height: i32) -> (usize, usize) {
+    let field = search_field(width, height);
+    let top = field.y + field.h + 40;
+    let bottom = power_button(width, height, 0).y - 16;
+    let (columns, rows) = oceans_draw::layout::grid(
+        (width - 2 * 200, bottom - top),
+        (TILE_WIDTH, TILE_HEIGHT),
+        3,
+        10,
+    );
+    (columns as usize, rows as usize)
+}
+
+/// The tiles Launchpad shows: the Terminal and the apps that fit.
+fn max_tiles(width: i32, height: i32) -> usize {
+    let (columns, rows) = tile_grid(width, height);
+    (columns * rows).max(1)
+}
+
 /// Tile `index` of Launchpad (0: the Terminal; then the apps), in a grid
 /// centred under the search field.
 pub fn tile(width: i32, height: i32, index: usize) -> Rect {
     let field = search_field(width, height);
-    let grid = TILE_COLUMNS as i32 * TILE_WIDTH;
-    let (col, row) = (index % TILE_COLUMNS, index / TILE_COLUMNS);
+    let (columns, _) = tile_grid(width, height);
+    let grid = columns as i32 * TILE_WIDTH;
+    let (col, row) = (index % columns, index / columns);
     Rect::new(
         (width - grid) / 2 + col as i32 * TILE_WIDTH,
         field.y + field.h + 40 + row as i32 * TILE_HEIGHT,
@@ -851,25 +876,32 @@ pub fn power_button(width: i32, height: i32, index: i32) -> Rect {
     )
 }
 
-/// A system dialog, in the middle of the area.
+/// A system dialog, in the middle of the area, never wider than it.
 pub fn dialog(width: i32, height: i32) -> Rect {
     let area = area(width, height);
+    let w = DIALOG_WIDTH.min(area.w - 32);
     Rect::new(
-        area.x + (area.w - DIALOG_WIDTH) / 2,
+        area.x + (area.w - w) / 2,
         area.y + (area.h - DIALOG_HEIGHT) / 2,
-        DIALOG_WIDTH,
+        w,
         DIALOG_HEIGHT,
     )
 }
 
+/// The dialog's buttons, from its right end (ADR-0137).
 pub fn allow(width: i32, height: i32) -> Rect {
     let d = dialog(width, height);
-    Rect::new(d.x + 416, d.y + 204, BUTTON_WIDTH, BUTTON_HEIGHT)
+    Rect::new(
+        d.x + d.w - 24 - BUTTON_WIDTH,
+        d.y + 204,
+        BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+    )
 }
 
 pub fn deny(width: i32, height: i32) -> Rect {
-    let d = dialog(width, height);
-    Rect::new(d.x + 280, d.y + 204, BUTTON_WIDTH, BUTTON_HEIGHT)
+    let a = allow(width, height);
+    Rect::new(a.x - 16 - BUTTON_WIDTH, a.y, BUTTON_WIDTH, BUTTON_HEIGHT)
 }
 
 /// The windows the dock shows, in the order they were opened.
@@ -1261,7 +1293,7 @@ impl Desktop {
                     return Hit::Nothing;
                 }
                 // As Launchpad does: a click between the icons closes it.
-                let shown = self.apps.len().min(MAX_TILES - 1);
+                let shown = self.apps.len().min(max_tiles(width, height) - 1);
                 return (0..shown)
                     .find(|&i| tile(width, height, i + 1).contains(x, y))
                     .map_or(Hit::Outside, Hit::StartApp);
@@ -1278,7 +1310,7 @@ impl Desktop {
         }
         // The desktop's icons (ADR-0120), under everything else.
         let items = self.desktop_items().len();
-        if let Some(index) = (0..items).find(|&i| desktop_icon(width, i).contains(x, y)) {
+        if let Some(index) = (0..items).find(|&i| desktop_icon(width, height, i).contains(x, y)) {
             return Hit::DesktopIcon(index);
         }
         Hit::Nothing
@@ -1529,7 +1561,7 @@ impl Desktop {
     fn draw_desktop_icons(&self, canvas: &mut Canvas) {
         let w = canvas.width;
         for (i, (label, id)) in self.desktop_items().iter().enumerate() {
-            let tile = desktop_icon(w, i);
+            let tile = desktop_icon(w, canvas.height, i);
             if self.icon_chosen == Some(i) {
                 canvas.tint(tile, 12, WHITE, 60);
             } else if tile.contains(self.pointer.0, self.pointer.1) {
@@ -2216,7 +2248,7 @@ impl Desktop {
         let t = tile_frame(canvas, 0);
         terminal_icon(canvas, icon_in(t));
         tile_label(canvas, t, "Terminal");
-        for (i, app) in self.apps.iter().take(MAX_TILES - 1).enumerate() {
+        for (i, app) in self.apps.iter().take(max_tiles(w, h) - 1).enumerate() {
             let t = tile_frame(canvas, i + 1);
             let icon = icon_in(t);
             app_icon(canvas, icon, &app.name);
@@ -2228,7 +2260,7 @@ impl Desktop {
         let footer_y = power_button(w, h, 0).y;
         let note = if self.apps.is_empty() {
             String::from("No apps installed yet: the Store, or `app install`")
-        } else if self.apps.len() > MAX_TILES - 1 {
+        } else if self.apps.len() > max_tiles(w, h) - 1 {
             alloc::format!(
                 "{} apps installed; more in the Terminal: app list",
                 self.apps.len()

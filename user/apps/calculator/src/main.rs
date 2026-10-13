@@ -18,6 +18,8 @@ oceans_rt::entry!(main);
 
 const WIDTH: u16 = 280;
 const HEIGHT: u16 = 420;
+/// The smallest it may be resized to (ADR-0137).
+const MIN_SIZE: (u16, u16) = (240, 340);
 const KEYS: [[&str; 4]; 5] = [
     ["C", "+/-", "%", "/"],
     ["7", "8", "9", "*"],
@@ -164,7 +166,7 @@ fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
     }
     ui.input.keys = left;
     // The display.
-    let (w, _) = (ui.area.w, ui.area.h);
+    let (w, h) = (ui.area.w, ui.area.h);
     let screen = Rect::new(12, 12, w - 24, 72);
     ui.surface.round_fill(screen, 12, colour::surface());
     let shown = if calculator.error {
@@ -196,16 +198,18 @@ fn frame(ui: &mut Ui<'_, '_>, calculator: &mut Calculator) {
             screen,
         );
     }
-    // The keys.
+    // The keys fill the window's width, and are as tall as its height
+    // lets five rows be (ADR-0137): never taller than wide.
     let (gap, top) = (8, screen.y + screen.h + 16);
     let size = (w - 24 - 3 * gap) / 4;
+    let tall = ((h - top - 12 - 4 * gap) / 5).min(size - 6).max(24);
     for (row, keys) in KEYS.iter().enumerate() {
         for (col, &key) in keys.iter().enumerate() {
             let r = Rect::new(
                 12 + col as i32 * (size + gap),
-                top + row as i32 * (size - 6 + gap),
+                top + row as i32 * (tall + gap),
                 size,
-                size - 6,
+                tall,
             );
             let primary = matches!(key, "/" | "*" | "-" | "+" | "=");
             if ui.button_in(r, key, primary) {
@@ -220,5 +224,14 @@ fn main(start: Start) -> i64 {
         return oceans_ui::EXIT_BAD_START;
     };
     let mut calculator = Calculator::default();
-    oceans_ui::run(&directory, "", WIDTH, HEIGHT, &mut calculator, frame)
+    oceans_ui::run_resizable(
+        &directory,
+        "",
+        WIDTH,
+        HEIGHT,
+        MIN_SIZE,
+        None,
+        &mut calculator,
+        frame,
+    )
 }

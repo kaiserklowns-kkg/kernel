@@ -72,7 +72,15 @@ fn processes(sysinfo: Handle) -> Vec<Process> {
 fn card(ui: &mut Ui<'_, '_>, r: Rect, title: &str, value: &str) {
     ui.surface.round_fill(r, 10, colour::surface());
     ui.text_at(r.x + 14, r.y + 10, title, Style::Body, colour::muted(), r);
-    ui.text_at(r.x + 14, r.y + 32, value, Style::Title, colour::text(), r);
+    // Large where it fits, else in the body's size (ADR-0137): a narrow
+    // window shows the whole value rather than its start.
+    let style = if ui.measure(value, Style::Title) <= r.w - 28 {
+        Style::Title
+    } else {
+        Style::Strong
+    };
+    let inner = Rect::new(r.x, r.y, r.w - 14, r.h);
+    ui.text_at(r.x + 14, r.y + 32, value, style, colour::text(), inner);
 }
 
 fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {

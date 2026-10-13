@@ -22,6 +22,7 @@ use core::fmt::Write;
 
 use oceans_fs_proto::{Kind, MAX_NAME, Node, flags, tree};
 use oceans_rt::{Directory, Start};
+use oceans_ui::layout::{Bar, Flow};
 use oceans_ui::{Rect, Style, Ui, colour};
 
 oceans_rt::entry!(main);
@@ -292,7 +293,13 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
         Rect::new(bar.x, bar.y + bar.h - 1, bar.w, 1),
         colour::line(),
     );
-    if !files.path.is_empty() && ui.button_in(Rect::new(12, 11, 64, 30), "Back", false) {
+    // Back at the left, the actions at the right, where they are between
+    // (ADR-0137).
+    let mut tools = Bar::new(Rect::new(whole.x + 12, whole.y + 11, whole.w - 24, 30), 12);
+    let back = tools.left(64);
+    let delete_button = tools.right(120);
+    let new_button = tools.right(112);
+    if !files.path.is_empty() && ui.button_in(back, "Back", false) {
         files.path.pop();
         files.stale = true;
     }
@@ -300,29 +307,29 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
     for folder in &files.path {
         let _ = write!(place, " / {folder}");
     }
+    let between = tools.rest(i32::MAX);
     ui.text_at(
-        88,
-        16,
+        between.x,
+        whole.y + 16,
         &place,
         Style::Strong,
         colour::text(),
-        Rect::new(88, 0, whole.w - 360, 52),
+        Rect::new(between.x, whole.y, between.w - 12, 52),
     );
-    let new_button = Rect::new(whole.w - 252, 11, 112, 30);
     if ui.button_in(new_button, "New folder", false) {
         files.naming = !files.naming;
         files.confirm_delete = false;
         *ui.focus = Some(1);
     }
-    let delete_button = Rect::new(whole.w - 132, 11, 120, 30);
     if files.selected.is_some() && ui.button_in(delete_button, "Delete", false) {
         files.confirm_delete = true;
         files.naming = false;
     }
 
-    // The list on the left, the preview on the right.
+    // The list on the left, the preview on the right: the list half of
+    // what the margins leave (340 at the size the window opens at).
     let top = bar.y + bar.h + 12;
-    let list_width = 340;
+    let list_width = ((whole.w - 80) / 2).clamp(220, 440);
     ui.area = Rect::new(whole.x + 12, top, list_width, whole.h - top - 12);
     ui.y = top;
     if files.naming && ui.text_field(1, &mut files.new_folder, "New folder's name, then Enter") {
@@ -413,18 +420,20 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
             let name = entry.name.clone();
             ui.text_at(clip.x, clip.y, &name, Style::Strong, colour::text(), clip);
             // Open (in the app for its kind) and Open with… (ADR-0099).
-            let mut y = clip.y + 28;
-            if ui.button_in(Rect::new(clip.x, y, 80, 30), "Open", true) {
+            // The two buttons on a line, or one under the other where the
+            // panel is narrow (ADR-0137).
+            let mut flow = Flow::new(Rect::new(clip.x, clip.y + 28, clip.w, 0), 30, 10);
+            if ui.button_in(flow.next(80), "Open", true) {
                 files.choosing = None;
                 files.open(ui, index, None);
             }
-            if ui.button_in(Rect::new(clip.x + 90, y, 120, 30), "Open with…", false) {
+            if ui.button_in(flow.next(120), "Open with…", false) {
                 files.choosing = match files.choosing {
                     Some(_) => None,
                     None => Some(ui.openers(&files.home_name(&name))),
                 };
             }
-            y += 40;
+            let mut y = flow.bottom() + 10;
             let mut chosen = None;
             if let Some(apps) = &files.choosing {
                 if apps.is_empty() {
@@ -433,7 +442,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                     y += 26;
                 }
                 for (id, app) in apps {
-                    if ui.button_in(Rect::new(clip.x, y, 240, 30), app, false) {
+                    if ui.button_in(Rect::new(clip.x, y, clip.w.min(240), 30), app, false) {
                         chosen = Some(id.clone());
                     }
                     y += 36;
