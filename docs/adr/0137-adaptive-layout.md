@@ -64,6 +64,13 @@ Pure geometry in logical pixels, host-tested:
     window.
 - **`Ui::row`.** It keeps the value at the right and clips the name to
   what is left, so the two never overlap.
+- **Keys after Tab.** Keys typed after Tab or Shift+Tab wait for the frame
+  that moves the focus, and go to the widget it moved to.
+  - **The bug.** Before, Tab and the keys after it in one batch of events
+    went to the same frame, where Tab had not moved the focus yet. A
+    window still starting (as Settings now is a little longer, asking the
+    screen's size) lost them. Tab then End did not reach the sidebar, and
+    the later keys went one widget too far.
 
 ### The apps lay out in their window
 

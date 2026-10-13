@@ -961,19 +961,33 @@ fn run_window<S>(
                 }
             }
         }
-        // Once with the input, and again (input spent) to show its effect.
-        if draw(&mut window, &mut input, &mut focus, state) {
+        // Keys typed after Tab or Shift+Tab are for the widget it moves
+        // to: they wait for the frame that moves the focus (ADR-0137), so
+        // Tab then End reaches the sidebar however quickly they came.
+        let mut later = Vec::new();
+        loop {
+            if let Some(at) = input.keys.iter().position(|&key| focus_move(key).is_some()) {
+                later = input.keys.split_off(at + 1);
+            }
+            // Once with the input, and again (input spent) to show its
+            // effect.
+            if draw(&mut window, &mut input, &mut focus, state) {
+                input.click = None;
+                input.keys.clear();
+                input.paste = None;
+                input.text.clear();
+                input.wheel = (0, 0);
+                draw(&mut window, &mut input, &mut focus, state);
+            }
             input.click = None;
             input.keys.clear();
             input.paste = None;
             input.text.clear();
             input.wheel = (0, 0);
-            draw(&mut window, &mut input, &mut focus, state);
+            if later.is_empty() {
+                break;
+            }
+            input.keys = core::mem::take(&mut later);
         }
-        input.click = None;
-        input.keys.clear();
-        input.paste = None;
-        input.text.clear();
-        input.wheel = (0, 0);
     }
 }
