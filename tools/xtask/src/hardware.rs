@@ -515,17 +515,17 @@ pub fn smoke_hw(profile: Profile) -> Result {
     ])?;
     prepare_blank(HW_NVME_IMAGE, HW_NVME_SIZE, true)?;
     prepare_blank(HW_SATA_IMAGE, HW_SATA_SIZE, true)?;
-    println!("hardware boot 1 of 6: from the USB image, a blank NVMe SSD and SATA disk");
+    println!("hardware boot 1 of 7: from the USB image, a blank NVMe SSD and SATA disk");
     hw_boot(HW_SCRIPT, HW_EXPECT, BootFrom::Stick)?;
-    println!("hardware boot 2 of 6: the same disks");
+    println!("hardware boot 2 of 7: the same disks");
     hw_boot(HW_REBOOT_SCRIPT, HW_REBOOT_EXPECT, BootFrom::Stick)?;
     // Installed (ADR-0126): the SSD as the installer leaves it, its EFI
     // system partition holding the release, its Oceans root blank. The
     // stick stays, for its update package.
     write_installed_image(&esp, HW_NVME_IMAGE)?;
-    println!("hardware boot 3 of 6: installed, from the NVMe SSD");
+    println!("hardware boot 3 of 7: installed, from the NVMe SSD");
     hw_boot(INSTALLED_SCRIPT, INSTALLED_EXPECT, BootFrom::Nvme)?;
-    println!("hardware boot 4 of 6: installed, the update started first");
+    println!("hardware boot 4 of 7: installed, the update started first");
     hw_boot(
         INSTALLED_REBOOT_SCRIPT,
         INSTALLED_REBOOT_EXPECT,
@@ -541,37 +541,79 @@ pub fn smoke_hw(profile: Profile) -> Result {
         None,
     )?;
     write_windows_image(&release, HW_NVME_IMAGE)?;
-    println!("hardware boot 5 of 6: a Windows PC prepared by Oceans Setup: the installer");
+    println!("hardware boot 5 of 7: a Windows PC prepared by Oceans Setup: the installer");
     hw_boot(&[], WINDOWS_INSTALL_EXPECT, BootFrom::Nvme)?;
-    println!("hardware boot 6 of 6: the installed system's first start");
+    println!("hardware boot 6 of 7: the installed system's first start");
     hw_boot(
         WINDOWS_INSTALLED_SCRIPT,
         WINDOWS_INSTALLED_EXPECT,
         BootFrom::Nvme,
     )?;
+    // Installing over Linux (ADR-0131): the installer staged in Debian's own
+    // EFI system partition. What it installs is the same as boot 6 showed.
+    write_debian_image(&release, HW_NVME_IMAGE)?;
+    println!("hardware boot 7 of 7: a Debian PC prepared by Oceans Setup: the installer");
+    hw_boot(&[], DEBIAN_INSTALL_EXPECT, BootFrom::Nvme)?;
     println!(
         "hardware smoke test passed: booted from the USB image; root on NVMe; SATA; e1000e; xHCI; \
-         updated to slot b; installed on the NVMe SSD and updated there; installed over Windows"
+         updated to slot b; installed on the NVMe SSD and updated there; installed over Windows \
+         and over Linux"
     );
     Ok(())
 }
 
-/// The ESP GUID Oceans Setup chose in the test (its boot entry names it).
-const INSTALLED_ESP_GUID: &str = "5ea0b5ce-0127-4a5e-9c1d-00e5a1b2c3d4";
+/// `cargo xtask setup-linux`: `build/setup-linux`, what tries Oceans Setup
+/// on a Linux PC before there is a release (ADR-0131): Setup for Linux,
+/// and a release of this tree signed with the test's release key (whose
+/// seed is public: a test install, not one to keep).
+pub fn setup_linux(profile: Profile) -> Result {
+    let key = release::test_release_key();
+    let keys = release::ImageKeys::release(&key);
+    let esp = build_image_for(profile, None, Setup::Hardware, &keys)?;
+    let package = system_package(
+        &esp,
+        "0.1.0",
+        &key,
+        "Oceans, a test release for Oceans Setup on Linux",
+        None,
+    )?;
+    let dir = root().join("build").join("setup-linux");
+    publish_test_release(&package, &dir)?;
+    let program = release::build_setup_linux()?;
+    fs::write(dir.join(release::SETUP_LINUX), program)
+        .map_err(|e| format!("{}: {e}", release::SETUP_LINUX))?;
+    let command = format!(
+        "sudo ./{} --from . --key {} \"{}\"",
+        release::SETUP_LINUX,
+        key.public_hex(),
+        key.publisher
+    );
+    let readme = format!(
+        "Oceans Setup on Linux, with a test release (ADR-0131)\n\n\
+         It erases the PC's NVMe SSD at the restart: Linux and everything on it.\n\n\
+         Copy this folder to the PC (a USB stick will do), then in it:\n\n\
+         \x20   chmod +x {}\n\
+         \x20   {command}\n\n\
+         The release here trusts the test key, whose seed is public: fine for\n\
+         trying Oceans, not for keeping. A published release needs no --from\n\
+         or --key.\n",
+        release::SETUP_LINUX
+    );
+    fs::write(dir.join("README.txt"), readme).map_err(|e| format!("README.txt: {e}"))?;
+    println!(
+        "{} is ready: copy it to the Linux PC, then in it:",
+        dir.display()
+    );
+    println!("    chmod +x {}", release::SETUP_LINUX);
+    println!("    {command}");
+    Ok(())
+}
 
-/// A PC with Windows as Oceans Setup leaves it before restarting (ADR-0128)
-/// at `path`: Windows' ESP (its boot manager, no fallback loader), the
-/// Microsoft reserved partition, C: (a blank stand-in), and the staging
-/// partition Setup made, FAT32, holding what Setup stages for `package`
-/// (Oceans Setup's dry run writes it).
-fn write_windows_image(package: &[u8], path: &str) -> Result {
-    let build = root().join("build");
-    // The release as published, signed with the test's release key; then
-    // Oceans Setup itself checks it and stages it (its dry run: all of it
-    // but Windows' disk and firmware calls).
-    let published = build.join("setup-release");
-    let _ = fs::remove_dir_all(&published);
-    fs::create_dir_all(&published).map_err(|e| format!("{}: {e}", published.display()))?;
+/// The release `package` as published (signed with the test's release
+/// key), in `dir`: the package, `SHA256SUMS` and its signature.
+pub fn publish_test_release(package: &[u8], dir: &Path) -> Result {
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let name = "oceans-0.1.0-alpha.opk";
     let sums = format!("{}  {name}\n", oceans_dev::release::sha256_hex(package));
     let key = release::test_release_key();
@@ -583,13 +625,22 @@ fn write_windows_image(package: &[u8], path: &str) -> Result {
             oceans_dev::release::sign_checksums(&key, &sums).into_bytes(),
         ),
     ] {
-        fs::write(published.join(file), bytes).map_err(|e| format!("{file}: {e}"))?;
+        fs::write(dir.join(file), bytes).map_err(|e| format!("{file}: {e}"))?;
     }
-    let staging = build.join("staging");
-    let _ = fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+/// Oceans Setup checks `package`, as published, and stages it into `out`
+/// (its dry run: all of it but the PC's disk and firmware calls, the same
+/// on Windows and Linux). `out` may hold files already (another system's
+/// EFI system partition): they stay.
+fn stage_with_setup(package: &[u8], out: &Path) -> Result<PathBuf> {
+    let published = root().join("build").join("setup-release");
+    publish_test_release(package, &published)?;
+    let key = release::test_release_key();
     let status = cargo()
         .args(["run", "--quiet", "-p", "oceans-setup", "--", "--dry-run"])
-        .arg(&staging)
+        .arg(out)
         .arg("--from")
         .arg(&published)
         .args([
@@ -604,6 +655,66 @@ fn write_windows_image(package: &[u8], path: &str) -> Result {
     if !status.success() {
         return Err(format!("Oceans Setup's dry run failed ({status})"));
     }
+    Ok(out.to_path_buf())
+}
+
+/// A PC with Debian as Oceans Setup leaves it before restarting (ADR-0131)
+/// at `path`: Debian's EFI system partition, holding its own loader and the
+/// installer Setup staged beside it, and Linux's root (a blank stand-in).
+fn write_debian_image(package: &[u8], path: &str) -> Result {
+    let esp = root().join("build").join("debian-esp");
+    let _ = fs::remove_dir_all(&esp);
+    let debian = esp.join("EFI").join("debian");
+    fs::create_dir_all(&debian).map_err(|e| format!("{}: {e}", debian.display()))?;
+    fs::write(debian.join("grubx64.efi"), b"GRUB (a stand-in)")
+        .map_err(|e| format!("grubx64.efi: {e}"))?;
+    stage_with_setup(package, &esp)?;
+    let guid = |text| oceans_install::parse_guid(text).expect("a GUID");
+    disk_image::gpt_image(
+        &root().join(path),
+        &[
+            disk_image::Volume {
+                kind: oceans_gpt::EFI_SYSTEM,
+                name: "EFI system partition",
+                label: "ESP",
+                mib: 400,
+                sources: vec![esp.join("EFI"), esp.join("oceans"), esp.join("limine.conf")],
+            },
+            disk_image::Volume {
+                kind: guid("0fc63daf-8483-4772-8e79-3d69d8477de4"),
+                name: "Linux filesystem",
+                label: "",
+                mib: 1300,
+                sources: Vec::new(),
+            },
+        ],
+        b"a Debian PC",
+    )
+}
+
+/// The installer's boot from Debian's EFI system partition.
+const DEBIAN_INSTALL_EXPECT: &[Expect] = &[
+    Expect::Contains("boot mode: install"),
+    Expect::Contains("installer: started from the SSD's partition \"EFI system partition\""),
+    Expect::Contains(
+        "installer: Oceans 0.1.0 alpha from Oceans Test Release, verified; installing over the whole SSD",
+    ),
+    Expect::Contains("installer: Oceans 0.1.0 alpha is installed; restarting into it"),
+];
+
+/// The ESP GUID Oceans Setup chose in the test (its boot entry names it).
+const INSTALLED_ESP_GUID: &str = "5ea0b5ce-0127-4a5e-9c1d-00e5a1b2c3d4";
+
+/// A PC with Windows as Oceans Setup leaves it before restarting (ADR-0128)
+/// at `path`: Windows' ESP (its boot manager, no fallback loader), the
+/// Microsoft reserved partition, C: (a blank stand-in), and the staging
+/// partition Setup made, FAT32, holding what Setup stages for `package`
+/// (Oceans Setup's dry run writes it).
+fn write_windows_image(package: &[u8], path: &str) -> Result {
+    let build = root().join("build");
+    let staging = build.join("staging");
+    let _ = fs::remove_dir_all(&staging);
+    stage_with_setup(package, &staging)?;
     let windows = build.join("windows-esp");
     let manager = windows.join("EFI").join("Microsoft").join("Boot");
     fs::create_dir_all(&manager).map_err(|e| format!("{}: {e}", manager.display()))?;

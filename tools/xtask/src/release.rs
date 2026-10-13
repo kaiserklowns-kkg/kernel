@@ -190,6 +190,7 @@ fn published_key_matches(published: &str, key: &DeveloperKey) -> bool {
 /// release.keys                     the release key's public half
 /// BUILD-INFO                       the commit it was built from
 /// OceansSetup.exe                  installs it over Windows, from the web (ADR-0128)
+/// OceansSetup-linux                the same over Linux, from a terminal (ADR-0131)
 /// SHA256SUMS
 /// SHA256SUMS.sig                   the checksums, signed (ADR-0075)
 /// ```
@@ -271,6 +272,8 @@ pub fn release() -> Result {
     // Oceans Setup (ADR-0128): installs this release from the web over a
     // Windows PC; built for Windows, where it runs.
     files.push(("OceansSetup.exe".to_string(), build_setup()?));
+    // And over a Linux PC (ADR-0131), from a terminal.
+    files.push((SETUP_LINUX.to_string(), build_setup_linux()?));
     // The same release, signed for Secure Boot: a selector and one slot
     // (ADR-0092).
     if let Some(secure_boot_key) = &secure_boot_key {
@@ -300,6 +303,41 @@ pub fn release() -> Result {
         key.public_hex()
     );
     Ok(())
+}
+
+/// Oceans Setup for Linux (ADR-0131), as a release carries it.
+pub const SETUP_LINUX: &str = "OceansSetup-linux";
+
+/// Oceans Setup for Linux (ADR-0131): one static program
+/// (`x86_64-unknown-linux-musl`), linked by Rust's own `rust-lld` on any
+/// host, without debug information.
+pub fn build_setup_linux() -> Result<Vec<u8>> {
+    const TARGET: &str = "x86_64-unknown-linux-musl";
+    let status = cargo()
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "oceans-setup",
+            "--target",
+            TARGET,
+        ])
+        .env("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER", "rust-lld")
+        .env("CARGO_PROFILE_RELEASE_DEBUG", "0")
+        .env("CARGO_PROFILE_RELEASE_STRIP", "symbols")
+        .status()
+        .map_err(|e| format!("cannot build Oceans Setup for Linux: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Oceans Setup did not build for {TARGET} (`rustup target add {TARGET}`)"
+        ));
+    }
+    let program = root()
+        .join("target")
+        .join(TARGET)
+        .join("release")
+        .join("OceansSetup");
+    fs::read(&program).map_err(|e| format!("{}: {e}", program.display()))
 }
 
 /// Oceans Setup for Windows (ADR-0128), built in release mode for

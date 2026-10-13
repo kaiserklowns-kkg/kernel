@@ -1738,6 +1738,8 @@ commands:
             Limine and a changed kernel are refused
   release   build/release: a release's USB image, update and checksums,
             trusting only the release key (ADR-0072)
+  setup-linux  build/setup-linux: Oceans Setup for Linux and a test release
+            of this tree, to try installing over Linux (ADR-0131)
 
 environment:
   OCEANS_QEMU   path to qemu-system-x86_64
@@ -1778,6 +1780,7 @@ fn main() -> ExitCode {
         Some("usb-secure-boot") => hardware::usb_secure_boot(profile),
         Some("smoke-secure-boot") => secure_boot::smoke_secure_boot(profile),
         Some("release") => release::release(),
+        Some("setup-linux") => hardware::setup_linux(profile),
         Some("help" | "--help" | "-h") | None => {
             println!("{USAGE}");
             Ok(())

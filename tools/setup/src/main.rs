@@ -16,6 +16,10 @@
 //! Until the restart nothing is lost: cancelled, Windows still starts, and
 //! the small partition can be deleted.
 //!
+//! On Linux (ADR-0131) it runs in a terminal as root, the same steps; the
+//! installer goes into the EFI system partition Linux already has, and the
+//! boot entries through efivarfs (`linux`, `linux_plan`).
+//!
 //! `OceansSetup --dry-run OUT --from DIR [--key HEX PUBLISHER] [--esp GUID]` (any
 //! system) checks a release in DIR and writes the staging files into OUT,
 //! changing nothing else: for tests and for the curious.
@@ -27,9 +31,13 @@
 mod efi;
 #[cfg(windows)]
 mod gui;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod linux_plan;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod plan;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod release;
 #[cfg(windows)]
 mod windows;
@@ -49,10 +57,12 @@ fn main() {
     }
     #[cfg(windows)]
     gui::run();
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    std::process::exit(linux::run(&args));
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         eprintln!(
-            "Oceans Setup runs on Windows; elsewhere only: \
+            "Oceans Setup runs on Windows and Linux; elsewhere only: \
              OceansSetup --dry-run OUT --from DIR [--key HEX]"
         );
         std::process::exit(2);
