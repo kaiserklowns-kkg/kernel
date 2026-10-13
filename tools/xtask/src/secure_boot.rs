@@ -198,8 +198,8 @@ pub fn write_secure_usb_image(esp: &Path, key: &SecureBootKey) -> Result {
                 kind: oceans_gpt::EFI_SYSTEM,
                 name: "EFI system partition",
                 label: "OCEANS",
-                // Room for an update file.
-                mib: (release_mib + 48).max(64),
+                // Room for update files: the smoke test puts two there.
+                mib: (release_mib * 2 + 48).max(64),
                 sources: children(&selector)?,
             },
             super::disk_image::Volume {

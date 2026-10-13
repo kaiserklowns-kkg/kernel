@@ -1,6 +1,6 @@
 [package]
 name = "music-app"
-description = "Music: the WAV files in /home, played, shipped with the system (ADR-0080, ADR-0094)"
+description = "Music: MP3 and WAV files in /home and radio stations, played, shipped with the system (ADR-0080, ADR-0094, ADR-0135)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -19,3 +19,5 @@ oceans-display-proto.workspace = true
 oceans-abi.workspace = true
 oceans-audio-proto.workspace = true
 oceans-wav.workspace = true
+oceans-mp3.workspace = true
+oceans-web.workspace = true

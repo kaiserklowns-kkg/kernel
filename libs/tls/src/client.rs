@@ -100,6 +100,13 @@ impl<T: Transport> Client<T> {
         Ok(client)
     }
 
+    /// The transport, e.g. to change how long its reads wait. A read
+    /// that fails in the transport (nothing yet) can be tried again: what
+    /// was received stays.
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// The negotiated protocol version and cipher suite, for display.
     pub fn describe(&self) -> Option<(rustls::ProtocolVersion, rustls::CipherSuite)> {
         let version = self.connection.protocol_version()?;

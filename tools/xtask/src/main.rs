@@ -1008,6 +1008,15 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 0",
     b"@monitor device_del hub",
     b"run lsusb out use:usb\r\n",
+    // The radio (ADR-0135): Music started with a station's address, a
+    // SHOUTCAST-style server on the host (`ICY 200 OK`) sending 2 s of an
+    // 880 Hz tone in MP3, then closing. Music plays it, says so (the log
+    // has what it tells the desktop) and stops when the station does; the
+    // host finds the tone in the recording.
+    b"app start app.oceans.music http://10.0.2.2:$HTTP/radio\r\n",
+    b"@wait display: Music plays 10.0.2.2",
+    b"@wait display: Music stopped",
+    b"app stop app.oceans.music\r\n",
     // The boot ends as a user would end it (ADR-0085): init stops the
     // system and, in test mode, hands the end to the kernel.
     b"reboot\r\n",
@@ -1461,7 +1470,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("app: started app.oceans.viewer"),
     Expect::Contains("core: installed music.opk from the system image"),
     // Music (ADR-0094): `sound` is granted without asking, as a player end.
-    Expect::Contains("core: audit: started app.oceans.music 1.0.2 with window, files, sound"),
+    Expect::Contains(
+        "core: audit: started app.oceans.music 1.1.0 with window, files, sound, network",
+    ),
     Expect::Contains("core: ready, 7 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
@@ -2487,12 +2498,16 @@ fn input_audiodev(headless: bool) -> String {
 
 /// The tone Music plays in the smoke test (ADR-0094), from `tone_wav`.
 const MUSIC_HZ: f64 = 660.0;
+/// The radio station's tone (ADR-0135), and its MP3: 2 s, 44.1 kHz stereo.
+const RADIO_HZ: f64 = 880.0;
+const RADIO_MP3: &[u8] = include_bytes!("../../../libs/mp3/testdata/tone-880.mp3");
 
-/// The two tones the smoke test plays, found in what QEMU recorded: the
-/// shell's (`play tone 440 2`) and Music's (`MUSIC_HZ`, ADR-0094). The
-/// recording is cut into tenths of a second; a loud tenth is counted for
-/// the tone its zero crossings say (QEMU may record the two back to back,
-/// with no quiet between). Each needs a second.
+/// The three tones the smoke test plays, found in what QEMU recorded: the
+/// shell's (`play tone 440 2`), Music's (`MUSIC_HZ`, ADR-0094) and the
+/// radio's (`RADIO_HZ`, ADR-0135). The recording is cut into tenths of a
+/// second; a loud tenth is counted for the tone its zero crossings say
+/// (QEMU may record them back to back, with no quiet between). Each needs
+/// a second.
 fn check_smoke_audio() -> Result {
     let path = root().join(SMOKE_AUDIO);
     let wav = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -2517,7 +2532,7 @@ fn check_smoke_audio() -> Result {
     // Tenths of a second, loud (most samples above a quiet hiss) and at
     // about one of the two pitches.
     let tenth = (rate / 10).max(1) as usize;
-    let (mut shell_tone, mut music_tone, mut other) = (0, 0, 0);
+    let (mut shell_tone, mut music_tone, mut radio_tone, mut other) = (0, 0, 0, 0);
     for window in samples.chunks_exact(tenth) {
         let loud = window.iter().filter(|s| s.abs() > 2000).count();
         if loud * 2 < tenth {
@@ -2532,25 +2547,32 @@ fn check_smoke_audio() -> Result {
             shell_tone += 1;
         } else if ((MUSIC_HZ - 40.0)..(MUSIC_HZ + 40.0)).contains(&hz) {
             music_tone += 1;
+        } else if ((RADIO_HZ - 40.0)..(RADIO_HZ + 40.0)).contains(&hz) {
+            radio_tone += 1;
         } else {
             other += 1;
         }
     }
     // Each tone is 2 s long: more means the output repeated itself (a
     // starved cyclic buffer looping over what it had played, ADR-0094).
-    if !(10..=24).contains(&shell_tone) || !(10..=24).contains(&music_tone) {
+    let tones = [shell_tone, music_tone, radio_tone];
+    if !tones.iter().all(|tenths| (10..=24).contains(tenths)) {
         return Err(format!(
             "the recording ({SMOKE_AUDIO}) lacks a tone or repeats one: {:.1} s at 440 Hz (the shell's), \
-             {:.1} s at {MUSIC_HZ:.0} Hz (Music's), {:.1} s of other sound; each should be 1 to 2.4 s",
+             {:.1} s at {MUSIC_HZ:.0} Hz (Music's), {:.1} s at {RADIO_HZ:.0} Hz (the radio's), \
+             {:.1} s of other sound; each should be 1 to 2.4 s",
             f64::from(shell_tone) / 10.0,
             f64::from(music_tone) / 10.0,
+            f64::from(radio_tone) / 10.0,
             f64::from(other) / 10.0
         ));
     }
     println!(
-        "sound: {:.1} s of the 440 Hz tone, {:.1} s of Music's {MUSIC_HZ:.0} Hz and {:.1} s of other sound in {SMOKE_AUDIO_CHECKED}",
+        "sound: {:.1} s of the 440 Hz tone, {:.1} s of Music's {MUSIC_HZ:.0} Hz, {:.1} s of the radio's \
+         {RADIO_HZ:.0} Hz and {:.1} s of other sound in {SMOKE_AUDIO_CHECKED}",
         f64::from(shell_tone) / 10.0,
         f64::from(music_tone) / 10.0,
+        f64::from(radio_tone) / 10.0,
         f64::from(other) / 10.0
     );
     Ok(())
@@ -4894,6 +4916,15 @@ fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
         "/big" => fixed("200 OK", &big_body()),
         "/picture.png" => fixed("200 OK", &picture_png()),
         "/tone.wav" => fixed("200 OK", &tone_wav()),
+        // A radio station (ADR-0135) as SHOUTCAST answers, sending until it
+        // closes: 2 s of an 880 Hz tone in MP3.
+        "/radio" => {
+            let mut response =
+                b"ICY 200 OK\r\nicy-name: Oceans Test Radio\r\nContent-Type: audio/mpeg\r\n\r\n"
+                    .to_vec();
+            response.extend_from_slice(RADIO_MP3);
+            response
+        }
         "/ca.pem" => fixed("200 OK", TLS_TEST_CA),
         "/models-ca.pem" => fixed("200 OK", MODELS_CA),
         "/v1/chat/completions" => {

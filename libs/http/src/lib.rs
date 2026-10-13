@@ -15,6 +15,8 @@
 pub const MAX_HEAD: usize = 8 * 1024;
 /// Longest redirect target kept.
 pub const MAX_LOCATION: usize = 512;
+/// Longest `Content-Type` kept.
+pub const MAX_CONTENT_TYPE: usize = 64;
 const MAX_CHUNK_LINE: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +181,8 @@ pub struct Head {
     pub chunked: bool,
     location: [u8; MAX_LOCATION],
     location_len: usize,
+    content_type: [u8; MAX_CONTENT_TYPE],
+    content_type_len: usize,
 }
 
 impl Head {
@@ -190,6 +194,13 @@ impl Head {
     pub fn location(&self) -> Option<&str> {
         (self.location_len > 0)
             .then(|| core::str::from_utf8(&self.location[..self.location_len]).ok())
+            .flatten()
+    }
+
+    /// The `Content-Type` header (cut to [`MAX_CONTENT_TYPE`] bytes).
+    pub fn content_type(&self) -> Option<&str> {
+        (self.content_type_len > 0)
+            .then(|| core::str::from_utf8(&self.content_type[..self.content_type_len]).ok())
             .flatten()
     }
 
@@ -416,6 +427,8 @@ fn parse_head(bytes: &[u8]) -> Result<Head, HttpError> {
     let rest = status_line
         .strip_prefix("HTTP/1.1 ")
         .or_else(|| status_line.strip_prefix("HTTP/1.0 "))
+        // SHOUTCAST radio servers answer as `ICY` (HTTP/1.0 otherwise).
+        .or_else(|| status_line.strip_prefix("ICY "))
         .ok_or(HttpError::Malformed)?;
     let (code, reason) = rest.split_once(' ').unwrap_or((rest, ""));
     if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
@@ -429,6 +442,8 @@ fn parse_head(bytes: &[u8]) -> Result<Head, HttpError> {
         chunked: false,
         location: [0; MAX_LOCATION],
         location_len: 0,
+        content_type: [0; MAX_CONTENT_TYPE],
+        content_type_len: 0,
     };
     let reason = &reason.as_bytes()[..reason.len().min(64)];
     head.reason[..reason.len()].copy_from_slice(reason);
@@ -458,6 +473,10 @@ fn parse_head(bytes: &[u8]) -> Result<Head, HttpError> {
             } else {
                 return Err(HttpError::Unsupported); // e.g. gzip without chunked
             }
+        } else if name.eq_ignore_ascii_case("content-type") {
+            let value = &value.as_bytes()[..value.len().min(MAX_CONTENT_TYPE)];
+            head.content_type[..value.len()].copy_from_slice(value);
+            head.content_type_len = value.len();
         } else if name.eq_ignore_ascii_case("location") {
             let value = &value.as_bytes()[..value.len().min(MAX_LOCATION)];
             head.location[..value.len()].copy_from_slice(value);
@@ -631,6 +650,16 @@ mod tests {
         assert_eq!(body, b"hello", "bytes after the body are ignored");
         let (head, body) = every_split(b"HTTP/1.0 404 Not Found\r\ncontent-length: 0\r\n\r\n");
         assert_eq!((head.status, body.len()), (404, 0));
+        assert_eq!(head.content_type(), None);
+        // A SHOUTCAST radio server: `ICY`, the stream until it closes.
+        let (head, body) = every_split(
+            b"ICY 200 OK\r\nicy-name: Test\r\nContent-Type: audio/mpeg\r\n\r\n\xff\xfb",
+        );
+        assert_eq!(
+            (head.status, head.content_type()),
+            (200, Some("audio/mpeg"))
+        );
+        assert_eq!(body, b"\xff\xfb");
         assert_eq!(
             run(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort", 3).err(),
             Some(HttpError::Truncated)

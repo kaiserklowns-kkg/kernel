@@ -141,5 +141,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0132](0132-ps2-touchpad.md) | The PS/2 touchpad and mouse (ABI 22): the i8042's auxiliary port in the kernel (the wheel knock, IRQ 12 on the keyboard's vector), `oceans_input::ps2`, `DISPLAY_POINTER` to the desktop; the keyboard no longer blocked by touchpad bytes | Accepted |
 | [0133](0133-shell-line-editing.md) | The shell's history and Tab completion (`oceans-line`: Up/Down recall lines, Tab completes commands, programs and paths) | Accepted |
 | [0134](0134-larger-files.md) | Files up to 256 MiB (OceansFS's per-file limit raised from 16 MiB; the format unchanged) | Accepted |
+| [0135](0135-mp3-and-radio.md) | MP3 and the radio in Music (`oceans-mp3` on nanomp3-core, `oceans-web` for apps, `ICY` heads; stations kept in `Music/Stations.txt`) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

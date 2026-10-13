@@ -4,15 +4,16 @@
 # image.
 id = app.oceans.music
 name = Music
-version = 1.0.2
+version = 1.1.0
 publisher = {{PUBLISHER}}
-description = Your music: the WAV files in Home, played
+description = Your music: the MP3 and WAV files in Home, and radio stations, played
 architecture = x86_64
 api = 1
 entry = music
 permission = window
 permission = files: find and read your songs
 permission = sound: play your songs
+permission = network: play radio stations
 # The files it opens from Files (ADR-0099).
-opens = wav
+opens = wav mp3
 source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/music

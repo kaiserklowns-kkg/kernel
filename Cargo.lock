@@ -476,6 +476,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanomp3-core"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63fa2238e662d3d3c1a71168b3278f23422cf9bf76f6943ee6b1c2581d74eb5c"
+
+[[package]]
 name = "noto-sans-mono-bitmap"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -709,6 +715,14 @@ version = "0.1.0"
 [[package]]
 name = "oceans-memory-map"
 version = "0.1.0"
+
+[[package]]
+name = "oceans-mp3"
+version = "0.1.0"
+dependencies = [
+ "nanomp3-core",
+ "oceans-wav",
+]
 
 [[package]]
 name = "oceans-net"

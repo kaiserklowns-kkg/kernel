@@ -232,8 +232,21 @@ impl Service {
                     match window_of(data)
                         .map(|id| self.windows.set_now_playing(got.badge, id, &data[4..]))
                     {
-                        // The sound panel shows it.
-                        Some(Ok(())) => (Status::Ok, true),
+                        // The sound panel shows it; the log says so.
+                        Some(Ok(())) => {
+                            use oceans_window::proto::{now_playing, playing};
+                            if let Some((state, title)) = data.get(4..).and_then(now_playing) {
+                                let app =
+                                    self.owners.get(&got.badge).map_or("?", |o| o.app.as_str());
+                                let state = match state {
+                                    playing::PLAYING => "plays",
+                                    playing::PAUSED => "paused",
+                                    _ => "stopped",
+                                };
+                                say(self.log, format_args!("display: {app} {state} {title}"));
+                            }
+                            (Status::Ok, true)
+                        }
                         Some(Err(status)) => (status, false),
                         None => (Status::BadRequest, false),
                     }
