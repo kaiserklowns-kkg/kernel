@@ -351,6 +351,8 @@ pub struct Desktop {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
     pub app: String,
+    /// The app's verified id (ADR-0139), for its icon.
+    pub app_id: String,
     pub text: String,
     pub at_ms: u64,
 }
@@ -393,6 +395,8 @@ pub const MAX_FOUND: usize = 9;
 /// An app window to draw.
 pub struct WindowView<'a> {
     pub frame: &'a Frame,
+    /// Its app's verified id (ADR-0139), for its icon.
+    pub app_id: &'a str,
     /// Its pixels and their width and height, once the app has presented
     /// them (a resized window's may still have the old size).
     pub pixels: Option<(*const u32, usize, usize)>,
@@ -1589,7 +1593,7 @@ impl Desktop {
             if id == FILES_APP && label == "Home" {
                 folder_icon(canvas, icon);
             } else {
-                app_icon(canvas, icon, label);
+                app_icon(canvas, icon, id, label);
             }
             let lw = canvas.measure(label, Font::Body).min(tile.w - 8);
             let shade = Rect::new(tile.x + (tile.w - lw) / 2 - 6, tile.y + 60, lw + 12, 22);
@@ -1668,7 +1672,7 @@ impl Desktop {
             let card = notice_card(canvas.width, count, i);
             canvas.round_fill(card, 14, colour::surface());
             let icon = Rect::new(card.x + 10, card.y + 12, 36, 36);
-            app_icon(canvas, icon, &notice.app);
+            app_icon(canvas, icon, &notice.app_id, &notice.app);
             let text = Rect::new(card.x + 56, card.y, card.w - 66, card.h);
             let when = ago(notice.at_ms, now_ms);
             let ww = canvas.measure(&when, Font::Body);
@@ -1956,9 +1960,9 @@ impl Desktop {
             let ink = if *on { WHITE } else { colour::text() };
             match i {
                 0 => glyph_at(canvas, (cx, cy), 20, |s, r| icon::wifi(s, r, 3, ink, ink)),
-                1 => moon_icon(canvas, cx, cy, ink, fill),
-                2 => lock_icon(canvas, cx, cy, ink, fill),
-                _ => gear_icon(canvas, cx, cy, ink, fill),
+                1 => moon_icon(canvas, cx, cy, ink),
+                2 => lock_icon(canvas, cx, cy, ink),
+                _ => gear_icon(canvas, cx, cy, ink),
             }
             let lw = canvas.measure(name, Font::Body);
             let label = Rect::new(cx - 40, r.y + r.h + 2, 80, 18);
@@ -2185,17 +2189,18 @@ impl Desktop {
                 // A kept app (ADR-0109): marked while one of its windows is
                 // open.
                 dock::Entry::Pinned(index) => {
-                    let name = kept.get(index).map_or("?", |&(_, name)| name);
+                    let (app_id, name) =
+                        kept.get(index).map_or(("", "?"), |&(id, name)| (id, name));
                     let open = shown.iter().any(|view| view.frame.app == name);
                     let r = item(canvas, i + 1, name, open);
-                    app_icon(canvas, r, name);
+                    app_icon(canvas, r, app_id, name);
                 }
                 dock::Entry::Window(id) => {
                     let Some(view) = shown.iter().find(|view| view.frame.id == id) else {
                         continue;
                     };
                     let r = item(canvas, i + 1, &view.frame.app, true);
-                    app_icon(canvas, r, &view.frame.app);
+                    app_icon(canvas, r, view.app_id, &view.frame.app);
                     if view.frame.minimized {
                         // Put away: the icon is a little faded.
                         canvas.tint(r, 12, colour::glass(), 90);
@@ -2269,7 +2274,7 @@ impl Desktop {
         for (i, app) in self.apps.iter().take(max_tiles(w, h) - 1).enumerate() {
             let t = tile_frame(canvas, i + 1);
             let icon = icon_in(t);
-            app_icon(canvas, icon, &app.name);
+            app_icon(canvas, icon, &app.id, &app.name);
             if app.running {
                 canvas.circle(icon.x + icon.w - 2, icon.y + 2, 5, colour::success());
             }
@@ -2336,8 +2341,11 @@ impl Desktop {
             let icon = Rect::new(row.x + 8, row.y + 4, 24, 24);
             let (name, kind) = match found {
                 Found::App(index) => {
-                    let name = self.apps.get(*index).map_or("?", |a| a.name.as_str());
-                    app_icon(canvas, icon, name);
+                    let (app_id, name) = self
+                        .apps
+                        .get(*index)
+                        .map_or(("", "?"), |a| (a.id.as_str(), a.name.as_str()));
+                    app_icon(canvas, icon, app_id, name);
                     (String::from(name), String::from("App"))
                 }
                 Found::File(path) => {
@@ -2568,9 +2576,15 @@ fn tile_label(canvas: &mut Canvas, tile: Rect, name: &str) {
     );
 }
 
-/// An app's icon: a rounded square in its colour (chosen by its name, which
-/// Wave and Launchpad both know), with its initial.
-fn app_icon(canvas: &mut Canvas, r: Rect, name: &str) {
+/// An app's icon (ADR-0139): a system app's own picture, chosen by its
+/// verified id (`id`), as macOS and Windows show their apps'; any other
+/// app's a rounded square in its colour (chosen by its name, which Wave
+/// and Launchpad both know), with its initial.
+fn app_icon(canvas: &mut Canvas, r: Rect, id: &str, name: &str) {
+    if let Some(app) = oceans_draw::apps::for_app(id) {
+        canvas.with_surface(|s| oceans_draw::apps::draw(s, r, app));
+        return;
+    }
     let hash = name.bytes().fold(0usize, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(byte.into())
     });
@@ -2624,20 +2638,9 @@ fn user_picture(canvas: &mut Canvas, r: Rect, name: &str, index: usize, chosen: 
     }
 }
 
-/// The Terminal's icon: a dark rounded square with a prompt.
+/// The Terminal's icon (ADR-0139): a dark tile with a green prompt.
 fn terminal_icon(canvas: &mut Canvas, r: Rect) {
-    canvas.round_fill(r, r.w / 4, Rgb(0x3a_3a_3c));
-    canvas.round_fill(inset(r, 2), r.w / 4 - 2, TERMINAL_BACKGROUND);
-    let font = if r.w >= 40 { Font::Title } else { Font::Strong };
-    let width = canvas.measure(">_", font);
-    canvas.text(
-        r.x + (r.w - width) / 2,
-        r.y + (r.h - font.height()) / 2 - 1,
-        ">_",
-        font,
-        Rgb(0x004c_d964),
-        r,
-    );
+    canvas.with_surface(|s| oceans_draw::apps::draw(s, r, oceans_draw::apps::App::Terminal));
 }
 
 /// Where the level shows after a volume key (ADR-0101): above Wave's
@@ -2751,62 +2754,43 @@ fn signal_icon(canvas: &mut Canvas, cx: i32, cy: i32, rssi: i8, ink: Rgb) {
     });
 }
 
-/// Back: a chevron pointing left, about 12 pixels.
+/// Back: a chevron pointing left, about 14 pixels.
 fn chevron_left(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
-    // The point at the left, the arms going right and away.
-    for i in 0..7 {
-        canvas.fill(Rect::new(cx - 3 + i, cy - i, 2, 2), ink);
-        canvas.fill(Rect::new(cx - 3 + i, cy + i, 2, 2), ink);
-    }
+    glyph_at(canvas, (cx, cy), 18, |s, r| icon::back(s, r, ink));
 }
 
-/// Dark (ADR-0118): a crescent, cut from a circle by one in `bg`.
-fn moon_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb, bg: Rgb) {
-    canvas.circle(cx, cy, 9, ink);
-    canvas.circle(cx + 5, cy - 4, 8, bg);
+/// Dark (ADR-0118, ADR-0139): a crescent moon.
+fn moon_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    glyph_at(canvas, (cx, cy), 22, |s, r| icon::moon(s, r, ink));
 }
 
-/// Lock (ADR-0118): a padlock.
-fn lock_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb, bg: Rgb) {
-    canvas.circle(cx, cy - 4, 6, ink);
-    canvas.circle(cx, cy - 4, 4, bg);
-    canvas.round_fill(Rect::new(cx - 8, cy - 2, 17, 12), 3, ink);
-    canvas.circle(cx, cy + 3, 2, bg);
+/// Lock (ADR-0118, ADR-0139): a padlock.
+fn lock_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    glyph_at(canvas, (cx, cy), 22, |s, r| icon::lock(s, r, ink));
 }
 
-/// Settings (ADR-0118): a gear.
-fn gear_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb, bg: Rgb) {
-    canvas.fill(Rect::new(cx - 10, cy - 2, 21, 5), ink);
-    canvas.fill(Rect::new(cx - 2, cy - 10, 5, 21), ink);
-    for (dx, dy) in [(-6, -6), (6, -6), (-6, 6), (6, 6)] {
-        canvas.circle(cx + dx, cy + dy, 3, ink);
-    }
-    canvas.circle(cx, cy, 8, ink);
-    canvas.circle(cx, cy, 3, bg);
+/// Settings (ADR-0118, ADR-0139): a gear.
+fn gear_icon(canvas: &mut Canvas, cx: i32, cy: i32, ink: Rgb) {
+    glyph_at(canvas, (cx, cy), 22, |s, r| icon::gear(s, r, ink));
 }
 
-/// Play: a triangle pointing right, about 14 pixels.
+/// Play, Pause, Next and Previous (ADR-0139), about 18 pixels.
 fn play_icon(canvas: &mut Canvas, cx: i32, cy: i32) {
-    for row in -7i32..=7 {
-        let len = 13 - row.abs() * 13 / 7;
-        canvas.fill(Rect::new(cx - 5, cy + row, len, 1), colour::text());
-    }
+    glyph_at(canvas, (cx, cy), 18, |s, r| {
+        icon::play(s, r, colour::text())
+    });
 }
 
 fn pause_icon(canvas: &mut Canvas, cx: i32, cy: i32) {
-    canvas.fill(Rect::new(cx - 6, cy - 7, 4, 15), colour::text());
-    canvas.fill(Rect::new(cx + 2, cy - 7, 4, 15), colour::text());
+    glyph_at(canvas, (cx, cy), 18, |s, r| {
+        icon::pause(s, r, colour::text())
+    });
 }
 
-/// Next (`forward`) or Previous: a triangle and a bar.
 fn skip_icon(canvas: &mut Canvas, cx: i32, cy: i32, forward: bool) {
-    for row in -6i32..=6 {
-        let len = 10 - row.abs() * 10 / 6;
-        let x = if forward { cx - 6 } else { cx + 4 - len };
-        canvas.fill(Rect::new(x, cy + row, len, 1), colour::text());
-    }
-    let bar = if forward { cx + 4 } else { cx - 7 };
-    canvas.fill(Rect::new(bar, cy - 6, 3, 13), colour::text());
+    glyph_at(canvas, (cx, cy), 18, |s, r| {
+        icon::skip(s, r, forward, colour::text())
+    });
 }
 
 /// Home on the desktop (ADR-0120): a blue folder.

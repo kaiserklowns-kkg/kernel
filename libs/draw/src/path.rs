@@ -201,6 +201,28 @@ impl Surface<'_> {
 
     /// As [`Surface::fill_path`], `alpha` (0..=255) over what is there.
     pub fn fill_path_alpha(&mut self, path: &Path, x: i32, y: i32, colour: Rgb, alpha: u32) {
+        self.fill_path_with(path, x, y, alpha, |_| colour);
+    }
+
+    /// As [`Surface::fill_path`], its colour going from `top` at the
+    /// shape's top to `bottom` at its foot (ADR-0139): the light falling
+    /// on an icon's tile.
+    pub fn fill_path_gradient(&mut self, path: &Path, x: i32, y: i32, top: Rgb, bottom: Rgb) {
+        self.fill_path_with(path, x, y, 255, |t| {
+            bottom.over(top, (t.clamp(0.0, 1.0) * 255.0 + 0.5) as u32)
+        });
+    }
+
+    /// Fills `path`, each pixel in `colour_at` its height through the
+    /// shape (0 at the top, 1 at the foot).
+    fn fill_path_with(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        alpha: u32,
+        colour_at: impl Fn(f32) -> Rgb,
+    ) {
         let mut shape = path.clone();
         shape.close();
         if shape.segments.is_empty() {
@@ -238,10 +260,12 @@ impl Surface<'_> {
             }
         }
         let alpha = alpha.min(255) as f32;
+        let span = (y1 - y0).max(1.0);
         raster.for_each_pixel_2d(|px, py, coverage| {
             let a = (coverage.clamp(0.0, 1.0) * alpha + 0.5) as u32;
             if a > 0 {
-                self.blend(bx0 + px as i32, by0 + py as i32, colour, a);
+                let t = (by0 as f32 + py as f32 + 0.5 - y0) / span;
+                self.blend(bx0 + px as i32, by0 + py as i32, colour_at(t), a);
             }
         });
     }

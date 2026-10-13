@@ -26,10 +26,12 @@ const OPENERS_REPLY: usize = 256;
 /// them before any other (ADR-0099).
 const SYSTEM_APPS: &str = "app.oceans.";
 
-/// An app with windows: its name as Core verified it, and the
+/// An app with windows: its id and name as Core verified them, and the
 /// notification its events are signalled on.
 pub struct Owner {
     pub app: String,
+    /// Its id (ADR-0139): what its icon is chosen by.
+    pub id: String,
     /// `display_grant` bits: windows, notifications.
     pub grants: u8,
     pub notification: Option<(Handle, u64)>,
@@ -179,6 +181,7 @@ impl Service {
                 badge,
                 Owner {
                     app: app.to_string(),
+                    id: id.to_string(),
                     grants,
                     notification: None,
                     notified_ms: None,
@@ -527,6 +530,7 @@ impl Service {
         }
         owner.notified_ms = Some(now);
         let app = owner.app.clone();
+        let app_id = owner.id.clone();
         let shown = alloc::format!("{app}: {text}");
         say(log, format_args!("desktop: notification: {shown}"));
         self.toast(shown, false);
@@ -536,6 +540,7 @@ impl Service {
             0,
             super::desktop::Notice {
                 app,
+                app_id,
                 text: String::from(text),
                 at_ms: now,
             },

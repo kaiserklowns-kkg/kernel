@@ -483,6 +483,7 @@ impl Service {
             .iter()
             .map(|frame| WindowView {
                 frame,
+                app_id: self.owners.get(&frame.owner).map_or("", |o| o.id.as_str()),
                 pixels: self
                     .pixels
                     .get(&frame.id)

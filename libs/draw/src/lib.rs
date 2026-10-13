@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+pub mod apps;
 pub mod icon;
 pub mod layout;
 mod path;

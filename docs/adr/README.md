@@ -145,5 +145,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0136](0136-interface-scale.md) | The interface's scale (ABI 23): logical pixels drawn sharp at 100–300 % (`Scale`, `Surface::scaled`, window pixels at the scale), automatic from the panel's EDID size, Settings → Displays and `scale`; status icons drawn from outlines (`Path`, `oceans_draw::icon`) | Accepted |
 | [0137](0137-adaptive-layout.md) | Adaptive layout: windows open as much larger as the screen allows (`layout::window_size`), apps lay out from the room they get (`Bar`, `Flow`), Settings and Calculator resizable, Launchpad, the Terminal, dialogs and desktop icons follow the screen | Accepted |
 | [0138](0138-wheel-scrolling.md) | Scrolling with the wheel: `kind::WHEEL` to the window under the pointer, the Terminal's rows back, `Surface::clip_to`, the toolkit's `Scroll` (Settings, Files), Text Editor, Image Viewer and Activity Monitor | Accepted |
+| [0139](0139-system-icons.md) | The system's icons: each system app's own picture on a lit, rounded tile as macOS and Windows show theirs (`oceans_draw::apps`), chosen by verified id; Control Center's and the player's icons from outlines | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

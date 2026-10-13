@@ -241,6 +241,112 @@ fn reverse_into(p: &mut Path, hole: &Path) {
     p.append_reversed(hole);
 }
 
+/// Dark (ADR-0139): a crescent moon, the part of one circle another
+/// leaves.
+pub fn moon(s: &mut Surface<'_>, r: Rect, ink: Rgb) {
+    let g = Grid::new(r);
+    let u = g.u;
+    // The moon round (12, 12), the shadow's circle up and to its right.
+    let (ax, ay, ra) = (12.0f32, 12.5f32, 8.5f32);
+    let (bx, by, rb) = (16.5f32, 8.0f32, 7.5f32);
+    let (dx, dy) = (bx - ax, by - ay);
+    let d = libm::sqrtf(dx * dx + dy * dy);
+    let toward = libm::atan2f(dy, dx);
+    // Where the circles cross, seen from each centre.
+    let half_a = libm::acosf(((ra * ra - rb * rb + d * d) / (2.0 * d * ra)).clamp(-1.0, 1.0));
+    let half_b = libm::acosf(((rb * rb - ra * ra + d * d) / (2.0 * d * rb)).clamp(-1.0, 1.0));
+    let away = toward + PI;
+    let mut p = Path::new();
+    // Round the moon, the long way, from one crossing to the other ...
+    p.arc(
+        ax * u,
+        ay * u,
+        ra * u,
+        toward + half_a,
+        toward + 2.0 * PI - half_a,
+    );
+    // ... and back along the shadow's edge, inside it.
+    p.arc(bx * u, by * u, rb * u, away + half_b, away - half_b);
+    p.close();
+    g.fill(s, &p, ink);
+}
+
+/// Lock (ADR-0139): a padlock, its shackle over its body, a keyhole cut
+/// out.
+pub fn lock(s: &mut Surface<'_>, r: Rect, ink: Rgb) {
+    let g = Grid::new(r);
+    let mut p = Path::new();
+    g.band(&mut p, (12.0, 10.5), 3.0, 5.2, PI, 2.0 * PI);
+    g.round_rect(&mut p, 6.8, 10.0, 2.2, 3.0, 0.4);
+    g.round_rect(&mut p, 15.0, 10.0, 2.2, 3.0, 0.4);
+    g.round_rect(&mut p, 4.5, 11.5, 15.0, 10.5, 2.6);
+    let mut hole = Path::new();
+    let u = g.u;
+    hole.circle(12.0 * u, 15.6 * u, 1.7 * u, false);
+    hole.round_rect(11.2 * u, 16.0 * u, 1.6 * u, 3.4 * u, 0.6 * u);
+    reverse_into(&mut p, &hole);
+    g.fill(s, &p, ink);
+}
+
+/// Settings (ADR-0139): a gear of eight teeth, its middle cut out.
+pub fn gear(s: &mut Surface<'_>, r: Rect, ink: Rgb) {
+    let g = Grid::new(r);
+    let p = crate::apps::gear(12.0, 12.0, 10.0, 7.6, 3.2, 8, g.u);
+    g.fill(s, &p, ink);
+}
+
+/// Play: a triangle pointing right, its corners softened.
+pub fn play(s: &mut Surface<'_>, r: Rect, ink: Rgb) {
+    let g = Grid::new(r);
+    let u = g.u;
+    let mut p = Path::new();
+    p.move_to(7.0 * u, 5.5 * u)
+        .quad_to(7.0 * u, 3.8 * u, 8.6 * u, 4.7 * u)
+        .line_to(19.0 * u, 10.8 * u)
+        .quad_to(20.4 * u, 12.0 * u, 19.0 * u, 13.2 * u)
+        .line_to(8.6 * u, 19.3 * u)
+        .quad_to(7.0 * u, 20.2 * u, 7.0 * u, 18.5 * u)
+        .close();
+    g.fill(s, &p, ink);
+}
+
+/// Pause: two bars.
+pub fn pause(s: &mut Surface<'_>, r: Rect, ink: Rgb) {
+    let g = Grid::new(r);
+    let mut p = Path::new();
+    g.round_rect(&mut p, 6.0, 4.5, 4.4, 15.0, 1.4);
+    g.round_rect(&mut p, 13.6, 4.5, 4.4, 15.0, 1.4);
+    g.fill(s, &p, ink);
+}
+
+/// Next (`forward`) or Previous: two triangles and a bar, as players
+/// show them.
+pub fn skip(s: &mut Surface<'_>, r: Rect, forward: bool, ink: Rgb) {
+    let g = Grid::new(r);
+    let u = g.u;
+    // Drawn pointing right; Previous is its mirror image.
+    let x = |v: f32| if forward { v * u } else { (24.0 - v) * u };
+    let mut p = Path::new();
+    for start in [3.0f32, 10.5] {
+        p.move_to(x(start), 6.0 * u)
+            .line_to(x(start + 8.5), 12.0 * u)
+            .line_to(x(start), 18.0 * u)
+            .close();
+    }
+    let (left, right) = if forward { (19.0, 21.4) } else { (2.6, 5.0) };
+    g.round_rect(&mut p, left, 6.0, right - left, 12.0, 0.8);
+    g.fill(s, &p, ink);
+}
+
+/// Back: a chevron pointing left.
+pub fn back(s: &mut Surface<'_>, r: Rect, ink: Rgb) {
+    let g = Grid::new(r);
+    let mut p = Path::new();
+    g.stroke(&mut p, (15.0, 5.0), (8.0, 12.0), 2.6);
+    g.stroke(&mut p, (8.0, 12.0), (15.0, 19.0), 2.6);
+    g.fill(s, &p, ink);
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -307,5 +413,32 @@ mod tests {
         user(&mut s, Rect::new(1, 1, 24, 24), WHITE);
         assert_eq!(s.pixel(1 + 5, 1 + 12), Some(Rgb(0)));
         assert_eq!(s.pixel(1 + 12, 1 + 9), Some(WHITE));
+    }
+}
+#[cfg(test)]
+mod more_tests {
+    extern crate std;
+    use super::*;
+    use std::vec;
+
+    #[test]
+    fn control_and_media_icons_draw() {
+        type Draw = fn(&mut Surface<'_>, Rect);
+        let all: [(&str, Draw); 7] = [
+            ("moon", |s, r| moon(s, r, Rgb(0xffffff))),
+            ("lock", |s, r| lock(s, r, Rgb(0xffffff))),
+            ("gear", |s, r| gear(s, r, Rgb(0xffffff))),
+            ("play", |s, r| play(s, r, Rgb(0xffffff))),
+            ("pause", |s, r| pause(s, r, Rgb(0xffffff))),
+            ("next", |s, r| skip(s, r, true, Rgb(0xffffff))),
+            ("back", |s, r| back(s, r, Rgb(0xffffff))),
+        ];
+        for (name, draw) in all {
+            let mut px = vec![0u32; 26 * 26];
+            let mut s = Surface::new(&mut px, 26, 26).unwrap();
+            draw(&mut s, Rect::new(1, 1, 24, 24));
+            let lit = s.pixels().iter().filter(|&&p| p & 0xff >= 0xe0).count();
+            assert!(lit > 25, "{name}: {lit}");
+        }
     }
 }
