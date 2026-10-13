@@ -23,7 +23,7 @@ use core::fmt::Write;
 use oceans_fs_proto::{Kind, MAX_NAME, Node, flags, tree};
 use oceans_rt::{Directory, Start};
 use oceans_ui::layout::{Bar, Flow};
-use oceans_ui::{Rect, Style, Ui, colour};
+use oceans_ui::{Rect, Scroll, Style, Ui, colour};
 
 oceans_rt::entry!(main);
 
@@ -47,6 +47,8 @@ struct Files {
     /// The folders from `/home` down to the one shown.
     path: Vec<String>,
     entries: Vec<Entry>,
+    /// How far down the list is scrolled (ADR-0138).
+    list_scroll: Scroll,
     selected: Option<usize>,
     /// The text of the file selected, or why there is none.
     preview: Option<String>,
@@ -117,6 +119,7 @@ impl Files {
     fn refresh(&mut self) {
         self.stale = false;
         self.selected = None;
+        self.list_scroll.reset();
         self.preview = None;
         self.confirm_delete = false;
         let mut entries = Vec::new();
@@ -330,8 +333,11 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
     // what the margins leave (340 at the size the window opens at).
     let top = bar.y + bar.h + 12;
     let list_width = ((whole.w - 80) / 2).clamp(220, 440);
-    ui.area = Rect::new(whole.x + 12, top, list_width, whole.h - top - 12);
-    ui.y = top;
+    // The list scrolls when it is longer than the window (ADR-0138).
+    let list_view = ui.begin_scroll(
+        Rect::new(whole.x + 12, top, list_width, whole.h - top - 12),
+        &files.list_scroll,
+    );
     if files.naming && ui.text_field(1, &mut files.new_folder, "New folder's name, then Enter") {
         files.create_folder();
     }
@@ -384,6 +390,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
     if !files.message.is_empty() {
         ui.muted(&files.message);
     }
+    ui.end_scroll(list_view, &mut files.list_scroll);
 
     let side = Rect::new(
         whole.x + list_width + 36,
@@ -491,6 +498,7 @@ fn main(start: Start) -> i64 {
         confirm_delete: false,
         message: String::new(),
         stale: true,
+        list_scroll: Scroll::default(),
         choosing: None,
     };
     oceans_ui::run_resizable(

@@ -268,6 +268,9 @@ pub struct Desktop {
     pub terminal_focused: bool,
     /// The Terminal is minimized to the dock.
     pub terminal_hidden: bool,
+    /// How many of the console's rows the Terminal shows back from the
+    /// cursor's (ADR-0138): the wheel turns it, a key brings it back.
+    pub terminal_back: usize,
     /// Launchpad is open.
     pub start_open: bool,
     /// This desktop may switch the machine off (`grant = power`): the apps
@@ -1081,6 +1084,17 @@ fn drawn_wallpaper(width: i32, height: i32) -> Vec<u32> {
 }
 
 impl Desktop {
+    /// The wheel over the Terminal (ADR-0138): `up` detents away from the
+    /// user show earlier rows, three a detent, as far back as the console
+    /// keeps. `true` if what it shows changed.
+    pub fn scroll_terminal(&mut self, up: i32) -> bool {
+        let before = self.terminal_back;
+        let most = self.terminal.row;
+        self.terminal_back =
+            (self.terminal_back as i64 + i64::from(up) * 3).clamp(0, most as i64) as usize;
+        self.terminal_back != before
+    }
+
     /// The apps kept in Wave that are installed (ADR-0109): id and name,
     /// in their order.
     pub fn kept(&self) -> Vec<(&str, &str)> {
@@ -1428,7 +1442,11 @@ impl Desktop {
         let t = &self.terminal;
         if t.cols > 0 {
             let visible = (body.h / Font::Mono.height()).max(1) as usize;
-            let last = (t.row + 1).min(t.rows);
+            // Ending at the cursor's row, or as many rows back as the
+            // wheel turned (ADR-0138).
+            let end = (t.row + 1).min(t.rows);
+            let back = self.terminal_back.min(end.saturating_sub(visible));
+            let last = end - back;
             let first = last.saturating_sub(visible);
             for (line, row) in (first..last).enumerate() {
                 let cells = &t.cells[row * t.cols..(row + 1) * t.cols];

@@ -37,6 +37,8 @@ struct Process {
 
 struct Activity {
     sysinfo: Option<Handle>,
+    /// The first process the table shows: the wheel moves it (ADR-0138).
+    first: usize,
 }
 
 fn mib(bytes: u64) -> String {
@@ -160,8 +162,18 @@ fn frame(ui: &mut Ui<'_, '_>, activity: &mut Activity) {
         Rect::new(table.x + 12, table.y + 34, table.w - 24, 1),
         colour::line(),
     );
+    // The rows that fit, from the first the wheel scrolled to (ADR-0138).
+    let fit = ((table.h - 48) / 24).max(1) as usize;
+    let (px, py) = ui.input.pointer;
+    if ui.input.wheel.0 != 0 && table.contains(px, py) {
+        let moved = activity.first as i64 + i64::from(ui.input.wheel.0) * 3;
+        activity.first = moved.max(0) as usize;
+        ui.input.wheel.0 = 0;
+        ui.changed = true;
+    }
+    activity.first = activity.first.min(list.len().saturating_sub(fit));
     let mut y = table.y + 42;
-    for (i, process) in list.iter().enumerate() {
+    for (i, process) in list.iter().enumerate().skip(activity.first) {
         if y + 22 > table.y + table.h - 6 {
             break;
         }
@@ -218,6 +230,7 @@ fn main(start: Start) -> i64 {
     };
     let mut activity = Activity {
         sysinfo: directory.find("sysinfo", "sysinfo"),
+        first: 0,
     };
     oceans_ui::run_resizable(
         &directory,

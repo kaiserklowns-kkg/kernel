@@ -158,3 +158,23 @@ fn paths_fill_and_cut_holes() {
     // Off the surface: nothing, and no panic.
     s.fill_path(&ring, 100, -100, WHITE);
 }
+
+#[test]
+fn drawing_keeps_to_the_clip() {
+    let mut pixels = vec![0u32; 40 * 40];
+    let mut s = Surface::scaled(&mut pixels, 40, 40, Scale::new(200).unwrap()).unwrap();
+    s.clip_to(Some(Rect::new(5, 5, 10, 10)));
+    assert_eq!(s.clip_area(), Some(Rect::new(5, 5, 10, 10)));
+    s.fill(Rect::new(0, 0, 20, 20), WHITE);
+    s.circle(2, 2, 3, WHITE);
+    // Inside the clip (device 10..30), drawn; outside, not.
+    assert_eq!(s.pixel(10, 10), Some(WHITE));
+    assert_eq!(s.pixel(29, 29), Some(WHITE));
+    assert_eq!(s.pixel(9, 10), Some(Rgb(0)));
+    assert_eq!(s.pixel(30, 30), Some(Rgb(0)));
+    assert_eq!(s.pixel(2, 2), Some(Rgb(0)));
+    // Back to the whole surface.
+    s.clip_to(None);
+    s.fill(Rect::new(0, 0, 1, 1), WHITE);
+    assert_eq!(s.pixel(0, 0), Some(WHITE));
+}

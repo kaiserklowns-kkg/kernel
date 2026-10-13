@@ -89,6 +89,11 @@ pub struct Surface<'a> {
     device_width: i32,
     device_height: i32,
     scale: Scale,
+    /// What drawing is kept to (ADR-0138): the whole buffer, or a part of
+    /// it ([`Surface::clip_to`]), in device pixels: `x0, y0, x1, y1`.
+    bounds: (i32, i32, i32, i32),
+    /// That part, as asked for (logical).
+    clip_area: Option<Rect>,
     pixels: &'a mut [u32],
 }
 
@@ -113,6 +118,8 @@ impl<'a> Surface<'a> {
             device_width: w,
             device_height: h,
             scale,
+            bounds: (0, 0, w, h),
+            clip_area: None,
             pixels,
         })
     }
@@ -143,16 +150,39 @@ impl<'a> Surface<'a> {
         self.pixels
     }
 
+    /// From now on, drawing only inside `area` (logical; `None`: anywhere
+    /// on the surface): what scrolls out of a view is not drawn
+    /// (ADR-0138).
+    pub fn clip_to(&mut self, area: Option<Rect>) {
+        self.clip_area = area;
+        self.bounds = match area.map(|r| self.scale.rect(r)) {
+            Some(r) => (
+                r.x.max(0),
+                r.y.max(0),
+                (r.x + r.w).min(self.device_width),
+                (r.y + r.h).min(self.device_height),
+            ),
+            None => (0, 0, self.device_width, self.device_height),
+        };
+    }
+
+    /// The area drawing is kept to, if any ([`Surface::clip_to`]).
+    pub fn clip_area(&self) -> Option<Rect> {
+        self.clip_area
+    }
+
     fn clip(&self, r: Rect) -> Option<(i32, i32, i32, i32)> {
-        let x0 = r.x.max(0);
-        let y0 = r.y.max(0);
-        let x1 = (r.x + r.w).min(self.device_width);
-        let y1 = (r.y + r.h).min(self.device_height);
+        let (bx0, by0, bx1, by1) = self.bounds;
+        let x0 = r.x.max(bx0);
+        let y0 = r.y.max(by0);
+        let x1 = (r.x + r.w).min(bx1);
+        let y1 = (r.y + r.h).min(by1);
         (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
     }
 
     fn blend(&mut self, x: i32, y: i32, colour: Rgb, alpha: u32) {
-        if x >= 0 && y >= 0 && x < self.device_width && y < self.device_height {
+        let (x0, y0, x1, y1) = self.bounds;
+        if x >= x0 && y >= y0 && x < x1 && y < y1 {
             let at = (y * self.device_width + x) as usize;
             self.pixels[at] = colour.over(Rgb(self.pixels[at]), alpha).0;
         }

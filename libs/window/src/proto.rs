@@ -243,6 +243,12 @@ pub mod kind {
     /// Printable keys come so instead of as `KEY` while such a layout is
     /// in use; the others still come as `KEY`.
     pub const TEXT: u8 = 9;
+    /// The wheel turned over the window (ADR-0138), whether it has the
+    /// focus or not: `x` and `y` where the pointer is inside it; `key`
+    /// the detents down the page (an `i8`: positive scrolls towards its
+    /// end, as a wheel turned towards the user does), `button` those to
+    /// the right.
+    pub const WHEEL: u8 = 10;
 }
 
 impl Event {
@@ -252,6 +258,12 @@ impl Event {
             return None;
         }
         char::from_u32(u32::from(self.x as u16) | u32::from(self.y as u16) << 16)
+    }
+
+    /// A `WHEEL` event's detents: down the page, and to the right.
+    pub fn wheel(&self) -> Option<(i32, i32)> {
+        (self.kind == kind::WHEEL)
+            .then(|| (i32::from(self.key as i8), i32::from(self.button as i8)))
     }
 }
 
@@ -294,7 +306,7 @@ impl Event {
             x: i16::from_le_bytes([bytes[8], bytes[9]]),
             y: i16::from_le_bytes([bytes[10], bytes[11]]),
         };
-        (kind::KEY..=kind::TEXT)
+        (kind::KEY..=kind::WHEEL)
             .contains(&event.kind)
             .then_some(event)
     }

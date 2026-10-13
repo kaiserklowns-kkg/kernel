@@ -33,7 +33,7 @@ use oceans_net_proto::{Colons, Dotted};
 use oceans_package::Permission;
 use oceans_rt::{Directory, Handle, Start};
 use oceans_ui::layout::Flow;
-use oceans_ui::{Rect, Style, Ui, colour};
+use oceans_ui::{Rect, Scroll, Style, Ui, colour};
 
 oceans_rt::entry!(main);
 
@@ -116,6 +116,8 @@ struct Settings {
     appearance: (u8, u8),
     /// The scale chosen (ADR-0136), as Core keeps it: 0 automatic.
     scale: u16,
+    /// How far down the page shown is scrolled (ADR-0138).
+    page: Scroll,
 }
 
 impl Settings {
@@ -839,9 +841,12 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         whole.w - list_width - 24,
         whole.h - (top - whole.y),
     );
+    // The page is as long as the longer column (ADR-0138).
+    let list_end = ui.y;
     ui.y = top;
     let Some(detail) = settings.detail.take() else {
         ui.muted("Choose an app.");
+        ui.y = ui.y.max(list_end);
         return;
     };
     if let Some(app) = settings.chosen.and_then(|i| settings.apps.get(i)) {
@@ -919,6 +924,7 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     if !settings.message.is_empty() {
         ui.muted(&settings.message);
     }
+    ui.y = ui.y.max(list_end);
     settings.detail = Some(detail);
     if let Some((permission, choice)) = decided {
         settings.decide(permission, choice);
@@ -936,8 +942,13 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     if let Some(section) = ui.sidebar(180, &SECTIONS, settings.section) {
         settings.section = section;
         settings.stale = true;
+        settings.page.reset();
     }
     ui.readable(READABLE);
+    // The page scrolls when it is longer than the window (ADR-0138).
+    let view = ui.area;
+    let mut page = settings.page;
+    let scrolled = ui.begin_scroll(view, &page);
     match settings.section {
         0 => general(ui, settings),
         1 => network(ui, settings),
@@ -947,6 +958,8 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         5 => users(ui, settings),
         _ => account(ui, settings),
     }
+    ui.end_scroll(scrolled, &mut page);
+    settings.page = page;
 }
 
 fn main(start: Start) -> i64 {
@@ -968,6 +981,7 @@ fn main(start: Start) -> i64 {
         users: Users::default(),
         appearance: (0, 0),
         scale: 0,
+        page: Scroll::default(),
     };
     oceans_ui::run_resizable(
         &directory,

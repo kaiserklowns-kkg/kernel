@@ -651,6 +651,27 @@ impl Service {
                 }
                 return button == 1 && pressed && self.click(x, y, w, h, double);
             }
+            // The wheel (ADR-0138): to the window under the pointer, or
+            // the Terminal's rows back; not while something lies over the
+            // windows.
+            Kind::Wheel {
+                vertical,
+                horizontal,
+            } => {
+                let (x, y) = self.desktop.pointer;
+                let covered = self.desktop.lock != desktop::Lock::Open
+                    || self.desktop.dialog.is_some()
+                    || self.desktop.start_open
+                    || self.desktop.volume_open
+                    || self.desktop.notices_open
+                    || self.desktop.user_menu_open;
+                if covered || self.windows.wheel(x, y, -vertical, horizontal) {
+                    return false;
+                }
+                return !self.desktop.terminal_hidden
+                    && desktop::terminal(w, h).contains(x, y)
+                    && self.desktop.scroll_terminal(vertical);
+            }
             _ => return false,
         }
         // Dragging the slider: the level follows, set when let go.
@@ -800,7 +821,11 @@ impl Service {
                     continue;
                 }
                 match self.windows.key(byte) {
-                    KeyRoute::Terminal(byte) if self.desktop.admin => terminal.push(byte),
+                    KeyRoute::Terminal(byte) if self.desktop.admin => {
+                        // Typing shows the cursor's rows again (ADR-0138).
+                        self.desktop.terminal_back = 0;
+                        terminal.push(byte);
+                    }
                     KeyRoute::Terminal(_) => {}
                     KeyRoute::Window(owner) => {
                         // A media key (ADR-0102), to the player that asked.

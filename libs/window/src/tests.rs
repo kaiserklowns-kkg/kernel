@@ -38,7 +38,7 @@ fn events_round_trip_and_unknown_kinds_are_refused() {
     let mut bad = event.encode();
     bad[4] = 0;
     assert_eq!(Event::decode(&bad), None);
-    bad[4] = 10;
+    bad[4] = 11;
     assert_eq!(Event::decode(&bad), None);
 }
 
@@ -1021,4 +1021,45 @@ fn typed_characters_go_to_the_focused_window() {
     );
     m.set_focus(Focus::Terminal);
     assert_eq!(m.text('ก'), None);
+}
+
+#[test]
+fn the_wheel_goes_to_the_window_under_the_pointer() {
+    let mut m = manager();
+    let back = m.open(APP, "files", "", 400, 300).unwrap();
+    let front = m.open(OTHER, "settings", "", 200, 150).unwrap();
+    m.take_events(APP, 99);
+    m.take_events(OTHER, 99);
+    let at = |m: &Manager, id: u32| m.frames().iter().find(|f| f.id == id).unwrap().content();
+    // Over the window behind, where the front one does not cover it: it
+    // gets the wheel though it has no focus; turns add up.
+    let b = at(&m, back);
+    let f = at(&m, front);
+    let (x, y) = (b.x + 2, b.y + 2);
+    assert!(!f.contains(x, y));
+    assert!(m.wheel(x, y, 1, 0));
+    assert!(m.wheel(x, y, 2, -1));
+    let events = m.take_events(APP, 99);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].wheel(), Some((3, -1)));
+    assert_eq!((events[0].x, events[0].y), (2, 2));
+    assert_eq!(events[0].window, back);
+    assert!(m.take_events(OTHER, 99).is_empty());
+    // Over the front window, it alone.
+    assert!(m.wheel(f.x + 5, f.y + 5, -1, 0));
+    assert_eq!(m.take_events(OTHER, 99)[0].wheel(), Some((-1, 0)));
+    // Over a title bar or nothing: no window's.
+    assert!(!m.wheel(f.x + 5, f.y - 10, 1, 0));
+    assert!(!m.wheel(0, 0, 1, 0));
+    // Round trip on the wire.
+    let event = Event {
+        window: 3,
+        kind: kind::WHEEL,
+        key: (-2i8) as u8,
+        button: 0,
+        pressed: false,
+        x: 10,
+        y: 20,
+    };
+    assert_eq!(Event::decode(&event.encode()), Some(event));
 }

@@ -340,6 +340,16 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut Viewer) {
         }
     }
 
+    // The wheel over a picture larger than the view pans it (ADR-0138).
+    let (px, py) = ui.input.pointer;
+    let (down, right) = ui.input.wheel;
+    if (down, right) != (0, 0) && area.contains(px, py) && app.shown.is_some() {
+        app.pan.0 += right * PAN_STEP;
+        app.pan.1 += down * PAN_STEP;
+        ui.input.wheel = (0, 0);
+        ui.changed = true;
+    }
+
     // The picture, centred, or panned when larger than the view.
     ui.surface.fill(area, oceans_ui::Rgb(BACKDROP));
     let mut status = String::new();

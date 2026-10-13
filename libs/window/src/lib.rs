@@ -524,6 +524,19 @@ impl Manager {
             && last.window == event.window
         {
             *last = event;
+        } else if event.kind == kind::WHEEL
+            && let Some(last) = queue.back_mut()
+            && last.kind == kind::WHEEL
+            && last.window == event.window
+        {
+            // The wheel turning on: one event of all its detents, where
+            // the pointer is now.
+            let add = |a: u8, b: u8| {
+                (i32::from(a as i8) + i32::from(b as i8)).clamp(-128, 127) as i8 as u8
+            };
+            last.key = add(last.key, event.key);
+            last.button = add(last.button, event.button);
+            (last.x, last.y) = (event.x, event.y);
         } else if queue.len() < MAX_QUEUED {
             queue.push_back(event);
         } else {
@@ -1364,6 +1377,39 @@ impl Manager {
             }
         }
         false
+    }
+
+    /// The wheel turned at `x`, `y` (ADR-0138): `down` detents down the
+    /// page, `right` to the right. It goes to the window under the pointer,
+    /// focused or not, as other systems scroll what is pointed at; `true`
+    /// if a window's content was there.
+    pub fn wheel(&mut self, x: i32, y: i32, down: i32, right: i32) -> bool {
+        if self.drag.is_some() || self.resize.is_some() {
+            return false;
+        }
+        let Some(index) = self.at(x, y) else {
+            return false;
+        };
+        let frame = &self.frames[index];
+        let content = frame.content();
+        if !content.contains(x, y) {
+            return false;
+        }
+        let (owner, id) = (frame.owner, frame.id);
+        let detents = |v: i32| v.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8 as u8;
+        self.queue(
+            owner,
+            Event {
+                window: id,
+                kind: kind::WHEEL,
+                key: detents(down),
+                button: detents(right),
+                x: (x - content.x) as i16,
+                y: (y - content.y) as i16,
+                ..Event::default()
+            },
+        );
+        true
     }
 
     /// A pointer button went down or up at `x`, `y`. `true` if a window

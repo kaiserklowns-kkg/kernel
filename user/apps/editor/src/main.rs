@@ -66,6 +66,9 @@ struct TextEditor {
     /// The first line shown, and how far the page is scrolled sideways.
     top: usize,
     left: i32,
+    /// Where the cursor was last frame: the page follows it only when it
+    /// moved, so the wheel can look elsewhere (ADR-0138).
+    seen: (usize, usize),
     message: String,
     pending: Option<Pending>,
     /// The page has had the keyboard once (it has it at the start).
@@ -330,19 +333,33 @@ fn frame(ui: &mut Ui<'_, '_>, app: &mut TextEditor) {
         }
     }
 
-    // Keep the cursor in view.
+    // Keep the cursor in view when it moved.
     let (line, column) = app.editor.cursor();
-    if line < app.top {
-        app.top = line;
-    } else if line >= app.top + rows {
-        app.top = line + 1 - rows;
-    }
     let cursor_text = String::from(&app.editor.lines()[line][..column]);
     let cursor_x = ui.measure(&cursor_text, Style::Body);
-    if cursor_x < app.left {
-        app.left = (cursor_x - view.w / 3).max(0);
-    } else if cursor_x > app.left + view.w - 8 {
-        app.left = cursor_x - view.w * 2 / 3;
+    if app.seen != (line, column) {
+        app.seen = (line, column);
+        if line < app.top {
+            app.top = line;
+        } else if line >= app.top + rows {
+            app.top = line + 1 - rows;
+        }
+        if cursor_x < app.left {
+            app.left = (cursor_x - view.w / 3).max(0);
+        } else if cursor_x > app.left + view.w - 8 {
+            app.left = cursor_x - view.w * 2 / 3;
+        }
+    }
+    // The wheel over the page (ADR-0138): three lines a detent, and
+    // across a long line.
+    let (px, py) = ui.input.pointer;
+    let (down, right) = ui.input.wheel;
+    if (down, right) != (0, 0) && page.contains(px, py) {
+        let most = app.editor.lines().len().saturating_sub(rows) as i64;
+        app.top = (app.top as i64 + i64::from(down) * 3).clamp(0, most) as usize;
+        app.left = (app.left + right * 48).max(0);
+        ui.input.wheel = (0, 0);
+        ui.changed = true;
     }
 
     let shown: Vec<String> = app
@@ -437,6 +454,7 @@ fn main(start: Start) -> i64 {
         name: String::from(directory.args().trim()),
         top: 0,
         left: 0,
+        seen: (usize::MAX, 0),
         message: String::new(),
         pending: None,
         started: false,

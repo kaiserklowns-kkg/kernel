@@ -143,5 +143,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0134](0134-larger-files.md) | Files up to 256 MiB (OceansFS's per-file limit raised from 16 MiB; the format unchanged) | Accepted |
 | [0135](0135-mp3-and-radio.md) | MP3 and the radio in Music (`oceans-mp3` on nanomp3-core, `oceans-web` for apps, `ICY` heads; stations kept in `Music/Stations.txt`) | Accepted |
 | [0136](0136-interface-scale.md) | The interface's scale (ABI 23): logical pixels drawn sharp at 100–300 % (`Scale`, `Surface::scaled`, window pixels at the scale), automatic from the panel's EDID size, Settings → Displays and `scale`; status icons drawn from outlines (`Path`, `oceans_draw::icon`) | Accepted |
+| [0137](0137-adaptive-layout.md) | Adaptive layout: windows open as much larger as the screen allows (`layout::window_size`), apps lay out from the room they get (`Bar`, `Flow`), Settings and Calculator resizable, Launchpad, the Terminal, dialogs and desktop icons follow the screen | Accepted |
+| [0138](0138-wheel-scrolling.md) | Scrolling with the wheel: `kind::WHEEL` to the window under the pointer, the Terminal's rows back, `Surface::clip_to`, the toolkit's `Scroll` (Settings, Files), Text Editor, Image Viewer and Activity Monitor | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

@@ -87,6 +87,10 @@ pub struct Input {
     /// the widget with the keyboard; printable keys come here instead of
     /// `keys` then.
     pub text: Vec<char>,
+    /// Wheel detents turned over the window (ADR-0138): down the page,
+    /// and to the right; `pointer` is where it turned. Taken by the
+    /// [`Scroll`] view under the pointer.
+    pub wheel: (i32, i32),
 }
 
 /// One frame's drawing and layout: a column of widgets from the top of
@@ -114,7 +118,41 @@ pub struct Ui<'s, 'f> {
     /// Tab (`false`) and Shift+Tab (`true`) pressed since the last frame,
     /// taken out of the keys: [`Ui::finish`] moves the focus.
     moves: Vec<bool>,
+    /// The part of a scrolled view that shows (ADR-0138): widgets outside
+    /// it are neither pointed at nor clicked.
+    visible: Option<Rect>,
 }
+
+/// Where a view that scrolls is (ADR-0138), kept by the app from frame to
+/// frame: how far down its content it shows, and how tall that content
+/// was last laid out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scroll {
+    pub offset: i32,
+    content: i32,
+}
+
+impl Scroll {
+    /// Back to the top (another page shown in the view).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// A scrolled view being laid out: what [`Ui::end_scroll`] needs back.
+pub struct ScrollView {
+    view: Rect,
+    top: i32,
+    area: Rect,
+    clip: Option<Rect>,
+    visible: Option<Rect>,
+    nodes: usize,
+}
+
+/// How far one detent of the wheel scrolls: three lines of text.
+const WHEEL_STEP: i32 = 3 * LINE_HEIGHT;
+/// The scroll bar's width, at the view's right edge.
+const SCROLL_BAR: i32 = 6;
 
 /// The most a text field holds, in bytes.
 const FIELD_MAX: usize = 200;
@@ -158,7 +196,83 @@ impl<'s, 'f> Ui<'s, 'f> {
             tree: Tree::default(),
             ids: Ids::default(),
             moves,
+            visible: None,
         }
+    }
+
+    /// Lays what follows out in `view`, scrolled as `scroll` says
+    /// (ADR-0138): widgets go on down the page from its top as usual, and
+    /// show only inside `view`. End it with [`Ui::end_scroll`].
+    pub fn begin_scroll(&mut self, view: Rect, scroll: &Scroll) -> ScrollView {
+        let started = ScrollView {
+            view,
+            top: view.y - scroll.offset,
+            area: self.area,
+            clip: self.surface.clip_area(),
+            visible: self.visible,
+            nodes: self.tree.nodes().len(),
+        };
+        self.surface.clip_to(Some(view));
+        self.visible = Some(view);
+        // Room for the bar only when there is more than the view shows.
+        let bar = if scroll.content > view.h {
+            SCROLL_BAR + 6
+        } else {
+            0
+        };
+        self.area = Rect::new(view.x, view.y, view.w - bar, view.h);
+        self.y = started.top;
+        started
+    }
+
+    /// Ends a scrolled view: the wheel turned over it scrolls it, the
+    /// widget with the keyboard is scrolled into sight, the offset stays
+    /// within the content, and a bar shows where the view is when there is
+    /// more than it shows. Layout goes on under the view.
+    pub fn end_scroll(&mut self, started: ScrollView, scroll: &mut Scroll) {
+        let view = started.view;
+        scroll.content = self.y - started.top;
+        let most = (scroll.content - view.h).max(0);
+        let before = scroll.offset;
+        let (px, py) = self.input.pointer;
+        if self.input.wheel.0 != 0 && view.contains(px, py) {
+            scroll.offset += self.input.wheel.0 * WHEEL_STEP;
+            self.input.wheel.0 = 0;
+        }
+        // The keyboard's widget, if it is in this view, in sight.
+        if let Some(focus) = *self.focus
+            && let Some(node) = self.tree.nodes()[started.nodes..]
+                .iter()
+                .find(|n| n.id == focus && n.focusable)
+        {
+            let (top, height) = (node.rect.1 - started.top, node.rect.3);
+            if top < scroll.offset {
+                scroll.offset = top;
+            } else if top + height > scroll.offset + view.h {
+                scroll.offset = top + height - view.h;
+            }
+        }
+        scroll.offset = scroll.offset.clamp(0, most);
+        if scroll.offset != before {
+            self.changed = true;
+        }
+        if most > 0 {
+            let track = view.h - 8;
+            let thumb = (track * view.h / scroll.content).max(24).min(track);
+            let at = (track - thumb) * scroll.offset / most;
+            let bar = Rect::new(
+                view.x + view.w - SCROLL_BAR - 2,
+                view.y + 4 + at,
+                SCROLL_BAR,
+                thumb,
+            );
+            self.surface
+                .round_fill(bar, SCROLL_BAR / 2, colour::muted());
+        }
+        self.surface.clip_to(started.clip);
+        self.visible = started.visible;
+        self.area = started.area;
+        self.y = view.y + view.h + GAP;
     }
 
     /// Ends the frame: Tab and Shift+Tab move the focus through what this
@@ -290,14 +404,21 @@ impl<'s, 'f> Ui<'s, 'f> {
         r
     }
 
+    /// Whether (`x`, `y`) shows: inside the scrolled view being laid out,
+    /// if any (ADR-0138).
+    fn shows(&self, x: i32, y: i32) -> bool {
+        self.visible.is_none_or(|v| v.contains(x, y))
+    }
+
     fn hovered(&self, r: Rect) -> bool {
-        r.contains(self.input.pointer.0, self.input.pointer.1)
+        let (x, y) = self.input.pointer;
+        r.contains(x, y) && self.shows(x, y)
     }
 
     /// Whether the pending click is inside `r`; it is then taken.
     fn take_click(&mut self, r: Rect) -> bool {
         match self.input.click {
-            Some((x, y)) if r.contains(x, y) => {
+            Some((x, y)) if r.contains(x, y) && self.shows(x, y) => {
                 self.input.click = None;
                 self.changed = true;
                 true
@@ -803,6 +924,15 @@ fn run_window<S>(
                     kind::BUTTON if event.button == 1 => input.held = false,
                     kind::KEY => input.keys.push(event.key),
                     kind::TEXT => input.text.extend(event.character()),
+                    // The wheel (ADR-0138), where it turned: for the view
+                    // under the pointer, focused or not.
+                    kind::WHEEL => {
+                        if let Some((down, right)) = event.wheel() {
+                            input.wheel.0 += down;
+                            input.wheel.1 += right;
+                            input.pointer = (i32::from(event.x), i32::from(event.y));
+                        }
+                    }
                     // New pixels at the new size; the frame after this
                     // batch draws into them.
                     kind::RESIZE => {
@@ -837,11 +967,13 @@ fn run_window<S>(
             input.keys.clear();
             input.paste = None;
             input.text.clear();
+            input.wheel = (0, 0);
             draw(&mut window, &mut input, &mut focus, state);
         }
         input.click = None;
         input.keys.clear();
         input.paste = None;
         input.text.clear();
+        input.wheel = (0, 0);
     }
 }
