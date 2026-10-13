@@ -81,6 +81,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DISPLAY_KEYBOARD => display_keyboard(&process, a0, a1, a2),
         nr::DISPLAY_KEYS => display_keys(&process, a0, a1, a2),
         nr::DISPLAY_POINTER => display_pointer(&process, a0, a1, a2),
+        nr::CLOCK_SET => clock_set(&process, a0, a1),
         nr::LOG_READ => log_read(&process, a0, a1, a2, a3),
         nr::SYSTEM_POWER => system_power(&process, a0, a1),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
@@ -177,6 +178,24 @@ fn log_read(process: &Process, log: u64, from: u64, ptr: u64, capacity: u64) -> 
     let (count, start) = klog::read(from, &mut buffer);
     process.copy_to_user(ptr, &buffer[..count])?;
     Ok((count as u64, start))
+}
+
+/// `CLOCK_SET` (ADR-0143): the wall clock, from a time source. Needs
+/// `WRITE` on the system information object (`grant = clock`).
+fn clock_set(process: &Process, raw: u64, unix_ms: u64) -> SyscallResult {
+    arch::without_interrupts(|| {
+        let mut table = process.capabilities().lock();
+        let capability = table.get(handle(raw), Rights::NONE).map_err(cap_error)?;
+        match capability.object() {
+            KernelObject::SystemInfo => capability.check(Rights::WRITE).map_err(cap_error),
+            _ => Err(Error::WrongType),
+        }
+    })?;
+    if !crate::time::set_wall_clock(unix_ms) {
+        return Err(Error::InvalidArgument);
+    }
+    klog::info!("time: {} set the clock", process.name());
+    Ok((0, 0))
 }
 
 /// `SYSTEM_POWER` (ADR-0085): what this machine can do (`READ` on the

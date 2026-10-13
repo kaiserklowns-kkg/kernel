@@ -88,6 +88,9 @@ const LAYOUT_FILE: &str = "layout";
 /// The interface's scale (ADR-0136), in `/system`: the percent, or `0`
 /// for automatic. The machine's, for every account.
 const SCALE_FILE: &str = "scale";
+/// The time zone (ADR-0143), in `/system`: minutes ahead of UTC. The
+/// machine's.
+const TIME_ZONE_FILE: &str = "timezone";
 
 /// A scale `SET_SCALE` takes: automatic (0) or one offered.
 fn valid_scale(percent: u16) -> bool {
@@ -802,6 +805,22 @@ impl Core {
                     .ok()
             })
             .filter(|&percent| valid_scale(percent))
+            .unwrap_or(0)
+    }
+
+    /// The time zone chosen (ADR-0143), from `/system/timezone`: minutes
+    /// ahead of UTC; UTC until one is.
+    fn time_zone(&self) -> i16 {
+        read_path(&self.system_dir, TIME_ZONE_FILE)
+            .ok()
+            .and_then(|bytes| {
+                core::str::from_utf8(&bytes)
+                    .ok()?
+                    .trim()
+                    .parse::<i16>()
+                    .ok()
+            })
+            .filter(|&minutes| oceans_core_proto::valid_time_zone(minutes))
             .unwrap_or(0)
     }
 
@@ -1636,6 +1655,34 @@ impl Core {
                             write_file(&self.system_dir, SCALE_FILE, text.as_bytes())
                                 .map_err(io)?;
                             say(self.log, format_args!("core: scale {}", ScaleName(percent)));
+                            Ok(())
+                        }
+                        _ => Err(Status::BadRequest.into()),
+                    },
+                    // The time zone (ADR-0143), the machine's.
+                    op::TIME_ZONE => {
+                        reply.extend_from_slice(&self.time_zone().to_le_bytes());
+                        Ok(())
+                    }
+                    op::SET_TIME_ZONE => match data {
+                        &[low, high]
+                            if oceans_core_proto::valid_time_zone(i16::from_le_bytes([
+                                low, high,
+                            ])) =>
+                        {
+                            let minutes = i16::from_le_bytes([low, high]);
+                            let text = alloc::format!("{minutes}\n");
+                            write_file(&self.system_dir, TIME_ZONE_FILE, text.as_bytes())
+                                .map_err(io)?;
+                            say(
+                                self.log,
+                                format_args!(
+                                    "core: time zone UTC{}{:02}:{:02}",
+                                    if minutes < 0 { '-' } else { '+' },
+                                    minutes.unsigned_abs() / 60,
+                                    minutes.unsigned_abs() % 60
+                                ),
+                            );
                             Ok(())
                         }
                         _ => Err(Status::BadRequest.into()),

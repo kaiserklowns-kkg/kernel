@@ -55,6 +55,7 @@ const USER_PROGRAMS: &[&str] = &[
     "usb-hid",
     "net",
     "net-echo",
+    "clock",
     "ifconfig",
     "ping",
     "host",
@@ -1133,7 +1134,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 23)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 24)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1301,7 +1302,11 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 23)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 24)"),
+    // The clock (ADR-0143): the host's two test time servers agree, 90 s
+    // ahead, so the clock service sets the clock through the kernel.
+    Expect::Contains("clock: set from network time, "),
+    Expect::Contains("init/clock set the clock"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
     Expect::Contains("PID  PPID  MEMORY"),
@@ -3688,6 +3693,7 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic, services: Service
     let udp_forward = free_udp_port()?;
     let udp_echo = udp_echo_probe(udp_forward);
     let dns_port = dns_server(IPV4_LOOPBACK)?;
+    ntp_servers()?;
     let tcp_port = tcp_greeter(IPV4_LOOPBACK, "hello from the host")?;
     let http_port = http_server(IPV4_LOOPBACK)?;
     let https = HttpsServer::start()?;
@@ -4342,6 +4348,62 @@ fn query_name(query: &[u8]) -> Option<String> {
 /// A DNS server on the host for the guest's resolver, answering for
 /// [`DNS_NAMES`] (every other name does not exist), listening at `bind`.
 /// Returns its UDP port.
+/// The ports the smoke configuration's clock service asks (ADR-0143).
+const NTP_PORTS: std::ops::RangeInclusive<u16> = 12123..=12128;
+/// How far ahead the test time servers are: the clock is set every boot.
+const NTP_AHEAD_MS: u64 = 90_000;
+
+/// Two SNTP servers on the host, started once for all of this run's boots,
+/// on the first free ports of `NTP_PORTS` (another smoke test may hold
+/// some): stratum 2, their time `NTP_AHEAD_MS` ahead of the host's, each
+/// reply to the request's nonce.
+fn ntp_servers() -> Result {
+    static STARTED: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
+    STARTED.get_or_init(start_ntp_servers).clone()
+}
+
+fn start_ntp_servers() -> Result {
+    let sockets: Vec<UdpSocket> = NTP_PORTS
+        .filter_map(|port| UdpSocket::bind(("127.0.0.1", port)).ok())
+        .take(2)
+        .collect();
+    if sockets.len() < 2 {
+        return Err(format!(
+            "no two free UDP ports in {NTP_PORTS:?} for the time servers"
+        ));
+    }
+    for socket in sockets {
+        thread::spawn(move || {
+            let mut request = [0u8; 64];
+            loop {
+                let Ok((len, from)) = socket.recv_from(&mut request) else {
+                    continue;
+                };
+                if len < 48 {
+                    continue;
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64)
+                    + NTP_AHEAD_MS;
+                let seconds = (now / 1000 + 2_208_988_800) as u32;
+                let fraction = (((now % 1000) << 32) / 1000) as u32;
+                let mut reply = [0u8; 48];
+                reply[0] = (4 << 3) | 4;
+                reply[1] = 2;
+                reply[24..32].copy_from_slice(&request[40..48]);
+                for at in [32, 40] {
+                    reply[at..at + 4].copy_from_slice(&seconds.to_be_bytes());
+                    reply[at + 4..at + 8].copy_from_slice(&fraction.to_be_bytes());
+                }
+                let _ = socket.send_to(&reply, from);
+            }
+        });
+    }
+    Ok(())
+}
+
 fn dns_server(bind: &str) -> Result<u16> {
     let socket =
         UdpSocket::bind(bind).map_err(|e| format!("cannot start the DNS server at {bind}: {e}"))?;

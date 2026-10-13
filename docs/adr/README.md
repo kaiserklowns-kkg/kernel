@@ -148,5 +148,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0139](0139-system-icons.md) | The system's icons: each system app's own picture on a lit, rounded tile as macOS and Windows show theirs (`oceans_draw::apps`), chosen by verified id; Control Center's and the player's icons from outlines | Accepted |
 | [0140](0140-ethernet-full-speed-and-relink.md) | Ethernet at full speed, and back after a cable comes out (I219 LPLU/OEM bits cleared; a 1 s NIC tick; autonegotiation again while down) | Accepted |
 | [0141](0141-a-kill-during-a-call.md) | A kill during a call no longer strands the server (an abandoned direct switch wakes its target) | Accepted |
+| [0142](0142-oceansfs-format-3.md) | OceansFS format 3: runs, CRC tables, and a bit a block (the metadata grows with runs, not blocks; 15 MiB of state for a 500 GB disk; formats 1 and 2 upgrade) | Accepted |
+| [0143](0143-network-time-and-time-zone.md) | Network time, and the time zone (`CLOCK_SET`, ABI 24; the `clock` service, two SNTP servers agreeing; Core's `TIME_ZONE`, local time on the desktop) | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

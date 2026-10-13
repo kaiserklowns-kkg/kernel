@@ -60,6 +60,56 @@ pub fn unix_ms() -> Option<u64> {
     }
 }
 
+/// The earliest and latest times the wall clock may be set to (2000 and
+/// 2200): what the real-time clock can hold, and what a sane source says.
+const SETTABLE_MS: core::ops::Range<u64> = 946_684_800_000..7_258_118_400_000;
+
+/// Sets the wall clock to `to_ms` (Unix milliseconds, ADR-0143), from a network time
+/// source; the real-time clock follows, so the next boot starts close.
+/// `false` outside [`SETTABLE_MS`].
+pub fn set_wall_clock(to_ms: u64) -> bool {
+    if !SETTABLE_MS.contains(&to_ms) {
+        return false;
+    }
+    let before = unix_ms().unwrap_or(0);
+    BOOT_UNIX_MS.store(to_ms.saturating_sub(uptime_ms()).max(1), Ordering::Relaxed);
+    let seconds = to_ms / 1000;
+    let (year, month, day) = civil_from_days(seconds / 86_400);
+    let in_day = seconds % 86_400;
+    crate::arch::rtc_set(&crate::arch::RtcReading {
+        year,
+        month,
+        day,
+        hour: (in_day / 3600) as u32,
+        minute: (in_day / 60 % 60) as u32,
+        second: (in_day % 60) as u32,
+    });
+    crate::klog::info!(
+        "wall clock set to {year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC ({:+} ms)",
+        in_day / 3600,
+        in_day / 60 % 60,
+        in_day % 60,
+        to_ms as i64 - before as i64
+    );
+    true
+}
+
+/// The date of a day counted from 1970-01-01 (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_from_days(days: u64) -> (u32, u32, u32) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    (year as u32, month as u32, day as u32)
+}
+
 /// Seconds since 1970-01-01 00:00:00 UTC of a valid reading.
 fn unix_seconds(reading: &crate::arch::RtcReading) -> u64 {
     let days = days_from_civil(reading.year, reading.month, reading.day);
@@ -90,5 +140,12 @@ pub fn self_test() {
     assert_eq!(at(2024, 2, 29), 1_709_164_800);
     assert_eq!(at(2026, 10, 3), 1_790_985_600);
     assert_eq!(at(2100, 3, 1), 4_107_542_400);
+    // And back.
+    for (year, month, day) in [(2000, 1, 1), (2024, 2, 29), (2026, 12, 31), (2100, 3, 1)] {
+        assert_eq!(
+            civil_from_days(days_from_civil(year, month, day)),
+            (year, month, day)
+        );
+    }
     crate::klog::info!("calendar self-test passed");
 }

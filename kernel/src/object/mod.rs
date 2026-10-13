@@ -140,8 +140,10 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
         // MANAGE: switching the machine off and restarting it (ADR-0085);
-        // init keeps it.
+        // init keeps it. WRITE: setting the clock (ADR-0143), which init
+        // gives a time service on request.
         ObjectKind::SystemInfo => Rights::READ
+            .union(Rights::WRITE)
             .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),

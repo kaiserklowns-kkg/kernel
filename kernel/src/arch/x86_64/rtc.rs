@@ -119,3 +119,61 @@ fn decode(raw: [u8; 7], status_b: u8) -> Option<Reading> {
         && reading.year >= 2000;
     valid.then_some(reading)
 }
+
+fn write(register: u8, value: u8) {
+    // SAFETY: as `read`: this module's ports, NMI left enabled.
+    unsafe {
+        Port::<u8>::new(INDEX).write(register);
+        Port::<u8>::new(DATA).write(value);
+    }
+}
+
+/// Status B: updates halted while the time is set.
+const SET: u8 = 0x80;
+
+/// Sets the clock (ADR-0143), in the chip's own encoding (BCD or binary,
+/// 12- or 24-hour). The century register is written only if it already
+/// holds a century: on a machine whose firmware keeps it elsewhere, that
+/// byte is someone else's.
+pub fn set(reading: &Reading) {
+    let status_b = read(STATUS_B);
+    let binary = status_b & BINARY != 0;
+    let encode = |value: u32| -> u8 {
+        let value = value as u8;
+        if binary {
+            value
+        } else {
+            (value / 10) << 4 | (value % 10)
+        }
+    };
+    let hour = if status_b & HOURS_24 != 0 {
+        encode(reading.hour)
+    } else {
+        // 12-hour: 0 is 12 AM, 12 is 12 PM.
+        let twelve = match reading.hour % 12 {
+            0 => 12,
+            h => h,
+        };
+        encode(twelve) | if reading.hour >= 12 { PM } else { 0 }
+    };
+    let century_ok = matches!(decode_byte(read(CENTURY), binary), 19..=99);
+    write(STATUS_B, status_b | SET);
+    write(SECONDS, encode(reading.second));
+    write(MINUTES, encode(reading.minute));
+    write(HOURS, hour);
+    write(DAY, encode(reading.day));
+    write(MONTH, encode(reading.month));
+    write(YEAR, encode(reading.year % 100));
+    if century_ok {
+        write(CENTURY, encode(reading.year / 100));
+    }
+    write(STATUS_B, status_b & !SET);
+}
+
+fn decode_byte(byte: u8, binary: bool) -> u32 {
+    if binary {
+        u32::from(byte)
+    } else {
+        u32::from(byte >> 4) * 10 + u32::from(byte & 0x0f)
+    }
+}

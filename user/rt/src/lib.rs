@@ -493,6 +493,11 @@ pub fn system_power(system: Handle, action: u64) -> Error {
     }
 }
 
+/// Sets the wall clock to `unix_ms` (ADR-0143): needs the `clock` grant.
+pub fn clock_set(system: Handle, unix_ms: u64) -> Result<(), Error> {
+    call(nr::CLOCK_SET, [system.0, unix_ms, 0, 0, 0, 0]).map(drop)
+}
+
 /// The bit init signals on a service's `stop` notification (`grant =
 /// stop`, ADR-0086): finish what is under way, leave things consistent,
 /// and exit. A service may also use the notification for its own bits

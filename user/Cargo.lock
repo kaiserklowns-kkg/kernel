@@ -211,6 +211,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clock"
+version = "0.1.0"
+dependencies = [
+ "oceans-net-proto",
+ "oceans-ntp",
+ "oceans-rt",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,6 +976,7 @@ version = "0.1.0"
 dependencies = [
  "oceans-dns",
  "oceans-inet",
+ "oceans-ntp",
  "oceans-rt",
 ]
 
@@ -977,6 +987,10 @@ dependencies = [
  "oceans-net-proto",
  "oceans-rt",
 ]
+
+[[package]]
+name = "oceans-ntp"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-nvme"

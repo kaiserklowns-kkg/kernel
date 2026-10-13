@@ -31,9 +31,10 @@
 /// (the boot disk and partition in the `BOOT` record); 21 = ADR-0127 (the
 /// install boot mode); 22 = ADR-0132 (50: the PS/2 pointer's events to the
 /// desktop); 23 = ADR-0136 (`DISPLAY_INFO`'s record ends with the screen's
-/// size in millimetres, from its EDID). Versions only add; existing numbers
+/// size in millimetres, from its EDID); 24 = ADR-0143 (51: setting the
+/// wall clock). Versions only add; existing numbers
 /// keep their meaning.
-pub const ABI_VERSION: u64 = 23;
+pub const ABI_VERSION: u64 = 24;
 
 /// System call numbers.
 pub mod nr {
@@ -286,6 +287,15 @@ pub mod nr {
     /// signalled as they arrive; only it may take them (else `Busy`).
     /// Needs `READ`.
     pub const DISPLAY_POINTER: u64 = 50;
+
+    // ABI 24 (ADR-0143)
+
+    /// `(system, unix_ms) -> 0` — sets the wall clock (and the real-time
+    /// clock, if it can be written) to `unix_ms`, milliseconds since 1970
+    /// UTC. Needs `WRITE` on the system information object, which init
+    /// gives only on request (`grant = clock`). `InvalidArgument` for a
+    /// time before 2000 or after 2199.
+    pub const CLOCK_SET: u64 = 51;
 }
 
 /// How `DEVICE_IRQ` delivers a device's interrupt (ABI 18, ADR-0124).

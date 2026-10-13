@@ -1,0 +1,9 @@
+[package]
+name = "oceans-ntp"
+description = "SNTP for Oceans' clock: requests, validated replies, and the time they give (ADR-0143)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

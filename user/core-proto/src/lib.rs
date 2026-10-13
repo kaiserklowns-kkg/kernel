@@ -186,6 +186,13 @@ pub mod op {
     /// data = `[percent u16]` (0 or one of [`crate::SCALE_CHOICES`]), kept
     /// across reboots.
     pub const SET_SCALE: u64 = 46;
+    /// → `[minutes i16]` (ADR-0143): the time zone, as minutes ahead of
+    /// UTC (Bangkok: 420), one of [`crate::TIME_ZONES`]. The machine's, not
+    /// an account's; 0 (UTC) until one is chosen.
+    pub const TIME_ZONE: u64 = 47;
+    /// data = `[minutes i16]`, one of [`crate::TIME_ZONES`]' offsets, kept
+    /// across reboots.
+    pub const SET_TIME_ZONE: u64 = 48;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -195,6 +202,41 @@ pub const ACCENT_COUNT: u8 = 6;
 /// The scales offered, in percent (ADR-0136; `oceans_window::Scale::CHOICES`
 /// holds the same).
 pub const SCALE_CHOICES: [u16; 7] = [100, 125, 150, 175, 200, 250, 300];
+
+/// The time zones offered (ADR-0143): minutes ahead of UTC, and the places
+/// that keep it. Fixed offsets: no daylight saving time yet, so a place
+/// that keeps it is an hour off in summer.
+pub const TIME_ZONES: [(i16, &str); 24] = [
+    (-600, "Honolulu"),
+    (-540, "Anchorage"),
+    (-480, "Los Angeles, Vancouver"),
+    (-420, "Denver, Phoenix"),
+    (-360, "Chicago, Mexico City"),
+    (-300, "New York, Toronto"),
+    (-180, "Sao Paulo, Buenos Aires"),
+    (0, "UTC, London, Lisbon"),
+    (60, "Paris, Berlin, Lagos"),
+    (120, "Athens, Cairo, Johannesburg"),
+    (180, "Istanbul, Moscow, Riyadh"),
+    (240, "Dubai"),
+    (300, "Karachi, Tashkent"),
+    (330, "India"),
+    (345, "Kathmandu"),
+    (360, "Dhaka, Almaty"),
+    (390, "Yangon"),
+    (420, "Bangkok, Hanoi, Jakarta"),
+    (480, "Singapore, Beijing, Manila, Perth"),
+    (540, "Tokyo, Seoul"),
+    (570, "Adelaide, Darwin"),
+    (600, "Sydney, Melbourne"),
+    (720, "Auckland"),
+    (780, "Tonga"),
+];
+
+/// Whether `minutes` is one of [`TIME_ZONES`]' offsets.
+pub fn valid_time_zone(minutes: i16) -> bool {
+    TIME_ZONES.iter().any(|&(offset, _)| offset == minutes)
+}
 
 /// The times the screen may lock after (ADR-0112), in minutes; 0 is never
 /// (`oceans_account::LOCK_CHOICES` keeps the same).
@@ -258,7 +300,8 @@ pub mod access {
             | op::LAYOUT
             | op::MODE
             | op::BOOT_OK
-            | op::SCALE => QUERY,
+            | op::SCALE
+            | op::TIME_ZONE => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -282,7 +325,8 @@ pub mod access {
             | op::REMOVE_USER
             | op::SIGN_IN
             | op::SET_LAYOUT
-            | op::SET_SCALE => DECIDE,
+            | op::SET_SCALE
+            | op::SET_TIME_ZONE => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

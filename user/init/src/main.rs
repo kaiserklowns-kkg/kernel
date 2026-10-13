@@ -83,6 +83,7 @@ const CONSOLE_RIGHTS: u32 = rights::READ | rights::WRITE | rights::DUPLICATE | r
 /// Input only: a keyboard driver can type but neither read nor print.
 const CONSOLE_INPUT_RIGHTS: u32 = rights::MANAGE | rights::TRANSFER;
 const SYSINFO_RIGHTS: u32 = rights::READ | rights::DUPLICATE | rights::TRANSFER;
+const CLOCK_RIGHTS: u32 = rights::READ | rights::WRITE | rights::TRANSFER;
 const USE_RIGHTS: u32 = rights::SEND | rights::DUPLICATE | rights::TRANSFER;
 const MODULE_RIGHTS: u32 = rights::READ | rights::MAP | rights::DUPLICATE | rights::TRANSFER;
 /// The device list only: opening devices stays with init.
@@ -133,6 +134,11 @@ enum Grant {
     Storage(&'static str),
     /// Asking init to switch the machine off or restart it (ADR-0085).
     Power,
+    /// Setting the wall clock (ADR-0143): the system information object
+    /// with `WRITE`.
+    Clock,
+    /// `args = WORDS`: the service's arguments (`Directory::args`).
+    Args(&'static str),
     /// Being asked to stop (ADR-0086): a notification init signals
     /// `oceans_rt::STOP` on.
     Stop,
@@ -440,7 +446,7 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                 Ok(n) => service.max_restarts = n,
                 Err(_) => return error("max-restarts must be a number"),
             },
-            "grant" | "provide" | "use" => {
+            "grant" | "provide" | "use" | "args" => {
                 let grant = match (key, value) {
                     ("grant", "log") => Grant::Log,
                     ("grant", "log-read") => Grant::LogRead,
@@ -450,6 +456,8 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                     ("grant", "console-input") => Grant::ConsoleInput,
                     ("grant", "display") => Grant::Display,
                     ("grant", "power") => Grant::Power,
+                    ("grant", "clock") => Grant::Clock,
+                    ("args", words) => Grant::Args(words),
                     ("grant", "stop") => Grant::Stop,
                     ("grant", other) => {
                         if let Some(module) = other.strip_prefix("module:")
@@ -685,6 +693,12 @@ impl Init {
                         "power",
                         "power",
                     ),
+                    Grant::Clock => (
+                        oceans_rt::duplicate(self.sysinfo, CLOCK_RIGHTS)?,
+                        "clock",
+                        "clock",
+                    ),
+                    Grant::Args(words) => (publish(words.as_bytes())?, "args", "args"),
                     // A fresh one per run; init keeps a SIGNAL end.
                     Grant::Stop => {
                         let notification = oceans_rt::notification_create()?;

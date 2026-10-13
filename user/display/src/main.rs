@@ -163,6 +163,8 @@ struct Service {
     /// millimetres and pixels, which the automatic one follows.
     scale: Scale,
     scale_chosen: u16,
+    /// The time zone (ADR-0143): minutes ahead of UTC, from Core.
+    time_zone: i16,
     screen_mm: Option<(u16, u16)>,
     screen_pixels: (i32, i32),
 }
@@ -299,6 +301,7 @@ fn main(start: Start) -> i64 {
         boot_reported: false,
         scale: Scale::ONE,
         scale_chosen: 0,
+        time_zone: 0,
         screen_mm: (info.mm_width > 0 && info.mm_height > 0)
             .then_some((info.mm_width, info.mm_height)),
         screen_pixels: (canvas.device_width, canvas.device_height),
@@ -331,6 +334,7 @@ fn main(start: Start) -> i64 {
     // The scale (ADR-0136) before the first frame: drawn at it from the
     // start.
     service.refresh_scale();
+    service.refresh_time_zone();
     service.apply_scale(&mut canvas);
     service.refresh_layout();
     service.refresh_volume();
@@ -424,6 +428,9 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_apps();
                 dirty |= service.refresh_user();
                 dirty |= service.refresh_appearance();
+                if service.refresh_time_zone() {
+                    dirty |= service.refresh_clock();
+                }
                 if service.refresh_scale() {
                     service.apply_scale(&mut canvas);
                     dirty = true;
@@ -2289,9 +2296,31 @@ impl Service {
         changed
     }
 
+    /// The time zone from Core (ADR-0143); `true` if it changed.
+    fn refresh_time_zone(&mut self) -> bool {
+        let Some(core) = self.core else {
+            return false;
+        };
+        let mut reply = [0u8; 2];
+        match core.call(op::TIME_ZONE, &[], &[], &mut reply) {
+            Ok(got) if got.len == 2 && i16::from_le_bytes(reply) != self.time_zone => {
+                self.time_zone = i16::from_le_bytes(reply);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The time here: the wall clock moved by the time zone.
+    fn local_time_ms(&self) -> Option<u64> {
+        let offset = i64::from(self.time_zone) * 60_000;
+        oceans_rt::unix_time_ms().map(|ms| ms.saturating_add_signed(offset))
+    }
+
     /// The clock and the status; `true` if they changed.
     fn refresh_clock(&mut self) -> bool {
-        let clock = oceans_rt::unix_time_ms()
+        let clock = self
+            .local_time_ms()
             .map_or_else(|| String::from("time not set"), desktop::clock_text);
         let mut status = String::new();
         if let Some(sysinfo) = self.sysinfo {
@@ -2308,7 +2337,7 @@ impl Service {
         self.desktop.clock = clock;
         self.desktop.status = status;
         // In words, for the notifications' panel (ADR-0119).
-        if let Some(unix_ms) = oceans_rt::unix_time_ms() {
+        if let Some(unix_ms) = self.local_time_ms() {
             let (time, date) = desktop::clock_long(unix_ms);
             self.desktop.clock_time = time;
             self.desktop.clock_date = date;

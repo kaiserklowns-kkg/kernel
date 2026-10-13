@@ -1,0 +1,17 @@
+[package]
+name = "clock"
+description = "The clock service: the wall clock set from network time servers, two of them agreeing (ADR-0143)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "clock"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-net-proto.workspace = true
+oceans-ntp.workspace = true

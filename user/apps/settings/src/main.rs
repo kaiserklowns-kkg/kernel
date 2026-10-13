@@ -1,7 +1,8 @@
 //! Settings: the system's settings, an app that comes with the system
 //! (ADR-0080, ADR-0081), built on the app toolkit.
 //!
-//! - **General:** the release, memory, uptime, the date and time.
+//! - **General:** the release, memory, uptime, the date and time where
+//!   the user is, and the time zone (ADR-0143).
 //! - **Network:** the addresses, the router, the DNS server, the hardware
 //!   address (ADR-0096).
 //! - **Sound:** the output and the input (ADR-0096).
@@ -118,6 +119,8 @@ struct Settings {
     scale: u16,
     /// How far down the page shown is scrolled (ADR-0138).
     page: Scroll,
+    /// The time zone (ADR-0143), as Core keeps it: minutes ahead of UTC.
+    time_zone: i16,
 }
 
 impl Settings {
@@ -179,6 +182,11 @@ impl Settings {
             && got.len == 2
         {
             self.scale = u16::from_le_bytes([reply[0], reply[1]]);
+        }
+        if let Ok(got) = core.call(op::TIME_ZONE, &[], &[], &mut reply)
+            && got.len == 2
+        {
+            self.time_zone = i16::from_le_bytes([reply[0], reply[1]]);
         }
         self.chosen = self.chosen.filter(|&i| i < self.apps.len());
         self.detail = self
@@ -292,6 +300,24 @@ impl Settings {
         match core.call(op::SET_SCALE, &percent.to_le_bytes(), &[], &mut reply) {
             Ok(_) => {
                 self.scale = percent;
+                self.message.clear();
+            }
+            Err((error, _)) => {
+                self.message = alloc::format!("Not saved: {}", error.message());
+            }
+        }
+    }
+
+    /// `SET_TIME_ZONE` (ADR-0143): Core keeps it; the desktop's clock
+    /// follows within a moment.
+    fn set_time_zone(&mut self, minutes: i16) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; 8];
+        match core.call(op::SET_TIME_ZONE, &minutes.to_le_bytes(), &[], &mut reply) {
+            Ok(_) => {
+                self.time_zone = minutes;
                 self.message.clear();
             }
             Err((error, _)) => {
@@ -455,13 +481,16 @@ fn general(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     let _ = write!(line, "{} h {} min", seconds / 3600, seconds / 60 % 60);
     ui.row("Up for", &line);
     line.clear();
+    // The date and time where the user is (ADR-0143), and the time zone.
+    let zone = settings.time_zone;
     match oceans_rt::unix_time_ms() {
         Some(ms) => {
+            let ms = ms.saturating_add_signed(i64::from(zone) * 60_000);
             let (year, month, day) = oceans_package::date::civil((ms / 86_400_000) as u32);
             let minutes = ms / 60_000;
             let _ = write!(
                 line,
-                "{year}-{month:02}-{day:02} {:02}:{:02} UTC",
+                "{year}-{month:02}-{day:02} {:02}:{:02}",
                 minutes / 60 % 24,
                 minutes % 60
             );
@@ -469,6 +498,31 @@ fn general(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         None => line.push_str("not set"),
     }
     ui.row("Date and time", &line);
+    line.clear();
+    let index = oceans_core_proto::TIME_ZONES
+        .iter()
+        .position(|&(offset, _)| offset == zone);
+    let _ = write!(line, "{}", ZoneName(zone));
+    if let Some(i) = index {
+        let _ = write!(line, "  {}", oceans_core_proto::TIME_ZONES[i].1);
+    }
+    ui.row("Time zone", &line);
+    if settings.core.is_some() {
+        let (x, y) = (ui.area.x, ui.y);
+        let mut chosen = None;
+        let last = oceans_core_proto::TIME_ZONES.len() - 1;
+        let at = index.unwrap_or(7);
+        if ui.button_in(Rect::new(x, y, 120, 30), "West", false) && at > 0 {
+            chosen = Some(at - 1);
+        }
+        if ui.button_in(Rect::new(x + 128, y, 120, 30), "East", false) && at < last {
+            chosen = Some(at + 1);
+        }
+        ui.y = y + 38;
+        if let Some(i) = chosen {
+            settings.set_time_zone(oceans_core_proto::TIME_ZONES[i].0);
+        }
+    }
     // The appearance (ADR-0113): light or dark, and the accent.
     if settings.core.is_none() {
         return;
@@ -982,6 +1036,7 @@ fn main(start: Start) -> i64 {
         appearance: (0, 0),
         scale: 0,
         page: Scroll::default(),
+        time_zone: 0,
     };
     oceans_ui::run_resizable(
         &directory,
@@ -993,4 +1048,20 @@ fn main(start: Start) -> i64 {
         &mut settings,
         frame,
     )
+}
+
+/// A time zone as `UTC+07:00` (ADR-0143).
+struct ZoneName(i16);
+
+impl core::fmt::Display for ZoneName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let minutes = self.0.unsigned_abs();
+        write!(
+            f,
+            "UTC{}{:02}:{:02}",
+            if self.0 < 0 { '-' } else { '+' },
+            minutes / 60,
+            minutes % 60
+        )
+    }
 }

@@ -1,4 +1,5 @@
-//! OceansFS (ADR-0022): the on-disk volume behind the filesystem service.
+//! OceansFS (ADR-0022, ADR-0142): the on-disk volume behind the filesystem
+//! service.
 //!
 //! # Format
 //!
@@ -10,18 +11,26 @@
 //!   CRC32C.
 //! - **Metadata** is the whole directory tree, serialized in preorder:
 //!   - per node: kind, name, then
-//!     - for a file: size and block list, each block with the CRC-32C of
-//!       its contents (format 2, ADR-0027; block 0 = a hole that reads as
-//!       zeros);
+//!     - for a file (format 3, ADR-0142): its size; its **runs** (file
+//!       block, disk block, length: stretches of the file in consecutive
+//!       disk blocks; a file block in no run is a hole that reads as
+//!       zeros); and its **CRC tables**, one for each 1024 file blocks:
+//!       the disk block holding their CRC-32Cs (ADR-0027) and that
+//!       block's own CRC (block 0: none yet, its blocks all holes);
 //!     - for a directory: child count.
+//!   - Formats 1 and 2 listed every block of a file (with its CRC in 2);
+//!     they still mount, and are written as format 3 at the next commit.
 //! - Every data block read from the disk is checked against its CRC, so
 //!   silent corruption is reported (`Corrupt`) instead of returned as
-//!   data. Format 1 volumes (no data CRCs) still mount: their CRCs are
-//!   computed at mount and the volume is written as format 2 at the next
-//!   commit.
-//! - Everything else is data blocks. There is no allocation bitmap: the
-//!   free blocks are whatever the metadata does not reference, recomputed
-//!   at mount.
+//!   data; so is every CRC table.
+//! - Everything else is data blocks. There is no allocation bitmap on
+//!   disk: the free blocks are whatever the metadata does not reference,
+//!   found at mount and kept as a bit a block (`blocks`).
+//!
+//! The metadata grows with the number of runs and tables, not of blocks: a
+//! 256 MiB file written in one go is one run and 64 tables (about 530
+//! bytes). A commit writes the metadata and only the CRC tables that
+//! changed.
 //!
 //! # Crash consistency
 //!
@@ -30,7 +39,7 @@
 //! the durable state still references are freed only once a newer
 //! generation is durable. A **commit** works in this order:
 //!
-//! 1. write the metadata to free blocks;
+//! 1. write the changed CRC tables, then the metadata, to free blocks;
 //! 2. flush;
 //! 3. write the next superblock;
 //! 4. flush.
@@ -53,11 +62,19 @@
 
 extern crate alloc;
 
+mod blocks;
+mod runs;
+
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+
+use blocks::Blocks;
+#[cfg(test)]
+use blocks::State;
+use runs::Runs;
 
 pub const BLOCK_SIZE: usize = 4096;
 pub type BlockBuf = [u8; BLOCK_SIZE];
@@ -68,8 +85,7 @@ pub const MAX_NAME: usize = 128;
 pub const MAX_NODES: usize = 4096;
 /// Deepest directory nesting (the root is depth 0).
 pub const MAX_DEPTH: usize = 32;
-/// Largest file (ADR-0134): an update package or a video fits. Its block
-/// list (8 bytes a block, 512 KiB at most) fits the metadata many times.
+/// Largest file (ADR-0134): an update package or a video fits.
 pub const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 /// Bytes of volatile (in-memory) file contents.
 pub const MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
@@ -77,8 +93,9 @@ pub const MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MIN_BLOCKS: u64 = 16;
 
 const MAGIC: &[u8; 8] = b"OCEANSFS";
-/// The format written; 1 (no data checksums) is still read.
-const VERSION: u32 = 2;
+/// The format written; 1 (no data checksums) and 2 (a CRC a block in the
+/// metadata) are still read.
+const VERSION: u32 = 3;
 const SUPERBLOCKS: u64 = 2;
 /// Superblock layout.
 const SB_META_LIST: usize = 48;
@@ -88,15 +105,14 @@ const MAX_META_BLOCKS: usize = (SB_CRC - SB_META_LIST) / 4;
 const KIND_FILE: u8 = 1;
 const KIND_DIRECTORY: u8 = 2;
 
-/// Block states.
-const FREE: u8 = 0;
-/// Referenced by the durable state (or by live nodes since).
-const USED: u8 = 1;
-/// Allocated since the last commit: may be overwritten in place.
-const FRESH: u8 = 2;
-/// No longer referenced, but the durable state still does: freed at the
-/// next commit.
-const PENDING: u8 = 3;
+/// File blocks a CRC table covers.
+const CRCS_PER_TABLE: u32 = (BLOCK_SIZE / 4) as u32;
+/// Clean CRC tables kept in memory before they are let go (16 MiB).
+const MAX_LOADED_TABLES: usize = 4096;
+/// Metadata bytes: a file's fixed part, a run, a table.
+const FILE_RECORD: usize = 16;
+const RUN_RECORD: usize = 12;
+const TABLE_RECORD: usize = 8;
 
 const CACHE_SLOTS: usize = 64;
 
@@ -200,31 +216,60 @@ pub fn crc32c(bytes: &[u8]) -> u32 {
     })
 }
 
-/// A file block on disk and the CRC-32C of its contents (block 0: a hole).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A data block on disk and the CRC-32C of its contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Extent {
     block: u32,
     crc: u32,
 }
 
-impl Extent {
-    const HOLE: Self = Self { block: 0, crc: 0 };
+/// The CRCs of 1024 file blocks.
+#[derive(Default)]
+struct Table {
+    /// Its disk block (0: none yet), and that block's CRC.
+    at: u32,
+    crc: u32,
+    /// Loaded (or made); `None`: on disk only.
+    crcs: Option<Box<[u32; CRCS_PER_TABLE as usize]>>,
+    /// Changed since the last commit: written then, to a new block.
+    dirty: bool,
+}
 
-    fn is_hole(self) -> bool {
-        self.block == 0
+/// A file's contents on disk.
+#[derive(Default)]
+struct DiskFile {
+    size: u64,
+    runs: Runs,
+    /// One for each 1024 file blocks.
+    tables: Vec<Table>,
+}
+
+/// File blocks for `size` bytes.
+fn blocks_for(size: u64) -> u32 {
+    size.div_ceil(BLOCK_SIZE as u64) as u32
+}
+
+/// CRC tables for `blocks` file blocks.
+fn tables_for(blocks: u32) -> usize {
+    blocks.div_ceil(CRCS_PER_TABLE) as usize
+}
+
+impl DiskFile {
+    fn meta_size(&self) -> usize {
+        FILE_RECORD + RUN_RECORD * self.runs.len() + TABLE_RECORD * self.tables.len()
     }
 }
 
 enum Data {
     Memory(Vec<u8>),
-    Disk { size: u64, blocks: Vec<Extent> },
+    Disk(DiskFile),
 }
 
 impl Data {
     fn size(&self) -> u64 {
         match self {
             Self::Memory(bytes) => bytes.len() as u64,
-            Self::Disk { size, .. } => *size,
+            Self::Disk(file) => file.size,
         }
     }
 }
@@ -361,6 +406,35 @@ impl Reader<'_> {
     }
 }
 
+/// Makes table `table` loaded: read from the disk and checked, or made
+/// empty if it has no block yet. `loaded` counts the tables in memory.
+fn load_table<D: BlockDevice>(
+    device: &mut Option<D>,
+    table: &mut Table,
+    loaded: &mut usize,
+) -> Result<(), FsError> {
+    if table.crcs.is_some() {
+        return Ok(());
+    }
+    let mut crcs = Box::new([0u32; CRCS_PER_TABLE as usize]);
+    if table.at != 0 {
+        let mut block = Box::new([0u8; BLOCK_SIZE]);
+        device
+            .as_mut()
+            .ok_or(FsError::Io)?
+            .read_block(u64::from(table.at), &mut block)?;
+        if crc32c(&block[..]) != table.crc {
+            return Err(FsError::Corrupt);
+        }
+        for (crc, bytes) in crcs.iter_mut().zip(block.as_chunks::<4>().0) {
+            *crc = u32::from_le_bytes(*bytes);
+        }
+    }
+    table.crcs = Some(crcs);
+    *loaded += 1;
+    Ok(())
+}
+
 pub struct Volume<D> {
     /// `None`: an in-memory volume.
     device: Option<D>,
@@ -368,12 +442,14 @@ pub struct Volume<D> {
     free_slots: Vec<NodeId>,
     live_nodes: usize,
     memory_bytes: usize,
-    states: Vec<u8>,
-    free_blocks: u64,
-    cursor: usize,
+    blocks: Blocks,
     generation: u64,
     meta_blocks: Vec<u32>,
     dirty: bool,
+    /// CRC tables changed since the last commit (each takes a block then),
+    /// and tables in memory.
+    dirty_tables: u64,
+    loaded_tables: usize,
     cache: Vec<Option<(u32, Box<BlockBuf>)>>,
     /// The format commits write (always [`VERSION`]; tests write older
     /// ones to check upgrades).
@@ -390,22 +466,18 @@ impl<D: BlockDevice> Volume<D> {
             opens: 0,
             depth: 0,
         };
-        let mut states = vec![FREE; total_blocks as usize];
-        for state in states.iter_mut().take(SUPERBLOCKS as usize) {
-            *state = USED;
-        }
         Self {
             device,
             nodes: vec![Some(root)],
             free_slots: Vec::new(),
             live_nodes: 1,
             memory_bytes: 0,
-            states,
-            free_blocks: total_blocks.saturating_sub(SUPERBLOCKS),
-            cursor: SUPERBLOCKS as usize,
+            blocks: Blocks::new(total_blocks, SUPERBLOCKS),
             generation: 0,
             meta_blocks: Vec::new(),
             dirty: false,
+            dirty_tables: 0,
+            loaded_tables: 0,
             cache: (0..CACHE_SLOTS).map(|_| None).collect(),
             format: VERSION,
         }
@@ -473,7 +545,7 @@ impl<D: BlockDevice> Volume<D> {
         let mut meta = Vec::new();
         let mut block = Box::new([0u8; BLOCK_SIZE]);
         for &number in &superblock.meta_blocks {
-            self.claim(number)?;
+            self.blocks.claim(number)?;
             self.device
                 .as_mut()
                 .expect("device")
@@ -488,8 +560,10 @@ impl<D: BlockDevice> Volume<D> {
         self.parse(&meta, superblock.version)?;
         self.generation = superblock.generation;
         self.meta_blocks = superblock.meta_blocks.clone();
-        if superblock.version < VERSION {
+        if superblock.version < 2 {
             self.compute_checksums()?;
+        }
+        if superblock.version < VERSION {
             // Written as the current format at the next commit.
             self.dirty = true;
         }
@@ -501,36 +575,114 @@ impl<D: BlockDevice> Volume<D> {
         let mut block = Box::new([0u8; BLOCK_SIZE]);
         for id in 0..self.nodes.len() {
             let Some(Node {
-                content: Content::File(Data::Disk { blocks, .. }),
+                content: Content::File(Data::Disk(file)),
                 ..
             }) = self.nodes[id].as_mut()
             else {
                 continue;
             };
             let device = self.device.as_mut().expect("mounted");
-            for extent in blocks.iter_mut().filter(|e| !e.is_hole()) {
-                device
-                    .read_block(u64::from(extent.block), &mut block)
-                    .map_err(|_| "cannot read data to checksum it")?;
-                extent.crc = crc32c(&block[..]);
+            for (start, disk, len) in file.runs.iter() {
+                for i in 0..len {
+                    device
+                        .read_block(u64::from(disk + i), &mut block)
+                        .map_err(|_| "cannot read data to checksum it")?;
+                    let index = start + i;
+                    let table = &mut file.tables[(index / CRCS_PER_TABLE) as usize];
+                    table.crcs.as_mut().expect("made at parse")
+                        [(index % CRCS_PER_TABLE) as usize] = crc32c(&block[..]);
+                }
             }
         }
         Ok(())
     }
 
-    /// Marks a block referenced by the metadata as used, exactly once.
-    fn claim(&mut self, block: u32) -> Result<(), &'static str> {
-        let state = self
-            .states
-            .get_mut(block as usize)
-            .filter(|_| u64::from(block) >= SUPERBLOCKS)
-            .ok_or("block number out of range")?;
-        if *state != FREE {
-            return Err("block referenced twice");
+    /// A file record's contents, after its name.
+    fn parse_file(
+        &mut self,
+        reader: &mut Reader<'_>,
+        version: u32,
+    ) -> Result<DiskFile, &'static str> {
+        let size = reader.u64()?;
+        if size > MAX_FILE_SIZE {
+            return Err("bad file size");
         }
-        *state = USED;
-        self.free_blocks -= 1;
-        Ok(())
+        let count = blocks_for(size);
+        let mut file = DiskFile {
+            size,
+            ..DiskFile::default()
+        };
+        if version >= 3 {
+            let runs = reader.u32()? as usize;
+            if runs > reader.remaining() / RUN_RECORD {
+                return Err("bad run count");
+            }
+            for _ in 0..runs {
+                let (start, disk, len) = (reader.u32()?, reader.u32()?, reader.u32()?);
+                if start.checked_add(len).is_none_or(|end| end > count)
+                    || disk.checked_add(len).is_none()
+                    || !file.runs.push(start, disk, len)
+                {
+                    return Err("bad run");
+                }
+                for block in disk..disk + len {
+                    self.blocks.claim(block)?;
+                }
+            }
+            let tables = reader.u32()? as usize;
+            if tables != tables_for(count) || tables > reader.remaining() / TABLE_RECORD {
+                return Err("bad table count");
+            }
+            for index in 0..tables as u32 {
+                let (at, crc) = (reader.u32()?, reader.u32()?);
+                if at == 0 {
+                    let from = index * CRCS_PER_TABLE;
+                    if file.runs.any_in(from, from.saturating_add(CRCS_PER_TABLE)) {
+                        return Err("a table missing");
+                    }
+                } else {
+                    self.blocks.claim(at)?;
+                }
+                file.tables.push(Table {
+                    at,
+                    crc,
+                    crcs: None,
+                    dirty: false,
+                });
+            }
+            return Ok(file);
+        }
+        // Formats 1 and 2: every block, each with its CRC in 2. The tables
+        // are made here, to be written at the next commit.
+        let listed = reader.u32()?;
+        if listed != count || listed as usize > reader.remaining() / 4 {
+            return Err("bad file size");
+        }
+        for _ in 0..tables_for(count) {
+            file.tables.push(Table {
+                crcs: Some(Box::new([0; CRCS_PER_TABLE as usize])),
+                dirty: true,
+                ..Table::default()
+            });
+        }
+        self.dirty_tables += file.tables.len() as u64;
+        self.loaded_tables += file.tables.len();
+        for index in 0..count {
+            let block = reader.u32()?;
+            let crc = if version >= 2 { reader.u32()? } else { 0 };
+            if block == 0 {
+                continue;
+            }
+            self.blocks.claim(block)?;
+            if !file.runs.push(index, block, 1) {
+                return Err("bad file size");
+            }
+            file.tables[(index / CRCS_PER_TABLE) as usize]
+                .crcs
+                .as_mut()
+                .expect("made above")[(index % CRCS_PER_TABLE) as usize] = crc;
+        }
+        Ok(file)
     }
 
     fn parse(&mut self, bytes: &[u8], version: u32) -> Result<(), &'static str> {
@@ -563,23 +715,10 @@ impl<D: BlockDevice> Volume<D> {
             }
             let name = String::from(core::str::from_utf8(name).map_err(|_| "invalid name")?);
             let (content, children) = match kind {
-                KIND_FILE => {
-                    let size = reader.u64()?;
-                    let count = reader.u32()? as usize;
-                    if size > MAX_FILE_SIZE || count as u64 != size.div_ceil(BLOCK_SIZE as u64) {
-                        return Err("bad file size");
-                    }
-                    let mut blocks = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        let block = reader.u32()?;
-                        let crc = if version >= 2 { reader.u32()? } else { 0 };
-                        if block != 0 {
-                            self.claim(block)?;
-                        }
-                        blocks.push(Extent { block, crc });
-                    }
-                    (Content::File(Data::Disk { size, blocks }), 0)
-                }
+                KIND_FILE => (
+                    Content::File(Data::Disk(self.parse_file(&mut reader, version)?)),
+                    0,
+                ),
                 KIND_DIRECTORY => {
                     let children = reader.u32()?;
                     // Each child takes at least two bytes.
@@ -647,8 +786,8 @@ impl<D: BlockDevice> Volume<D> {
 
     /// (used, total) blocks, superblocks and metadata included.
     pub fn usage(&self) -> (u64, u64) {
-        let total = self.states.len() as u64;
-        (total - self.free_blocks, total)
+        let total = self.blocks.total();
+        (total - self.blocks.free(), total)
     }
 
     pub fn device(&self) -> Option<&D> {
@@ -739,16 +878,30 @@ impl<D: BlockDevice> Volume<D> {
         if let Some(node) = self.nodes[id].take() {
             match node.content {
                 Content::File(Data::Memory(bytes)) => self.memory_bytes -= bytes.len(),
-                Content::File(Data::Disk { blocks, .. }) => {
-                    for extent in blocks.into_iter().filter(|e| !e.is_hole()) {
-                        self.release_block(extent.block);
-                    }
+                Content::File(Data::Disk(mut file)) => {
+                    file.runs.truncate(0, |block| self.blocks.release(block));
+                    self.drop_tables(&mut file, 0);
                 }
                 Content::Directory(_) => {}
             }
         }
         self.free_slots.push(id);
         self.live_nodes -= 1;
+    }
+
+    /// Lets go of a file's CRC tables from `keep` on.
+    fn drop_tables(&mut self, file: &mut DiskFile, keep: usize) {
+        for table in file.tables.drain(keep.min(file.tables.len())..) {
+            if table.at != 0 {
+                self.blocks.release(table.at);
+            }
+            if table.dirty {
+                self.dirty_tables -= 1;
+            }
+            if table.crcs.is_some() {
+                self.loaded_tables -= 1;
+            }
+        }
     }
 
     // ---- Namespace ---------------------------------------------------------
@@ -801,7 +954,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         if !volatile {
             // The node's metadata record must fit at the next commit.
-            self.ensure_room(2 + name.len() + 12, 0)?;
+            self.ensure_room(2 + name.len() + FILE_RECORD, 0)?;
         }
         let content = match kind {
             Kind::Directory => Content::Directory(BTreeMap::new()),
@@ -813,10 +966,7 @@ impl<D: BlockDevice> Volume<D> {
                 self.memory_bytes += bytes.len();
                 Content::File(Data::Memory(bytes))
             }
-            Kind::File => Content::File(Data::Disk {
-                size: 0,
-                blocks: Vec::new(),
-            }),
+            Kind::File => Content::File(Data::Disk(DiskFile::default())),
         };
         let id = self.insert_node(Node {
             content,
@@ -914,7 +1064,7 @@ impl<D: BlockDevice> Volume<D> {
             return Err(FsError::NoSpace);
         }
         if !volatile {
-            self.ensure_room(2 + new_name.len() + 12, 0)?;
+            self.ensure_room(2 + new_name.len() + FILE_RECORD, 0)?;
         }
         // Checks done: now the change.
         if let Some(target) = target {
@@ -982,9 +1132,57 @@ impl<D: BlockDevice> Volume<D> {
 
     // ---- File contents -----------------------------------------------------
 
+    /// Takes a disk file out of its node (and puts it back with
+    /// `put_file`), so it can change while the device is borrowed.
+    fn take_file(&mut self, id: NodeId) -> DiskFile {
+        match self.node_mut(id) {
+            Ok(Node {
+                content: Content::File(Data::Disk(file)),
+                ..
+            }) => core::mem::take(file),
+            _ => unreachable!("checked by callers"),
+        }
+    }
+
+    fn put_file(&mut self, id: NodeId, file: DiskFile) {
+        if let Ok(Node {
+            content: Content::File(Data::Disk(slot)),
+            ..
+        }) = self.node_mut(id)
+        {
+            *slot = file;
+        }
+    }
+
+    /// The CRC of file block `index` (its table loaded if need be).
+    fn crc_of(&mut self, file: &mut DiskFile, index: u32) -> Result<u32, FsError> {
+        let table = file
+            .tables
+            .get_mut((index / CRCS_PER_TABLE) as usize)
+            .ok_or(FsError::Corrupt)?;
+        load_table(&mut self.device, table, &mut self.loaded_tables)?;
+        Ok(table.crcs.as_ref().expect("loaded")[(index % CRCS_PER_TABLE) as usize])
+    }
+
+    /// Sets the CRC of file block `index`; its table becomes dirty.
+    fn set_crc(&mut self, file: &mut DiskFile, index: u32, crc: u32) -> Result<(), FsError> {
+        let t = (index / CRCS_PER_TABLE) as usize;
+        if file.tables.len() <= t {
+            file.tables.resize_with(t + 1, Table::default);
+        }
+        let table = &mut file.tables[t];
+        load_table(&mut self.device, table, &mut self.loaded_tables)?;
+        table.crcs.as_mut().expect("loaded")[(index % CRCS_PER_TABLE) as usize] = crc;
+        if !table.dirty {
+            table.dirty = true;
+            self.dirty_tables += 1;
+        }
+        Ok(())
+    }
+
     /// Reads up to `out.len()` bytes at `offset`; returns how many.
     pub fn read(&mut self, id: NodeId, offset: u64, out: &mut [u8]) -> Result<usize, FsError> {
-        let (size, blocks) = match &self.node(id)?.content {
+        let size = match &self.node(id)?.content {
             Content::Directory(_) => return Err(FsError::IsADirectory),
             Content::File(Data::Memory(bytes)) => {
                 let start = usize::try_from(offset)
@@ -994,26 +1192,32 @@ impl<D: BlockDevice> Volume<D> {
                 out[..len].copy_from_slice(&bytes[start..start + len]);
                 return Ok(len);
             }
-            Content::File(Data::Disk { size, blocks }) => (*size, blocks.clone()),
+            Content::File(Data::Disk(file)) => file.size,
         };
         let start = offset.min(size);
         let len = (out.len() as u64).min(size - start) as usize;
-        let mut done = 0;
-        while done < len {
-            let position = start + done as u64;
-            let index = (position / BLOCK_SIZE as u64) as usize;
-            let in_block = (position % BLOCK_SIZE as u64) as usize;
-            let chunk = (BLOCK_SIZE - in_block).min(len - done);
-            let extent = blocks[index];
-            if extent.is_hole() {
-                out[done..done + chunk].fill(0);
-            } else {
-                let data = self.read_cached(extent)?;
-                out[done..done + chunk].copy_from_slice(&data[in_block..in_block + chunk]);
+        let mut file = self.take_file(id);
+        let result = (|| {
+            let mut done = 0;
+            while done < len {
+                let position = start + done as u64;
+                let index = (position / BLOCK_SIZE as u64) as u32;
+                let in_block = (position % BLOCK_SIZE as u64) as usize;
+                let chunk = (BLOCK_SIZE - in_block).min(len - done);
+                match file.runs.get(index) {
+                    None => out[done..done + chunk].fill(0),
+                    Some(block) => {
+                        let crc = self.crc_of(&mut file, index)?;
+                        let data = self.read_cached(Extent { block, crc })?;
+                        out[done..done + chunk].copy_from_slice(&data[in_block..in_block + chunk]);
+                    }
+                }
+                done += chunk;
             }
-            done += chunk;
-        }
-        Ok(len)
+            Ok(len)
+        })();
+        self.put_file(id, file);
+        result
     }
 
     /// Writes `data` at `offset`, extending the file as needed.
@@ -1047,11 +1251,11 @@ impl<D: BlockDevice> Volume<D> {
                 bytes[offset as usize..end as usize].copy_from_slice(data);
                 Ok(data.len())
             }
-            Content::File(Data::Disk { size, .. }) => {
+            Content::File(Data::Disk(file)) => {
                 if data.is_empty() {
                     return Ok(0);
                 }
-                let size = *size;
+                let size = file.size;
                 if offset > size {
                     self.zero_tail(id, size, offset)?;
                 }
@@ -1061,100 +1265,101 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
-    /// Takes a disk file's block list out of its node (and puts it back
-    /// with `put_blocks`), so blocks can be changed while the device is
-    /// borrowed.
-    fn take_blocks(&mut self, id: NodeId) -> (u64, Vec<Extent>) {
-        match self.node_mut(id) {
-            Ok(Node {
-                content: Content::File(Data::Disk { size, blocks }),
-                ..
-            }) => (*size, core::mem::take(blocks)),
-            _ => unreachable!("checked by callers"),
-        }
-    }
-
-    fn put_blocks(&mut self, id: NodeId, new_size: u64, new_blocks: Vec<Extent>) {
-        if let Ok(Node {
-            content: Content::File(Data::Disk { size, blocks }),
-            ..
-        }) = self.node_mut(id)
-        {
-            *size = new_size;
-            *blocks = new_blocks;
-        }
+    /// What writing file blocks `first..=last` of `file` needs at most:
+    /// metadata bytes, and blocks (copies, and tables to write at the
+    /// commit).
+    fn write_needs(&self, file: &DiskFile, first: u32, last: u32) -> (usize, u64) {
+        let copies = (first..=last)
+            .filter(|&i| file.runs.get(i).is_none_or(|b| !self.blocks.is_fresh(b)))
+            .count();
+        let (first_table, last_table) = (
+            (first / CRCS_PER_TABLE) as usize,
+            (last / CRCS_PER_TABLE) as usize,
+        );
+        let tables = (first_table..=last_table)
+            .filter(|&t| file.tables.get(t).is_none_or(|table| !table.dirty))
+            .count();
+        let new_tables = (last_table + 1).saturating_sub(file.tables.len());
+        // Each block copied may start a run of its own.
+        let meta = RUN_RECORD * copies + TABLE_RECORD * new_tables;
+        (meta, (copies + tables) as u64)
     }
 
     fn write_disk(&mut self, id: NodeId, offset: u64, data: &[u8]) -> Result<(), FsError> {
         let end = offset + data.len() as u64;
-        let first = (offset / BLOCK_SIZE as u64) as usize;
-        let last = ((end - 1) / BLOCK_SIZE as u64) as usize;
-        let Content::File(Data::Disk { blocks, .. }) = &self.node(id)?.content else {
+        let first = (offset / BLOCK_SIZE as u64) as u32;
+        let last = ((end - 1) / BLOCK_SIZE as u64) as u32;
+        let Content::File(Data::Disk(file)) = &self.node(id)?.content else {
             unreachable!("checked by callers");
         };
-        // Every block not written since the last commit is copied.
-        let copies = (first..=last)
-            .filter(|&i| {
-                blocks
-                    .get(i)
-                    .is_none_or(|e| e.is_hole() || self.states[e.block as usize] != FRESH)
-            })
-            .count();
-        let new_entries = (last + 1).saturating_sub(blocks.len());
-        self.ensure_room(8 * new_entries, copies as u64)?;
-        let (size, mut blocks) = self.take_blocks(id);
-        if blocks.len() <= last {
-            blocks.resize(last + 1, Extent::HOLE);
-        }
+        let (meta, blocks) = self.write_needs(file, first, last);
+        self.ensure_room(meta, blocks)?;
+        let mut file = self.take_file(id);
+        let size = file.size;
         let mut result = Ok(());
-        for (index, slot) in blocks.iter_mut().enumerate().take(last + 1).skip(first) {
-            let block_start = index as u64 * BLOCK_SIZE as u64;
+        for index in first..=last {
+            let block_start = u64::from(index) * BLOCK_SIZE as u64;
             let from = offset.max(block_start);
             let to = end.min(block_start + BLOCK_SIZE as u64);
-            let old = *slot;
-            let mut buffer: Box<BlockBuf> = if old.is_hole() {
-                Box::new([0u8; BLOCK_SIZE])
-            } else {
-                match self.read_cached(old) {
-                    Ok(data) => Box::new(*data),
-                    Err(error) => {
-                        result = Err(error);
-                        break;
+            let old = file.runs.get(index);
+            let mut buffer: Box<BlockBuf> = match old {
+                None => Box::new([0u8; BLOCK_SIZE]),
+                Some(block) => {
+                    let read = self.crc_of(&mut file, index).and_then(|crc| {
+                        self.read_cached(Extent { block, crc })
+                            .map(|d| Box::new(*d))
+                    });
+                    match read {
+                        Ok(buffer) => buffer,
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
                     }
                 }
             };
             buffer[(from - block_start) as usize..(to - block_start) as usize]
                 .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
             let crc = crc32c(&buffer[..]);
-            if !old.is_hole() && self.states[old.block as usize] == FRESH {
-                if let Err(error) = self.write_cached(old.block, buffer) {
-                    result = Err(error);
-                    break;
+            match old {
+                Some(block) if self.blocks.is_fresh(block) => {
+                    if let Err(error) = self.write_cached(block, buffer) {
+                        result = Err(error);
+                        break;
+                    }
                 }
-                slot.crc = crc;
-            } else {
-                let new = self.allocate_block().expect("room ensured");
-                if let Err(error) = self.write_cached(new, buffer) {
-                    self.release_block(new);
-                    result = Err(error);
-                    break;
+                _ => {
+                    // On from the block before, so a file written in order
+                    // stays one run.
+                    let near = index
+                        .checked_sub(1)
+                        .and_then(|before| file.runs.get(before))
+                        .map(|block| block + 1);
+                    let new = self.blocks.allocate(near).expect("room ensured");
+                    if let Err(error) = self.write_cached(new, buffer) {
+                        self.blocks.release(new);
+                        result = Err(error);
+                        break;
+                    }
+                    file.runs.set(index, new);
+                    if let Some(old) = old {
+                        self.blocks.release(old);
+                    }
                 }
-                *slot = Extent { block: new, crc };
-                if !old.is_hole() {
-                    self.release_block(old.block);
-                }
+            }
+            if let Err(error) = self.set_crc(&mut file, index, crc) {
+                result = Err(error);
+                break;
             }
         }
         // On success the file grows to `end`; on failure, blocks past the
-        // old size are dropped so size and block list always agree.
+        // old size are dropped so size, runs and tables always agree.
         let new_size = if result.is_ok() { size.max(end) } else { size };
-        let keep = new_size.div_ceil(BLOCK_SIZE as u64) as usize;
-        for extent in blocks.drain(keep.min(blocks.len())..) {
-            if !extent.is_hole() {
-                self.release_block(extent.block);
-            }
-        }
-        self.put_blocks(id, new_size, blocks);
+        let keep = blocks_for(new_size);
+        file.runs.truncate(keep, |block| self.blocks.release(block));
+        self.drop_tables(&mut file, tables_for(keep));
+        file.size = new_size;
+        self.put_file(id, file);
         self.dirty = true;
         result
     }
@@ -1187,23 +1392,24 @@ impl<D: BlockDevice> Volume<D> {
                 }
                 Ok(())
             }
-            Content::File(Data::Disk { size, blocks }) => {
-                let size = *size;
-                let count = new_size.div_ceil(BLOCK_SIZE as u64) as usize;
-                if count > blocks.len() {
-                    self.ensure_room(8 * (count - blocks.len()), 0)?;
+            Content::File(Data::Disk(file)) => {
+                let size = file.size;
+                let count = blocks_for(new_size);
+                let tables = tables_for(count);
+                if tables > file.tables.len() {
+                    self.ensure_room(TABLE_RECORD * (tables - file.tables.len()), 0)?;
                 }
                 if new_size > size {
                     self.zero_tail(id, size, new_size)?;
                 }
-                let (_, mut blocks) = self.take_blocks(id);
-                for extent in blocks.drain(count.min(blocks.len())..) {
-                    if !extent.is_hole() {
-                        self.release_block(extent.block);
-                    }
-                }
-                blocks.resize(count, Extent::HOLE);
-                self.put_blocks(id, new_size, blocks);
+                let mut file = self.take_file(id);
+                file.runs
+                    .truncate(count, |block| self.blocks.release(block));
+                self.drop_tables(&mut file, tables);
+                // Growing: the new blocks are holes, their tables empty.
+                file.tables.resize_with(tables, Table::default);
+                file.size = new_size;
+                self.put_file(id, file);
                 self.dirty = true;
                 Ok(())
             }
@@ -1224,32 +1430,6 @@ impl<D: BlockDevice> Volume<D> {
 
     // ---- Blocks ------------------------------------------------------------
 
-    fn allocate_block(&mut self) -> Option<u32> {
-        let total = self.states.len();
-        for step in 0..total {
-            let index = (self.cursor + step) % total;
-            if self.states[index] == FREE {
-                self.states[index] = FRESH;
-                self.free_blocks -= 1;
-                self.cursor = index + 1;
-                return Some(index as u32);
-            }
-        }
-        None
-    }
-
-    fn release_block(&mut self, block: u32) {
-        let state = &mut self.states[block as usize];
-        match *state {
-            FRESH => {
-                *state = FREE;
-                self.free_blocks += 1;
-            }
-            USED => *state = PENDING,
-            other => debug_assert!(false, "releasing block {block} in state {other}"),
-        }
-    }
-
     /// Bytes the metadata would take if committed now.
     fn meta_size(&self) -> usize {
         let mut size = 0;
@@ -1259,7 +1439,7 @@ impl<D: BlockDevice> Volume<D> {
                 continue;
             };
             match &node.content {
-                Content::File(Data::Disk { blocks, .. }) => size += 12 + 8 * blocks.len(),
+                Content::File(Data::Disk(file)) => size += file.meta_size(),
                 Content::File(Data::Memory(_)) => {}
                 Content::Directory(entries) => {
                     size += 4;
@@ -1275,15 +1455,18 @@ impl<D: BlockDevice> Volume<D> {
         size + 2
     }
 
-    /// Fails with `NoSpace` unless `blocks` data blocks can be allocated
-    /// and the metadata, grown by `extra_meta` bytes, still fits at the next
-    /// commit (it needs fresh blocks: the durable copy stays intact).
+    /// Fails with `NoSpace` unless `blocks` blocks can be allocated besides
+    /// what the next commit needs (the changed tables, and the metadata
+    /// grown by `extra_meta` bytes: fresh blocks, the durable copy stays
+    /// intact).
     fn ensure_room(&self, extra_meta: usize, blocks: u64) -> Result<(), FsError> {
         if self.device.is_none() {
             return Ok(());
         }
         let meta_blocks = (self.meta_size() + extra_meta).div_ceil(BLOCK_SIZE);
-        if meta_blocks > MAX_META_BLOCKS || blocks + meta_blocks as u64 > self.free_blocks {
+        if meta_blocks > MAX_META_BLOCKS
+            || blocks + self.dirty_tables + meta_blocks as u64 > self.blocks.free()
+        {
             return Err(FsError::NoSpace);
         }
         Ok(())
@@ -1334,18 +1517,42 @@ impl<D: BlockDevice> Volume<D> {
             let node = volume.nodes[id].as_ref().expect("linked nodes are live");
             match &node.content {
                 Content::File(data) => {
-                    let Data::Disk { size, blocks } = data else {
+                    let Data::Disk(file) = data else {
                         unreachable!("persistent files live on disk");
                     };
                     out.push(KIND_FILE);
                     out.push(name.len() as u8);
                     out.extend_from_slice(name.as_bytes());
-                    out.extend_from_slice(&size.to_le_bytes());
-                    out.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
-                    for extent in blocks {
-                        out.extend_from_slice(&extent.block.to_le_bytes());
+                    out.extend_from_slice(&file.size.to_le_bytes());
+                    if volume.format >= 3 {
+                        out.extend_from_slice(&(file.runs.len() as u32).to_le_bytes());
+                        for (start, disk, len) in file.runs.iter() {
+                            for value in [start, disk, len] {
+                                out.extend_from_slice(&value.to_le_bytes());
+                            }
+                        }
+                        out.extend_from_slice(&(file.tables.len() as u32).to_le_bytes());
+                        for table in &file.tables {
+                            out.extend_from_slice(&table.at.to_le_bytes());
+                            out.extend_from_slice(&table.crc.to_le_bytes());
+                        }
+                        return;
+                    }
+                    // Formats 1 and 2 (tests only): every block, its CRC
+                    // from tables loaded before.
+                    let count = blocks_for(file.size);
+                    out.extend_from_slice(&count.to_le_bytes());
+                    for index in 0..count {
+                        out.extend_from_slice(&file.runs.get(index).unwrap_or(0).to_le_bytes());
                         if volume.format >= 2 {
-                            out.extend_from_slice(&extent.crc.to_le_bytes());
+                            let crc = file.runs.get(index).map_or(0, |_| {
+                                file.tables[(index / CRCS_PER_TABLE) as usize]
+                                    .crcs
+                                    .as_ref()
+                                    .expect("loaded for an old format")
+                                    [(index % CRCS_PER_TABLE) as usize]
+                            });
+                            out.extend_from_slice(&crc.to_le_bytes());
                         }
                     }
                 }
@@ -1372,32 +1579,146 @@ impl<D: BlockDevice> Volume<D> {
         out
     }
 
+    /// Every table of every file loaded (to write an old format).
+    fn load_all_tables(&mut self) -> Result<(), FsError> {
+        for id in 0..self.nodes.len() {
+            if !matches!(
+                self.nodes[id].as_ref().map(|n| &n.content),
+                Some(Content::File(Data::Disk(_)))
+            ) {
+                continue;
+            }
+            let mut file = self.take_file(id);
+            let result = file
+                .tables
+                .iter_mut()
+                .try_for_each(|table| load_table(&mut self.device, table, &mut self.loaded_tables));
+            self.put_file(id, file);
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Writes the dirty CRC tables to new blocks. Returns what to undo if
+    /// the commit fails (node, table, old block, old CRC); on success the
+    /// old blocks are released.
+    fn write_tables(&mut self) -> Result<Vec<(NodeId, usize, u32, u32)>, FsError> {
+        let mut undo = Vec::new();
+        let mut result = Ok(());
+        'nodes: for id in 0..self.nodes.len() {
+            let Some(Node {
+                content: Content::File(Data::Disk(file)),
+                volatile: false,
+                ..
+            }) = self.nodes[id].as_mut()
+            else {
+                continue;
+            };
+            for (t, table) in file.tables.iter_mut().enumerate().filter(|(_, t)| t.dirty) {
+                let Some(new) = self.blocks.allocate(None) else {
+                    result = Err(FsError::NoSpace);
+                    break 'nodes;
+                };
+                let mut block = Box::new([0u8; BLOCK_SIZE]);
+                for (bytes, crc) in block
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(table.crcs.as_ref().expect("dirty tables are loaded").iter())
+                {
+                    *bytes = crc.to_le_bytes();
+                }
+                let written = self
+                    .device
+                    .as_mut()
+                    .expect("checked")
+                    .write_block(u64::from(new), &block);
+                if written.is_err() {
+                    self.blocks.release(new);
+                    result = Err(FsError::Io);
+                    break 'nodes;
+                }
+                undo.push((id, t, table.at, table.crc));
+                table.at = new;
+                table.crc = crc32c(&block[..]);
+            }
+        }
+        match result {
+            Ok(()) => Ok(undo),
+            Err(error) => {
+                self.undo_tables(undo);
+                Err(error)
+            }
+        }
+    }
+
+    /// Puts tables back on their old blocks (a commit failed).
+    fn undo_tables(&mut self, undo: Vec<(NodeId, usize, u32, u32)>) {
+        for (id, t, at, crc) in undo {
+            if let Some(Node {
+                content: Content::File(Data::Disk(file)),
+                ..
+            }) = self.nodes[id].as_mut()
+            {
+                let table = &mut file.tables[t];
+                self.blocks.release(table.at);
+                table.at = at;
+                table.crc = crc;
+            }
+        }
+    }
+
+    /// Lets clean tables go from memory once there are many.
+    fn trim_tables(&mut self) {
+        if self.loaded_tables <= MAX_LOADED_TABLES {
+            return;
+        }
+        for node in self.nodes.iter_mut().flatten() {
+            if let Content::File(Data::Disk(file)) = &mut node.content {
+                for table in file
+                    .tables
+                    .iter_mut()
+                    .filter(|t| !t.dirty && t.crcs.is_some())
+                {
+                    table.crcs = None;
+                    self.loaded_tables -= 1;
+                }
+            }
+        }
+    }
+
     /// Makes every change so far durable, atomically. Nothing to do if
     /// nothing changed, or on an in-memory volume.
     pub fn commit(&mut self) -> Result<(), FsError> {
         if !self.dirty || self.device.is_none() {
             return Ok(());
         }
+        let undo = if self.format >= 3 {
+            self.write_tables()?
+        } else {
+            self.load_all_tables()?;
+            Vec::new()
+        };
         let meta = self.serialize();
         let count = meta.len().div_ceil(BLOCK_SIZE).max(1);
-        if count > MAX_META_BLOCKS {
-            return Err(FsError::NoSpace);
-        }
         let mut new_blocks = Vec::with_capacity(count);
-        for _ in 0..count {
-            match self.allocate_block() {
+        let mut room = count <= MAX_META_BLOCKS;
+        while room && new_blocks.len() < count {
+            match self.blocks.allocate(None) {
                 Some(block) => new_blocks.push(block),
-                None => {
-                    for block in new_blocks {
-                        self.release_block(block);
-                    }
-                    return Err(FsError::NoSpace);
-                }
+                None => room = false,
             }
+        }
+        if !room {
+            for block in new_blocks {
+                self.blocks.release(block);
+            }
+            self.undo_tables(undo);
+            return Err(FsError::NoSpace);
         }
         let superblock = Superblock {
             version: self.format,
-            total_blocks: self.states.len() as u64,
+            total_blocks: self.blocks.total(),
             generation: self.generation + 1,
             meta_len: meta.len() as u64,
             meta_crc: crc32c(&meta),
@@ -1416,32 +1737,55 @@ impl<D: BlockDevice> Volume<D> {
         })();
         if let Err(error) = written {
             for block in new_blocks {
-                self.release_block(block);
+                self.blocks.release(block);
             }
+            self.undo_tables(undo);
             return Err(error.into());
         }
-        // The new generation is durable: what it references is used, what
-        // only the old one referenced is free.
-        for state in &mut self.states {
-            match *state {
-                FRESH => *state = USED,
-                PENDING => {
-                    *state = FREE;
-                    self.free_blocks += 1;
-                }
-                _ => {}
+        // The new generation is durable: the tables' old blocks and the old
+        // metadata are referenced only by the old one.
+        for (_, _, at, _) in &undo {
+            if *at != 0 {
+                self.blocks.release(*at);
             }
         }
         for block in core::mem::replace(&mut self.meta_blocks, new_blocks) {
-            self.states[block as usize] = FREE;
-            self.free_blocks += 1;
+            self.blocks.release(block);
         }
+        self.blocks.committed();
+        if self.format >= 3 {
+            for node in self.nodes.iter_mut().flatten() {
+                if let Content::File(Data::Disk(file)) = &mut node.content {
+                    file.tables.iter_mut().for_each(|t| t.dirty = false);
+                }
+            }
+            self.dirty_tables = 0;
+        }
+        self.trim_tables();
         self.generation = superblock.generation;
         self.dirty = false;
         Ok(())
     }
 }
 
+#[cfg(test)]
+impl<D: BlockDevice> Volume<D> {
+    /// The disk block of file block `index` of `id`.
+    fn disk_block(&self, id: NodeId, index: u32) -> Option<u32> {
+        match &self.node(id).ok()?.content {
+            Content::File(Data::Disk(file)) => file.runs.get(index),
+            _ => None,
+        }
+    }
+
+    /// The runs of `id`.
+    fn runs_of(&self, id: NodeId) -> alloc::vec::Vec<(u32, u32, u32)> {
+        match &self.node(id).map(|n| &n.content) {
+            Ok(Content::File(Data::Disk(file))) => file.runs.iter().collect(),
+            _ => alloc::vec::Vec::new(),
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -1786,7 +2130,7 @@ mod tests {
         let id = file(&mut volume, ROOT, "f", b"first version");
         volume.commit().unwrap();
         let committed: StdVec<u64> = (0..64)
-            .filter(|&b| volume.states[b as usize] == USED)
+            .filter(|&b| volume.blocks.state(b as u32) == State::Used)
             .collect();
         volume.device_mut().unwrap().log = Some(StdVec::new());
         volume.write(id, 0, b"second").unwrap();
@@ -1809,6 +2153,8 @@ mod tests {
             buffer[10..3 * BLOCK_SIZE].iter().all(|&b| b == 0),
             "holes read as zeros"
         );
+        // Measured committed, CRC table and all.
+        volume.commit().unwrap();
         let (used_with_holes, _) = volume.usage();
 
         volume.truncate(id, 4).unwrap();
@@ -1997,12 +2343,7 @@ mod tests {
         let (mut volume, _) = Volume::open(MemDisk::new(64), true).unwrap();
         let id = file(&mut volume, ROOT, "f", &[b'x'; 5000]);
         volume.commit().unwrap();
-        let Some(Content::File(Data::Disk { blocks, .. })) =
-            volume.nodes[id].as_ref().map(|n| &n.content)
-        else {
-            panic!("a disk file");
-        };
-        let second = blocks[1].block as usize;
+        let second = volume.disk_block(id, 1).expect("block 1 on disk") as usize;
         let mut disk = volume.device().unwrap().clone();
         disk.image[second * BLOCK_SIZE + 10] ^= 0x40; // bit rot in block 1
         let mut again = reopen(&disk);
@@ -2061,5 +2402,109 @@ mod tests {
         let end = meta.len();
         meta[end - 4..].copy_from_slice(&1u32.to_le_bytes());
         assert_eq!(volume.parse(&meta, 1), Err("block number out of range"));
+    }
+
+    #[test]
+    fn a_file_written_in_order_is_one_run() {
+        let (mut volume, _) = Volume::open(MemDisk::new(2048), true).unwrap();
+        let id = volume.create(ROOT, "big", Kind::File).unwrap();
+        // 6 MiB in pieces, as the filesystem service writes: two tables.
+        let piece: StdVec<u8> = (0..65_536u32).map(|i| (i % 251) as u8).collect();
+        for n in 0..96u64 {
+            volume.write(id, n * piece.len() as u64, &piece).unwrap();
+        }
+        assert_eq!(volume.runs_of(id).len(), 1, "{:?}", volume.runs_of(id));
+        volume.commit().unwrap();
+        // Its metadata: the fixed part, a run, two tables.
+        assert!(
+            volume.serialize().len() < 64,
+            "{} bytes",
+            volume.serialize().len()
+        );
+        let mut again = reopen(volume.device().unwrap());
+        let id = again.lookup(ROOT, "big").unwrap();
+        let mut back = vec![0u8; piece.len()];
+        again.read(id, 95 * piece.len() as u64, &mut back).unwrap();
+        assert_eq!(back, piece);
+        // Overwriting the middle moves one block, not the run's end.
+        again.write(id, 5 * BLOCK_SIZE as u64, b"changed").unwrap();
+        assert_eq!(again.runs_of(id).len(), 3);
+        again.commit().unwrap();
+        let mut third = reopen(again.device().unwrap());
+        let id = third.lookup(ROOT, "big").unwrap();
+        let mut start = [0u8; 7];
+        third.read(id, 5 * BLOCK_SIZE as u64, &mut start).unwrap();
+        assert_eq!(&start, b"changed");
+    }
+
+    #[test]
+    fn format_2_volumes_are_upgraded() {
+        let (mut volume, _) = Volume::open(MemDisk::new(64), true).unwrap();
+        volume.format = 2;
+        volume.dirty = true;
+        volume.commit().unwrap();
+        let docs = volume.create(ROOT, "docs", Kind::Directory).unwrap();
+        file(&mut volume, docs, "two", &[b't'; 9000]);
+        let holey = file(&mut volume, ROOT, "holey", b"start");
+        volume.write(holey, 3 * BLOCK_SIZE as u64, b"end").unwrap();
+        volume.commit().unwrap();
+        let old = snapshot(&mut volume);
+        let disk = volume.device().unwrap().clone();
+        let slot = (volume.generation() % 2) as usize * BLOCK_SIZE;
+        assert_eq!(u32_at(&disk.image[slot..], 8), 2, "written as format 2");
+
+        let mut upgraded = reopen(&disk);
+        assert!(upgraded.is_dirty(), "the upgrade is pending");
+        upgraded.commit().unwrap();
+        let disk = upgraded.device().unwrap().clone();
+        let slot = (upgraded.generation() % 2) as usize * BLOCK_SIZE;
+        assert_eq!(u32_at(&disk.image[slot..], 8), VERSION);
+        let mut again = reopen(&disk);
+        assert_eq!(snapshot(&mut again), old);
+        // Nothing leaked: rewritten, it takes as much as before.
+        let used = again.usage().0;
+        again.dirty = true;
+        again.commit().unwrap();
+        assert_eq!(again.usage().0, used);
+    }
+
+    #[test]
+    fn a_damaged_crc_table_is_reported() {
+        let (mut volume, _) = Volume::open(MemDisk::new(64), true).unwrap();
+        let id = file(&mut volume, ROOT, "f", b"checked");
+        volume.commit().unwrap();
+        let Some(Content::File(Data::Disk(file))) = volume.nodes[id].as_ref().map(|n| &n.content)
+        else {
+            panic!("a disk file");
+        };
+        let table = file.tables[0].at as usize;
+        let mut disk = volume.device().unwrap().clone();
+        disk.image[table * BLOCK_SIZE + 4000] ^= 1;
+        let mut again = reopen(&disk);
+        let id = again.lookup(ROOT, "f").unwrap();
+        let mut buffer = [0u8; 7];
+        assert_eq!(again.read(id, 0, &mut buffer), Err(FsError::Corrupt));
+    }
+
+    #[test]
+    fn a_table_missing_for_data_is_refused() {
+        let mut meta = StdVec::new();
+        meta.extend_from_slice(&[KIND_DIRECTORY, 0]);
+        meta.extend_from_slice(&1u32.to_le_bytes());
+        meta.extend_from_slice(&[KIND_FILE, 1, b'a']);
+        meta.extend_from_slice(&10u64.to_le_bytes());
+        meta.extend_from_slice(&1u32.to_le_bytes());
+        for value in [0u32, 5, 1] {
+            meta.extend_from_slice(&value.to_le_bytes());
+        }
+        meta.extend_from_slice(&1u32.to_le_bytes());
+        meta.extend_from_slice(&[0; 8]);
+        let mut volume = Volume::empty(Some(MemDisk::new(64)), 64);
+        assert_eq!(volume.parse(&meta, VERSION), Err("a table missing"));
+        // A run past the file's end.
+        let at = meta.len() - 8 - 4 - 4;
+        meta[at..at + 4].copy_from_slice(&2u32.to_le_bytes());
+        let mut volume = Volume::empty(Some(MemDisk::new(64)), 64);
+        assert_eq!(volume.parse(&meta, VERSION), Err("bad run"));
     }
 }

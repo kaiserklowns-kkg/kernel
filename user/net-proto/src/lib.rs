@@ -1403,3 +1403,50 @@ fn race(
         }
     }
 }
+
+/// What a time server said (ADR-0143).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerTime {
+    /// Unix milliseconds when the answer arrived, by the server.
+    pub unix_ms: u64,
+    /// When it arrived, on this system's clock since boot.
+    pub at_ms: u64,
+    pub stratum: u8,
+}
+
+/// Asks the time server at `server`:`port` (SNTP, `oceans_ntp`): a
+/// request with a random nonce, tried three times; only a valid answer to
+/// it counts.
+pub fn time_via(net: Handle, server: IpAddr, port: u16) -> Result<ServerTime, ResolveError> {
+    let (socket, _) = Socket::udp(net, 0).map_err(ResolveError::Net)?;
+    for _ in 0..DNS_TRIES {
+        let nonce = oceans_rt::random_u64();
+        let sent_at = oceans_rt::clock_ms();
+        socket
+            .send_to_ip(server, port, &oceans_ntp::request(nonce))
+            .map_err(ResolveError::Net)?;
+        let answer = wait_until(socket.notification(), DNS_TIMEOUT_MS, || {
+            let mut packet = [0u8; MAX_DATA6];
+            while let Some(received) = socket.recv_ip(&mut packet)? {
+                if received.from != server || received.port != port {
+                    continue;
+                }
+                if let Ok(reply) = oceans_ntp::parse(&packet[..received.len], nonce) {
+                    let at_ms = oceans_rt::clock_ms();
+                    return Ok(Some(ServerTime {
+                        unix_ms: oceans_ntp::time_at_arrival(&reply, sent_at, at_ms),
+                        at_ms,
+                        stratum: reply.stratum,
+                    }));
+                }
+            }
+            Ok(None)
+        });
+        match answer {
+            Ok(time) => return Ok(time),
+            Err(NetError::Status(Status::TimedOut)) => continue,
+            Err(error) => return Err(ResolveError::Net(error)),
+        }
+    }
+    Err(ResolveError::Timeout)
+}
