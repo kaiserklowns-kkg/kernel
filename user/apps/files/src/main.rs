@@ -6,6 +6,8 @@
 //!   file in the app that opens its kind. Open does that too; Open with…
 //!   lists the apps that open it, to choose one (ADR-0099).
 //! - Back goes up a folder; the path shows where you are.
+//! - Rename; Copy or Cut, then Paste in another folder (or the same:
+//!   Copy makes `NAME copy`), a folder with all that is in it (ADR-0145).
 //! - New folder; Delete, after a confirmation (a folder with what is in
 //!   it).
 //!
@@ -20,6 +22,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write;
 
+use oceans_fs_proto::tree::Copier;
 use oceans_fs_proto::{Kind, MAX_NAME, Node, flags, tree};
 use oceans_rt::{Directory, Start};
 use oceans_ui::layout::{Bar, Flow};
@@ -35,6 +38,8 @@ const MIN_SIZE: (u16, u16) = (600, 320);
 const MAX_ENTRIES: usize = 300;
 /// How much of a file the preview shows.
 const PREVIEW: usize = 4096;
+/// Bytes a copy moves per request (ADR-0039).
+const COPY_BUFFER: usize = 256 * 1024;
 
 struct Entry {
     name: String,
@@ -60,6 +65,38 @@ struct Files {
     /// The apps that open the selected file, while the user chooses one
     /// (Open with…, ADR-0099).
     choosing: Option<Vec<(String, String)>>,
+    /// What Copy or Cut took, for Paste (ADR-0145).
+    held: Option<Held>,
+    /// The new name being typed for the entry selected (Rename).
+    renaming: Option<String>,
+}
+
+/// A file or folder taken by Copy or Cut.
+#[derive(Clone)]
+struct Held {
+    /// Its path from Home, and its name.
+    path: String,
+    name: String,
+    folder: bool,
+    /// Cut: Paste moves it; Copy: Paste copies it.
+    cut: bool,
+}
+
+/// A name for a copy of `name` that `exists` does not know: `name copy`,
+/// then `name copy 2`, …, before the extension of a file
+/// (`photo copy.png`).
+fn copy_name(name: &str, folder: bool, exists: impl Fn(&str) -> bool) -> String {
+    let (stem, extension) = match name.rfind('.') {
+        Some(at) if !folder && at > 0 => (&name[..at], &name[at..]),
+        _ => (name, ""),
+    };
+    let mut candidate = alloc::format!("{stem} copy{extension}");
+    let mut n = 2;
+    while exists(&candidate) && n < 1000 {
+        candidate = alloc::format!("{stem} copy {n}{extension}");
+        n += 1;
+    }
+    candidate
 }
 
 /// `/home/a/b` as the toolkit's path, from the folders.
@@ -122,6 +159,7 @@ impl Files {
         self.list_scroll.reset();
         self.preview = None;
         self.confirm_delete = false;
+        self.renaming = None;
         let mut entries = Vec::new();
         let Some(folder) = self.folder(false) else {
             self.entries.clear();
@@ -273,6 +311,159 @@ impl Files {
         };
         self.stale = true;
     }
+
+    /// Copy or Cut (ADR-0145): the entry selected is held for Paste.
+    fn hold(&mut self, cut: bool) {
+        let Some(entry) = self.selected.and_then(|i| self.entries.get(i)) else {
+            return;
+        };
+        let held = Held {
+            path: self.home_name(&entry.name),
+            name: entry.name.clone(),
+            folder: entry.folder,
+            cut,
+        };
+        self.message = alloc::format!(
+            "{} {}: open the folder to put it in, then Paste.",
+            if cut { "Cut" } else { "Copied" },
+            held.name
+        );
+        self.held = Some(held);
+    }
+
+    /// Paste: the entry held is moved (Cut) or copied (Copy) into the
+    /// folder shown. A copy never replaces anything: it takes a free name.
+    fn paste(&mut self) {
+        let Some(held) = self.held.clone() else {
+            return;
+        };
+        let here = joined(&self.path);
+        // A folder cannot go inside itself.
+        if held.folder && (here == held.path || here.starts_with(&alloc::format!("{}/", held.path)))
+        {
+            self.message = String::from("A folder cannot go inside itself.");
+            return;
+        }
+        let from_folder = held.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        if held.cut && from_folder == here {
+            self.held = None;
+            self.message = alloc::format!("{} is already here.", held.name);
+            return;
+        }
+        let Some(folder) = self.folder(true) else {
+            self.message = String::from("This folder cannot be changed.");
+            return;
+        };
+        let exists = |name: &str| match folder.open(name, 0) {
+            Ok((node, _)) => {
+                node.close();
+                true
+            }
+            Err(_) => false,
+        };
+        let target = if exists(&held.name) {
+            copy_name(&held.name, held.folder, exists)
+        } else {
+            held.name.clone()
+        };
+        let result = if held.cut {
+            match &self.home {
+                Some(home) => home
+                    .rename(&held.path, &self.home_name(&target))
+                    .map_err(|e| String::from(e.message())),
+                None => Err(String::from("cannot be moved")),
+            }
+        } else {
+            self.copy_into(&folder, &held, &target)
+        };
+        let _ = folder.sync();
+        folder.close();
+        self.message = match result {
+            Ok(()) if held.cut => {
+                self.held = None;
+                alloc::format!("Moved {} here.", held.name)
+            }
+            Ok(()) => alloc::format!("Copied {} here as {target}.", held.name),
+            Err(why) => alloc::format!("{}: {why}", held.name),
+        };
+        self.stale = true;
+    }
+
+    /// Copies the entry `held` into `folder` as `target` (ADR-0039: the
+    /// bytes go from one service to the other through a shared buffer).
+    fn copy_into(&self, folder: &Node, held: &Held, target: &str) -> Result<(), String> {
+        let home = self.home.as_ref().ok_or("cannot be read")?;
+        let (source, _) = home
+            .walk(&held.path, 0)
+            .map_err(|e| String::from(e.message()))?;
+        let create = if held.folder {
+            flags::CREATE_DIRECTORY
+        } else {
+            flags::CREATE_FILE
+        };
+        let result = (|| {
+            let (destination, _) = folder
+                .open(target, create | flags::WRITE)
+                .map_err(|e| String::from(e.message()))?;
+            let copied = Copier::new(COPY_BUFFER)
+                .map_err(|e| String::from(e.message()))
+                .and_then(|mut copier| {
+                    let done = if held.folder {
+                        copier.directory(&source, &destination)
+                    } else {
+                        copier.file(&source, &destination).map(drop)
+                    };
+                    done.map_err(|e| String::from(e.error.message()))
+                });
+            let _ = destination.sync();
+            destination.close();
+            copied
+        })();
+        source.close();
+        result
+    }
+
+    /// Rename: the entry selected takes the name typed.
+    fn rename(&mut self) {
+        let (Some(new), Some(entry)) = (
+            self.renaming.as_ref().map(|n| n.trim().to_string()),
+            self.selected.and_then(|i| self.entries.get(i)),
+        ) else {
+            return;
+        };
+        let old = entry.name.clone();
+        if new.is_empty() || new.contains('/') || new == "." || new == ".." {
+            self.message = String::from("A name has no / and is not . or ..");
+            return;
+        }
+        if new == old {
+            self.renaming = None;
+            return;
+        }
+        let Some(folder) = self.folder(true) else {
+            self.message = String::from("This folder cannot be changed.");
+            return;
+        };
+        // Renaming never replaces what has that name already.
+        let taken = folder.open(&new, 0).map(|(node, _)| node.close()).is_ok();
+        let result = if taken {
+            Err(alloc::format!("there is already a {new} here"))
+        } else {
+            folder
+                .rename(&old, &new)
+                .map_err(|e| String::from(e.message()))
+        };
+        let _ = folder.sync();
+        folder.close();
+        self.message = match result {
+            Ok(()) => {
+                self.renaming = None;
+                alloc::format!("Renamed {old} to {new}.")
+            }
+            Err(why) => alloc::format!("{old}: {why}"),
+        };
+        self.stale = true;
+    }
 }
 
 fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
@@ -302,6 +493,8 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
     let back = tools.left(64);
     let delete_button = tools.right(120);
     let new_button = tools.right(112);
+    // Paste, while something is held (ADR-0145).
+    let paste_button = files.held.is_some().then(|| tools.right(88));
     if !files.path.is_empty() && ui.button_in(back, "Back", false) {
         files.path.pop();
         files.stale = true;
@@ -328,6 +521,11 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
         files.confirm_delete = true;
         files.naming = false;
     }
+    if let Some(r) = paste_button
+        && ui.button_in(r, "Paste", true)
+    {
+        files.paste();
+    }
 
     // The list on the left, the preview on the right: the list half of
     // what the margins leave (340 at the size the window opens at).
@@ -340,6 +538,11 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
     );
     if files.naming && ui.text_field(1, &mut files.new_folder, "New folder's name, then Enter") {
         files.create_folder();
+    }
+    if let Some(name) = files.renaming.as_mut()
+        && ui.text_field(2, name, "The new name, then Enter")
+    {
+        files.rename();
     }
     if files.confirm_delete
         && let Some(entry) = files.selected.and_then(|i| files.entries.get(i))
@@ -422,6 +625,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                 colour::muted(),
                 clip,
             );
+            entry_actions(ui, files, clip, clip.y + 58);
         }
         Some((index, entry)) => {
             let name = entry.name.clone();
@@ -460,6 +664,7 @@ fn frame(ui: &mut Ui<'_, '_>, files: &mut Files) {
                 files.choosing = None;
                 files.open(ui, index, Some(&id));
             }
+            y = entry_actions(ui, files, clip, y) + 10;
             let text = files.preview.as_deref().unwrap_or("");
             for line in text.lines() {
                 if y + 18 > clip.y + clip.h {
@@ -500,8 +705,35 @@ fn main(start: Start) -> i64 {
         stale: true,
         list_scroll: Scroll::default(),
         choosing: None,
+        held: None,
+        renaming: None,
     };
     oceans_ui::run_resizable(
         &directory, "", WIDTH, HEIGHT, MIN_SIZE, None, &mut files, frame,
     )
+}
+
+/// Rename, Copy and Cut for the entry selected (ADR-0145), from `y` in
+/// `clip`; returns where they end.
+fn entry_actions(ui: &mut Ui<'_, '_>, files: &mut Files, clip: Rect, y: i32) -> i32 {
+    let mut flow = Flow::new(Rect::new(clip.x, y, clip.w, 0), 30, 10);
+    if ui.button_in(flow.next(90), "Rename", false) {
+        files.renaming = match files.renaming {
+            Some(_) => None,
+            None => files
+                .selected
+                .and_then(|i| files.entries.get(i))
+                .map(|e| e.name.clone()),
+        };
+        files.naming = false;
+        files.confirm_delete = false;
+        *ui.focus = Some(2);
+    }
+    if ui.button_in(flow.next(80), "Copy", false) {
+        files.hold(false);
+    }
+    if ui.button_in(flow.next(70), "Cut", false) {
+        files.hold(true);
+    }
+    flow.bottom()
 }

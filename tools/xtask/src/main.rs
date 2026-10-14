@@ -625,7 +625,25 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_button 0",
     b"@screen 672 451 e8613c picture.png opened with Image Viewer, chosen",
     b"app stop app.oceans.viewer\r\n",
+    // Copy and Paste in Files (ADR-0145): tone.wav (the third row,
+    // 404,317) selected, Copy under its Open buttons (822,326), then Paste
+    // in the toolbar (740,195; the accent beside its label, 706,195, while
+    // something is held) makes
+    // `tone copy.wav` beside it; the mouse goes back where it was.
+    b"@monitor mouse_move -398 -9",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 622 317 d4e3fc Files' tone.wav, selected",
+    b"@monitor mouse_move 418 9",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 706 195 2f7cf6 Files' Paste, with tone.wav held",
+    b"@monitor mouse_move -82 -131",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@monitor mouse_move 62 131",
     b"app stop app.oceans.files\r\n",
+    b"ls /home\r\n",
     // Search (ADR-0108): Super alone opens Launchpad's search, which
     // takes the keys. "calc" finds Calculator and Enter starts it; "pict"
     // finds picture.png in Home and Enter opens it in Image Viewer.
@@ -1306,6 +1324,8 @@ const SHELL_EXPECT: &[Expect] = &[
     // The clock (ADR-0143): the host's two test time servers agree, 90 s
     // ahead, so the clock service sets the clock through the kernel.
     Expect::Contains("clock: set from network time, "),
+    // Files' Copy and Paste (ADR-0145) made a copy beside tone.wav.
+    Expect::Line("  tone copy.wav"),
     Expect::Contains("init/clock set the clock"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
