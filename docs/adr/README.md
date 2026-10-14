@@ -150,5 +150,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0141](0141-a-kill-during-a-call.md) | A kill during a call no longer strands the server (an abandoned direct switch wakes its target) | Accepted |
 | [0142](0142-oceansfs-format-3.md) | OceansFS format 3: runs, CRC tables, and a bit a block (the metadata grows with runs, not blocks; 15 MiB of state for a 500 GB disk; formats 1 and 2 upgrade) | Accepted |
 | [0143](0143-network-time-and-time-zone.md) | Network time, and the time zone (`CLOCK_SET`, ABI 24; the `clock` service, two SNTP servers agreeing; Core's `TIME_ZONE`, local time on the desktop) | Accepted |
+| [0144](0144-usb-mouse-wheels.md) | The wheel of a USB mouse: every pointer read by its report descriptor in the report protocol (`SET_PROTOCOL 1`), the boot protocol only as a fallback | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

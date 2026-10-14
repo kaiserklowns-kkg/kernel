@@ -376,7 +376,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"app reset app.oceans.hello network\r\n",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     // Moved and clicked only once the guest has it.
-    b"@wait usb-hid: port 6.3: mouse, boot protocol, pointer 2",
+    b"@wait usb-hid: port 6.3: mouse, 5 buttons, wheel, pointer 2",
     b"@monitor screendump build/smoke-desktop.ppm",
     b"@monitor mouse_move -3000 -3000",
     b"@monitor mouse_move 640 764",
@@ -427,7 +427,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@bridge store",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     // Moved and clicked only once the guest has it.
-    b"@wait usb-hid: port 6.3: mouse, boot protocol, pointer 3",
+    b"@wait usb-hid: port 6.3: mouse, 5 buttons, wheel, pointer 3",
     b"@monitor mouse_move -3000 -3000",
     b"@monitor mouse_move 836 466",
     b"@screen 380 494 f9f9fb the install dialog",
@@ -461,7 +461,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 376 523 e9e9ee Settings' sidebar",
     b"@monitor device_add usb-mouse,bus=usb.0,port=2.3,id=deskmouse",
     // Moved and clicked only once the guest has it.
-    b"@wait usb-hid: port 6.3: mouse, boot protocol, pointer 4",
+    b"@wait usb-hid: port 6.3: mouse, 5 buttons, wheel, pointer 4",
     b"@monitor mouse_move -3000 -3000",
     b"@monitor mouse_move 446 260",
     b"@monitor mouse_button 1",
@@ -1712,7 +1712,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains(", 0..32767 x 0..32767, pointer 1"),
     Expect::Line("port 6.1: 0627:0001 QEMU USB Tablet (12 Mb/s) tablet (pointer input)"),
     // Pointer 5: the desktop's mice before it (Hello and Notes, the Store, Settings and Files) took 2 to 4.
-    Expect::Contains("usb-hid: port 6.2: mouse, boot protocol, pointer 5"),
+    Expect::Contains("usb-hid: port 6.2: mouse, 5 buttons, wheel, pointer 5"),
     Expect::Line("port 6.2: 0627:0001 QEMU USB Mouse (12 Mb/s) mouse (pointer input)"),
     Expect::Contains("mouse: requests `use:input`"),
     Expect::Contains("pointer 5: motion dx=10 dy=-5"),

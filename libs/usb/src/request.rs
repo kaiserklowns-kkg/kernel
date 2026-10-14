@@ -54,6 +54,18 @@ impl Setup {
         }
     }
 
+    /// HID `SET_PROTOCOL`: 1 selects the report protocol, the reports the
+    /// report descriptor describes (ADR-0144): a mouse's wheel among them.
+    pub const fn hid_set_report_protocol(interface: u8) -> Self {
+        Self {
+            request_type: CLASS | TO_INTERFACE,
+            request: HID_SET_PROTOCOL,
+            value: 1,
+            index: interface as u16,
+            length: 0,
+        }
+    }
+
     /// A HID interface's report descriptor (HID 1.11 §7.1.1): a standard
     /// `GET_DESCRIPTOR` addressed to the interface.
     pub const fn hid_get_report_descriptor(interface: u8, length: u16) -> Self {
@@ -123,6 +135,10 @@ mod tests {
         assert_eq!(
             Setup::hid_set_boot_protocol(2).to_bytes(),
             [0x21, 0x0b, 0, 0, 2, 0, 0, 0]
+        );
+        assert_eq!(
+            Setup::hid_set_report_protocol(2).to_bytes(),
+            [0x21, 0x0b, 1, 0, 2, 0, 0, 0]
         );
         assert_eq!(
             Setup::hid_set_idle(0).to_bytes(),

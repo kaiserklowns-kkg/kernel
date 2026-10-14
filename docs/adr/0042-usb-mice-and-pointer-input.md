@@ -87,6 +87,8 @@ Two questions follow:
     the wheel (`pointer::boot_report`). This is how most systems read
     boot mice, and it works where the report descriptor is wrong. If
     the boot protocol is refused, the report descriptor is used.
+    (ADR-0144 reverses this: the descriptor first, in the report
+    protocol, so a wheel the boot report lacks is read.)
   - **Any other pointer:** its report descriptor is read through
     `CONTROL` and parsed. The resulting `Layout` locates the fields:
     - the report ID, if the device numbers its reports;

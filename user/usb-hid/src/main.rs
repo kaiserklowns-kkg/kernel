@@ -8,7 +8,9 @@
 //! driver fetches (`REPORTS`) when xhci signals.
 //!
 //! For each pointer it reads the report descriptor and finds the buttons,
-//! X, Y and wheels in it (`oceans_usb::pointer`); a boot mouse is switched
+//! X, Y and wheels in it (`oceans_usb::pointer`), and reads its reports in
+//! the report protocol (ADR-0144: so a mouse's wheel turns); a boot mouse
+//! whose descriptor cannot be used is switched
 //! to the boot protocol and decoded as such. Reports become input events
 //! (`oceans_input::Tracker`), which go to every subscriber of the input
 //! protocol (`oceans_input_proto`) on `input`. Reading pointer input
@@ -227,8 +229,10 @@ impl Driver {
         }
     }
 
-    /// Readies a claimed pointer: the boot protocol for a boot mouse,
-    /// otherwise its report descriptor; reports only on change.
+    /// Readies a claimed pointer: its report descriptor, in the report
+    /// protocol, so a mouse's wheel is read (ADR-0144); the boot protocol
+    /// for a boot mouse whose descriptor cannot be used or which refuses
+    /// the report protocol. Reports only on change.
     fn start_pointer(&mut self, claim: Claim, session: Handle) -> Pointer {
         let device = self.next_device;
         self.next_device = self.next_device.checked_add(1).unwrap_or(1);
@@ -237,19 +241,30 @@ impl Driver {
             boot: false,
             layout: None,
         };
-        if claim.is_boot_mouse() {
+        match self.report_layout(session, &claim) {
+            // A boot mouse may have been left in the boot protocol (by the
+            // firmware): asked back to the report protocol, its reports
+            // are the ones the descriptor describes.
+            Ok(_)
+                if claim.is_boot_mouse()
+                    && control(session, Setup::hid_set_report_protocol(claim.interface))
+                        .is_err() =>
+            {
+                say(
+                    self.log,
+                    format_args!("port {path}: the report protocol was refused"),
+                );
+            }
+            Ok(layout) => decoder.layout = Some(layout),
+            Err(problem) => say(self.log, format_args!("port {path}: {problem}")),
+        }
+        if decoder.layout.is_none() && claim.is_boot_mouse() {
             match control(session, Setup::hid_set_boot_protocol(claim.interface)) {
                 Ok(_) => decoder.boot = true,
                 Err(label) => say(
                     self.log,
                     format_args!("port {path}: the boot protocol was refused ({label})"),
                 ),
-            }
-        }
-        if !decoder.boot {
-            match self.report_layout(session, &claim) {
-                Ok(layout) => decoder.layout = Some(layout),
-                Err(problem) => say(self.log, format_args!("port {path}: {problem}")),
             }
         }
         // Optional (HID 1.11 §7.2.4): some devices stall it.
