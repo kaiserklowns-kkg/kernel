@@ -1,0 +1,16 @@
+[package]
+name = "backlight"
+description = "The screen's brightness on Intel graphics with a PCH PWM (Haswell to Kaby Lake laptops), for Control Center (ADR-0147)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "backlight"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt.workspace = true
+oceans-display-proto.workspace = true

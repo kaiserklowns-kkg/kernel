@@ -279,6 +279,8 @@ pub struct Desktop {
     /// The system volume, as Core says (ADR-0100): `None` without a sound
     /// device. The speaker in the menu bar shows it.
     pub volume: Option<(u8, bool)>,
+    /// The screen's brightness in percent (ADR-0147), where it can be set.
+    pub brightness: Option<u8>,
     /// The sound panel is open below the speaker.
     pub volume_open: bool,
     /// Until when (ms since boot) the level shows over the desktop, after a
@@ -451,6 +453,8 @@ pub enum Hit {
     Volume,
     /// Control Center's slider, at that level (ADR-0100).
     VolumeLevel(u8),
+    /// The brightness slider, at that level (ADR-0147).
+    BrightnessLevel(u8),
     VolumeMute,
     /// A button of what plays (ADR-0103): the media key it presses.
     Media(u8),
@@ -602,8 +606,30 @@ pub fn notice_clear(width: i32, count: usize) -> Rect {
 /// Control Center (ADR-0118), under the top bar's right end: modules on
 /// a panel, as phones have them. The whole of it.
 pub fn control_center(width: i32) -> Rect {
-    Rect::new(width - 12 - CC_WIDTH, MENU_HEIGHT + 6, CC_WIDTH, CC_HEIGHT)
+    let brightness = if BRIGHTNESS_SHOWN.load(core::sync::atomic::Ordering::Relaxed) {
+        CC_BRIGHTNESS
+    } else {
+        0
+    };
+    Rect::new(
+        width - 12 - CC_WIDTH,
+        MENU_HEIGHT + 6,
+        CC_WIDTH,
+        CC_HEIGHT + brightness,
+    )
 }
+
+/// Whether Control Center has the brightness module (ADR-0147): only where
+/// the screen's brightness can be set. Its height follows.
+static BRIGHTNESS_SHOWN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn show_brightness(shown: bool) {
+    BRIGHTNESS_SHOWN.store(shown, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The brightness module's height and the gap above it.
+const CC_BRIGHTNESS: i32 = 62;
 
 const CC_WIDTH: i32 = 340;
 const CC_HEIGHT: i32 = 318;
@@ -612,7 +638,7 @@ const CC_HALF: i32 = 153;
 const CC_GAP: i32 = 10;
 
 /// Control Center's modules: 0 the round toggles, 1 what plays, 2 the
-/// keyboard, 3 the accent, 4 the sound.
+/// keyboard, 3 the accent, 4 the sound, 5 the brightness (ADR-0147).
 pub fn cc_module(width: i32, which: usize) -> Rect {
     let cc = control_center(width);
     let (x0, y0) = (cc.x + 12, cc.y + 12);
@@ -622,8 +648,27 @@ pub fn cc_module(width: i32, which: usize) -> Rect {
         1 => Rect::new(right, y0, CC_HALF, 140),
         2 => Rect::new(x0, y0 + 150, CC_HALF, 56),
         3 => Rect::new(right, y0 + 150, CC_HALF, 56),
-        _ => Rect::new(x0, y0 + 216, 2 * CC_HALF + CC_GAP, 52),
+        4 => Rect::new(x0, y0 + 216, 2 * CC_HALF + CC_GAP, 52),
+        _ => Rect::new(x0, y0 + 278, 2 * CC_HALF + CC_GAP, 52),
     }
+}
+
+/// The brightness module's slider, as the sound's.
+pub fn brightness_track(width: i32) -> Rect {
+    let m = cc_module(width, 5);
+    Rect::new(m.x + 54, m.y + 15, m.w - 68, 22)
+}
+
+fn brightness_track_target(width: i32) -> Rect {
+    let track = brightness_track(width);
+    Rect::new(track.x - 8, track.y - 8, track.w + 16, track.h + 16)
+}
+
+/// The level (`MIN_PERCENT` to 100) at `x` along the brightness slider.
+pub fn brightness_at(width: i32, x: i32) -> u8 {
+    let track = brightness_track(width);
+    let min = i32::from(oceans_window::proto::backlight::MIN_PERCENT);
+    ((x - track.x) * 100 / track.w.max(1)).clamp(min, 100) as u8
 }
 
 /// The round toggles (ADR-0118): 0 the network, 1 dark, 2 lock, 3
@@ -1278,6 +1323,8 @@ impl Desktop {
                 Hit::Layout
             } else if cc_module(width, 3).contains(x, y) {
                 Hit::Accent
+            } else if self.brightness.is_some() && brightness_track_target(width).contains(x, y) {
+                Hit::BrightnessLevel(brightness_at(width, x))
             } else if self.volume.is_some() && volume_track_target(width).contains(x, y) {
                 Hit::VolumeLevel(volume_at(width, x))
             } else if self.volume.is_some() && volume_mute(width).contains(x, y) {
@@ -1932,7 +1979,8 @@ impl Desktop {
             self.draw_wifi(canvas);
             return;
         }
-        for which in 0..5 {
+        let modules = if self.brightness.is_some() { 6 } else { 5 };
+        for which in 0..modules {
             canvas.round_fill(cc_module(w, which), 14, colour::surface());
         }
         let pointer = self.pointer;
@@ -2086,6 +2134,34 @@ impl Desktop {
                 Font::Body,
                 colour::muted(),
                 m,
+            );
+        }
+
+        // The brightness (ADR-0147), where the screen's can be set: a sun
+        // left of the slider, as the speaker is left of the sound's.
+        if let Some(level) = self.brightness {
+            let m = cc_module(w, 5);
+            let (cx, cy) = (m.x + 27, m.y + 26);
+            canvas.circle(cx, cy, 6, colour::text());
+            for (dx, dy) in [
+                (0, -11),
+                (0, 9),
+                (-11, 0),
+                (9, 0),
+                (-8, -8),
+                (6, -8),
+                (-8, 6),
+                (6, 6),
+            ] {
+                canvas.round_fill(Rect::new(cx + dx, cy + dy, 3, 3), 1, colour::text());
+            }
+            let track = brightness_track(w);
+            canvas.round_fill(track, track.h / 2, colour::button_secondary());
+            let filled = (track.w * i32::from(level) / 100).max(track.h);
+            canvas.round_fill(
+                Rect::new(track.x, track.y, filled, track.h),
+                track.h / 2,
+                colour::accent(),
             );
         }
 

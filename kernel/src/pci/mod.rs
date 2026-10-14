@@ -14,8 +14,10 @@
 //!   or, for a function without MSI-X, its one MSI message (ADR-0124).
 //!
 //! Closing the device (or the driver dying) masks its interrupts, turns
-//! off bus mastering and memory decoding, and only then releases its DMA
-//! memory, so a device can never write into memory that has been reused.
+//! off bus mastering and memory decoding (decoding stays on for a display
+//! controller the firmware had it on for, ADR-0147), and only then releases
+//! its DMA memory, so a device can never write into memory that has been
+//! reused.
 //! Endpoints are found with bus mastering off: no device DMAs before a
 //! driver asks for it.
 //!
@@ -120,6 +122,11 @@ pub struct Function {
     pcie: Option<u16>,
     /// Kernel address of the configuration space.
     config: usize,
+    /// A display controller whose memory decoding was on when the system
+    /// started: firmware uses it
+    /// (the boot screen's framebuffer, ADR-0147), so it
+    /// stays on when a driver closes it.
+    firmware_decoding: bool,
     /// Serialises read-modify-write of control registers.
     control: Mutex<()>,
     open: AtomicBool,
@@ -277,6 +284,9 @@ fn scan_bus(
                 1 => oceans_pci::size_bars(&mut ecam, 2),
                 _ => [Bar::None; 6],
             };
+            // A display controller the firmware drew on (class 03).
+            let firmware_decoding =
+                header.class == 0x03 && ecam.read16(reg::COMMAND) & command::MEMORY_SPACE != 0;
             if header.kind == 0 {
                 // No DMA until a driver enables it.
                 let value = ecam.read16(reg::COMMAND);
@@ -299,6 +309,7 @@ fn scan_bus(
                 msi: oceans_pci::msi(&ecam),
                 pcie: oceans_pci::pcie(&ecam),
                 config,
+                firmware_decoding,
                 control: Mutex::new(()),
                 open: AtomicBool::new(false),
                 msix_table: Once::new(),
@@ -601,11 +612,14 @@ impl Drop for Device {
         for &(_, vector) in &irqs {
             msi::release(vector);
         }
-        // 2. Stop DMA and register decoding.
-        function.update_command(
-            command::INTX_DISABLE,
-            command::BUS_MASTER | command::MEMORY_SPACE,
-        );
+        // 2. Stop DMA, and register decoding unless the firmware had it
+        // on (the boot display's framebuffer is behind it, ADR-0147).
+        let decoding = if function.firmware_decoding {
+            0
+        } else {
+            command::MEMORY_SPACE
+        };
+        function.update_command(command::INTX_DISABLE, command::BUS_MASTER | decoding);
         // 3. Only now may the DMA memory be reused.
         drop(arch::without_interrupts(|| {
             core::mem::take(&mut *self.dma.lock())

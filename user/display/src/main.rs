@@ -153,6 +153,9 @@ struct Service {
     pending_args: String,
     /// The sound panel's slider is held (ADR-0100).
     volume_drag: bool,
+    /// The `backlight` service (ADR-0147), and its slider held.
+    backlight: Option<Handle>,
+    brightness_drag: bool,
     /// When the last key or pointer event came (ms since boot), and how
     /// long without one before the screen locks (ADR-0112; minutes, 0:
     /// never), as Core keeps it.
@@ -286,6 +289,8 @@ fn main(start: Start) -> i64 {
         last_press: None,
         pending_args: String::new(),
         volume_drag: false,
+        backlight: directory.find("use", "backlight"),
+        brightness_drag: false,
         last_input_ms: oceans_rt::clock_ms(),
         lock_after: 0,
         text_capacity: 16 + info.cols as usize * info.rows as usize,
@@ -335,6 +340,7 @@ fn main(start: Start) -> i64 {
     // start.
     service.refresh_scale();
     service.refresh_time_zone();
+    service.refresh_brightness();
     service.apply_scale(&mut canvas);
     service.refresh_layout();
     service.refresh_volume();
@@ -572,6 +578,10 @@ impl Service {
             Kind::Button { button, pressed } => {
                 let (x, y) = self.desktop.pointer;
                 // The slider let go (ADR-0100): the level it shows is set.
+                if button == 1 && !pressed && self.brightness_drag {
+                    self.brightness_drag = false;
+                    return true;
+                }
                 if button == 1 && !pressed && self.volume_drag {
                     self.volume_drag = false;
                     if let Some((level, _)) = self.desktop.volume {
@@ -682,6 +692,14 @@ impl Service {
             }
             _ => return false,
         }
+        // Dragging the brightness slider: the screen follows at once.
+        if self.brightness_drag {
+            let level = desktop::brightness_at(w, self.desktop.pointer.0);
+            if self.desktop.brightness != Some(level) {
+                self.set_brightness(level);
+            }
+            return true;
+        }
         // Dragging the slider: the level follows, set when let go.
         if self.volume_drag
             && let Some((_, muted)) = self.desktop.volume
@@ -747,6 +765,33 @@ impl Service {
                 self.toast(alloc::format!("The volume: {}", error.message()), true);
                 self.refresh_volume();
             }
+        }
+    }
+
+    /// The screen's brightness from the `backlight` service (ADR-0147):
+    /// Control Center shows its slider only where it can be set.
+    fn refresh_brightness(&mut self) {
+        use oceans_window::proto::backlight::GET;
+        let mut reply = [0u8; 2];
+        let brightness = self.backlight.and_then(|backlight| {
+            match oceans_rt::ipc_call(backlight, GET, &[], &mut reply) {
+                Ok((2, 0)) if reply[1] != 0 => Some(reply[0]),
+                _ => None,
+            }
+        });
+        self.desktop.brightness = brightness;
+        desktop::show_brightness(brightness.is_some());
+    }
+
+    /// Sets the screen's brightness, as the slider shows it.
+    fn set_brightness(&mut self, percent: u8) {
+        use oceans_window::proto::backlight::SET;
+        let Some(backlight) = self.backlight else {
+            return;
+        };
+        let mut reply = [0u8; 2];
+        if let Ok((2, 0)) = oceans_rt::ipc_call(backlight, SET, &[percent], &mut reply) {
+            self.desktop.brightness = Some(reply[0]);
         }
     }
 
@@ -951,6 +996,12 @@ impl Service {
                 self.desktop.user_menu_open = false;
                 self.desktop.start_open = false;
                 self.refresh_volume();
+                true
+            }
+            // The brightness (ADR-0147): set at once, and as it is dragged.
+            Hit::BrightnessLevel(level) => {
+                self.set_brightness(level);
+                self.brightness_drag = true;
                 true
             }
             Hit::VolumeLevel(level) => {

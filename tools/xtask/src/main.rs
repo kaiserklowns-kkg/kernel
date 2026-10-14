@@ -56,6 +56,7 @@ const USER_PROGRAMS: &[&str] = &[
     "net",
     "net-echo",
     "clock",
+    "backlight",
     "ifconfig",
     "ping",
     "host",
@@ -1326,6 +1327,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("clock: set from network time, "),
     // Files' Copy and Paste (ADR-0145) made a copy beside tone.wav.
     Expect::Line("  tone copy.wav"),
+    // The brightness service (ADR-0147): QEMU's display is no Intel
+    // graphics with a PCH PWM, so Control Center has no slider.
+    Expect::Contains("backlight: none on this display (1234:1111)"),
     Expect::Contains("init/clock set the clock"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),

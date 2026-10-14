@@ -495,3 +495,15 @@ pub fn now_playing(data: &[u8]) -> Option<(u8, &str)> {
         && (!title.trim().is_empty() || state == playing::STOPPED);
     ok.then_some((state, title.trim()))
 }
+
+/// The `backlight` service's requests (ADR-0147): the call's label is the
+/// request, the reply's label 0 for done.
+pub mod backlight {
+    /// → `[percent u8][available u8]`: the brightness, and whether this
+    /// screen's can be set at all.
+    pub const GET: u64 = 1;
+    /// data = `[percent u8]` (`MIN_PERCENT` to 100).
+    pub const SET: u64 = 2;
+    /// The dimmest it goes: a screen at 0 looks switched off.
+    pub const MIN_PERCENT: u8 = 5;
+}
