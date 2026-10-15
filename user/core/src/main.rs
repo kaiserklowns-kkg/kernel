@@ -85,6 +85,8 @@ const USER_FILE: &str = "user";
 const APPEARANCE_FILE: &str = "appearance";
 /// The keyboard layout in use (ADR-0116): `0` English, `1` Thai.
 const LAYOUT_FILE: &str = "layout";
+/// The controls Control Center shows (ADR-0151): their ids, in order.
+const CONTROLS_FILE: &str = "controls";
 /// The interface's scale (ADR-0136), in `/system`: the percent, or `0`
 /// for automatic. The machine's, for every account.
 const SCALE_FILE: &str = "scale";
@@ -117,7 +119,7 @@ const FAILED_BOOTS: u32 = 3;
 const SAFE_CHOSEN: u8 = 1;
 const SAFE_AFTER_FAILURES: u8 = 2;
 /// What each account keeps of its own (ADR-0116), by [`Core::user_file`].
-const USER_FILES: [&str; 3] = [DOCK_FILE, APPEARANCE_FILE, LAYOUT_FILE];
+const USER_FILES: [&str; 4] = [DOCK_FILE, APPEARANCE_FILE, LAYOUT_FILE, CONTROLS_FILE];
 /// `FIND` (ADR-0108): the most entries of Home it looks at, how deep in
 /// folders, and the most names it gives.
 const FIND_VISIT: usize = 1000;
@@ -1782,6 +1784,29 @@ impl Core {
                         }
                         _ => Err(Status::BadRequest.into()),
                     },
+                    // Control Center's controls (ADR-0151), each account's
+                    // own; the defaults until it chooses, or if the file is
+                    // damaged.
+                    op::CONTROLS => {
+                        use oceans_account::controls;
+                        let kept = read_path(&self.system_dir, &self.user_file(CONTROLS_FILE));
+                        match kept.ok().and_then(|text| controls::parse(&text)) {
+                            Some(ids) => reply.extend_from_slice(&ids),
+                            None => reply.extend_from_slice(&controls::DEFAULT),
+                        }
+                        Ok(())
+                    }
+                    op::SET_CONTROLS if oceans_account::controls::valid(data) => {
+                        let text = oceans_account::controls::to_text(data);
+                        write_file(
+                            &self.system_dir,
+                            &self.user_file(CONTROLS_FILE),
+                            text.as_bytes(),
+                        )
+                        .map_err(io)?;
+                        Ok(())
+                    }
+                    op::SET_CONTROLS => Err(Status::BadRequest.into()),
                     op::SET_APPEARANCE => match *data {
                         // Without options (Control Center, older apps):
                         // the kept ones stay (ADR-0155).

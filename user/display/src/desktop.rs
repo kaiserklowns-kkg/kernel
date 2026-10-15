@@ -26,6 +26,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use oceans_account::controls;
 use oceans_draw::{Surface, icon};
 use oceans_wifi::Security;
 use oceans_wifi::state::{Listed, Ssid};
@@ -369,6 +370,12 @@ pub struct Desktop {
     pub clock_date: String,
     /// The keyboard layout typed letters follow (ADR-0114).
     pub layout: oceans_window::layout::Layout,
+    /// Control Center's controls (ADR-0151), by id in their order, as Core
+    /// keeps them for the account; whether they are being edited (badges,
+    /// the gallery), and the one being dragged.
+    pub controls: Vec<u8>,
+    pub editing_controls: bool,
+    pub control_drag: Option<u8>,
 }
 
 /// An app's notification (ADR-0065, ADR-0119), kept for its panel: the
@@ -481,8 +488,8 @@ pub enum Hit {
     VolumeMute,
     /// A button of what plays (ADR-0103): the media key it presses.
     Media(u8),
-    /// A round toggle in Control Center (ADR-0118): 0 the network, 1 dark,
-    /// 2 lock, 3 Settings.
+    /// A toggle in Control Center (ADR-0118, ADR-0151): what it does, a
+    /// `TOGGLE_*`.
     Toggle(u8),
     /// Control Center's accent tile: the next accent.
     Accent,
@@ -508,6 +515,15 @@ pub enum Hit {
     WifiCancel,
     /// Somewhere else in Control Center.
     VolumePanel,
+    /// Edit Controls at Control Center's foot (ADR-0151), Done while
+    /// editing; a control's badge, which takes it away; a control
+    /// pressed while editing, picked up to be dragged; a control of the
+    /// gallery, added; Reset, the controls Oceans starts with.
+    EditControls,
+    ControlRemove(u8),
+    ControlGrab(u8),
+    ControlAdd(u8),
+    ControlsReset,
     Allow,
     Deny,
     Nothing,
@@ -626,176 +642,88 @@ pub fn notice_clear(width: i32, count: usize) -> Rect {
     Rect::new(panel.x + panel.w - 12 - 72, panel.y + 106, 72, 26)
 }
 
-/// Control Center (ADR-0118), under the top bar's right end: modules on
-/// a panel, as phones have them. The whole of it.
-pub fn control_center(width: i32) -> Rect {
-    let brightness = if BRIGHTNESS_SHOWN.load(core::sync::atomic::Ordering::Relaxed) {
-        CC_BRIGHTNESS
-    } else {
-        0
-    };
-    Rect::new(
-        width - 12 - CC_WIDTH,
-        MENU_HEIGHT + 6,
-        CC_WIDTH,
-        CC_HEIGHT + brightness,
-    )
-}
-
-/// Whether Control Center has the brightness module (ADR-0147): only where
-/// the screen's brightness can be set. Its height follows.
-static BRIGHTNESS_SHOWN: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-pub fn show_brightness(shown: bool) {
-    BRIGHTNESS_SHOWN.store(shown, core::sync::atomic::Ordering::Relaxed);
-}
-
-/// The brightness module's height and the gap above it.
-const CC_BRIGHTNESS: i32 = CC_SLIDER + CC_GAP;
+// ---- Control Center (ADR-0118, ADR-0150, ADR-0151) ------------------------
 
 const CC_WIDTH: i32 = 340;
-const CC_HEIGHT: i32 = 12 + CC_TOP + CC_GAP + CC_PLAYING + CC_GAP + CC_SLIDER + 12;
-/// A half-width module, and the gap between modules.
-const CC_HALF: i32 = 153;
+/// Its grid (ADR-0151): four columns of cells, as macOS's, with gaps.
+const CC_PAD: i32 = 13;
+const CC_COLUMNS: i32 = 4;
+const CC_CELL: (i32, i32) = (71, 64);
 const CC_GAP: i32 = 10;
-/// The tall card at the top, its rows, what plays, a slider's card
-/// (ADR-0150).
-const CC_TOP: i32 = 150;
-const CC_ROW: i32 = 46;
-const CC_PLAYING: i32 = 64;
-const CC_SLIDER: i32 = 62;
-/// The small tiles beside each other under Lock Screen's.
-const CC_SMALL: i32 = (CC_HALF - CC_GAP) / 2;
-/// A round button's radius in a card, and how far the glass blurs what is
-/// behind it.
+/// Edit Controls (Done while editing), across the foot.
+const CC_EDIT: i32 = 30;
+/// The least height: the Wi-Fi panel's rows need it (ADR-0130).
+const CC_MIN_HEIGHT: i32 = 320;
+/// A round button's radius in a control, and how far the glass blurs what
+/// is behind it (ADR-0150).
 const CC_DISC: i32 = 15;
 const CC_BLUR: i32 = 24;
+/// The gallery of the controls not shown, left of Control Center while
+/// editing: its width, its title's height and a row's.
+const GALLERY_WIDTH: i32 = 250;
+const GALLERY_TITLE: i32 = 34;
+const GALLERY_ROW: i32 = 44;
 
-/// Control Center's cards (ADR-0150), laid out as macOS lays out its own:
-/// 0 the connections (the network, Dark Mode and the keyboard, a row
-/// each), 1 what plays, 2 the keyboard's row, 3 the accent's tile, 4 the
-/// sound, 5 the brightness (ADR-0147), 6 Lock Screen's tile, 7 Settings'
-/// tile.
-pub fn cc_module(width: i32, which: usize) -> Rect {
-    let cc = control_center(width);
-    let (x0, y0) = (cc.x + 12, cc.y + 12);
-    let full = 2 * CC_HALF + CC_GAP;
-    let right = x0 + CC_HALF + CC_GAP;
-    let below = y0 + CC_TOP + CC_GAP;
-    // The brightness card, where there is one, comes before what plays.
-    let playing = if BRIGHTNESS_SHOWN.load(core::sync::atomic::Ordering::Relaxed) {
-        below + CC_BRIGHTNESS
-    } else {
-        below
-    };
-    let tiles = y0 + 70 + CC_GAP;
-    match which {
-        0 => Rect::new(x0, y0, CC_HALF, CC_TOP),
-        1 => Rect::new(x0, playing, full, CC_PLAYING),
-        2 => cc_row(Rect::new(x0, y0, CC_HALF, CC_TOP), 2),
-        3 => Rect::new(
-            right + CC_SMALL + CC_GAP,
-            tiles,
-            CC_HALF - CC_SMALL - CC_GAP,
-            y0 + CC_TOP - tiles,
-        ),
-        4 => Rect::new(x0, playing + CC_PLAYING + CC_GAP, full, CC_SLIDER),
-        5 => Rect::new(x0, below, full, CC_SLIDER),
-        6 => Rect::new(right, y0, CC_HALF, 70),
-        _ => Rect::new(right, tiles, CC_SMALL, y0 + CC_TOP - tiles),
+/// A control's size in cells: (columns, rows).
+pub fn control_span(id: u8) -> (i32, i32) {
+    match id {
+        controls::NOW_PLAYING => (2, 2),
+        controls::DISPLAY | controls::SOUND => (4, 1),
+        controls::NETWORK | controls::DARK_MODE | controls::KEYBOARD => (2, 1),
+        _ => (1, 1),
     }
 }
 
-/// Row `index` of the connections' card: the network, Dark Mode, the
-/// keyboard.
-fn cc_row(card: Rect, index: i32) -> Rect {
-    Rect::new(
-        card.x + 6,
-        card.y + 6 + index * CC_ROW,
-        card.w - 12,
-        CC_ROW - 2,
-    )
+/// A control's name, in the gallery and in the log.
+pub fn control_name(id: u8) -> &'static str {
+    match id {
+        controls::NETWORK => "Network",
+        controls::NOW_PLAYING => "Now Playing",
+        controls::DARK_MODE => "Dark Mode",
+        controls::KEYBOARD => "Keyboard",
+        controls::LOCK_SCREEN => "Lock Screen",
+        controls::SETTINGS => "Settings",
+        controls::DISPLAY => "Display",
+        controls::SOUND => "Sound",
+        controls::ACCENT => "Accent",
+        controls::LAUNCHPAD => "Launchpad",
+        controls::NOTIFICATIONS => "Notifications",
+        _ => "Terminal",
+    }
 }
 
-/// A slider's track in a full-width card: under its name, right of its
-/// icon.
-fn card_track(card: Rect) -> Rect {
-    Rect::new(card.x + 48, card.y + 30, card.w - 62, 20)
+/// Where a slider's track is in its control: under its name, right of
+/// its picture.
+fn control_track(r: Rect) -> Rect {
+    Rect::new(r.x + 48, r.y + 34, r.w - 62, 20)
 }
 
-/// The brightness module's slider, as the sound's.
-pub fn brightness_track(width: i32) -> Rect {
-    card_track(cc_module(width, 5))
-}
-
-fn brightness_track_target(width: i32) -> Rect {
-    let track = brightness_track(width);
+/// The track, with room round it for the pointer.
+fn track_target(track: Rect) -> Rect {
     Rect::new(track.x - 8, track.y - 8, track.w + 16, track.h + 16)
 }
 
-/// The level (`MIN_PERCENT` to 100) at `x` along the brightness slider.
-pub fn brightness_at(width: i32, x: i32) -> u8 {
-    let track = brightness_track(width);
-    let min = i32::from(oceans_window::proto::backlight::MIN_PERCENT);
+/// The speaker left of the sound's track: it mutes and unmutes.
+fn mute_button(track: Rect) -> Rect {
+    Rect::new(track.x - 44, track.y - 8, 36, 36)
+}
+
+/// The level at `x` along `track`, from `min` to 100.
+fn level_at(track: Rect, x: i32, min: i32) -> u8 {
     ((x - track.x) * 100 / track.w.max(1)).clamp(min, 100) as u8
 }
 
-/// The toggles (ADR-0118), as ADR-0150 places them: 0 the network's row
-/// and 1 Dark Mode's in the connections' card, 2 Lock Screen's tile, 3
-/// Settings' tile.
-pub fn cc_toggle(width: i32, index: usize) -> Rect {
-    match index {
-        0 | 1 => cc_row(cc_module(width, 0), index as i32),
-        2 => cc_module(width, 6),
-        _ => cc_module(width, 7),
-    }
+/// What plays: Previous, Play/Pause, Next (0, 1, 2), across its foot.
+fn media_button(r: Rect, which: usize) -> Rect {
+    let size = 34;
+    let step = 40;
+    let x = r.x + (r.w - 3 * step) / 2 + which as i32 * step + (step - size) / 2;
+    Rect::new(x, r.y + r.h - 10 - size, size, size)
 }
 
-// ---- The Wi-Fi panel (ADR-0130), in Control Center's place ----------------
-
-/// Its back button, top left.
-pub fn wifi_back(width: i32) -> Rect {
-    let cc = control_center(width);
-    Rect::new(cc.x + 12, cc.y + 12, 32, 30)
-}
-
-/// Scan, top right.
-pub fn wifi_scan(width: i32) -> Rect {
-    let cc = control_center(width);
-    Rect::new(cc.x + cc.w - 12 - 64, cc.y + 14, 64, 26)
-}
-
-/// The networks' rows, under the status line.
-const WIFI_ROW: i32 = 34;
-const WIFI_LIST_TOP: i32 = 82;
-pub const WIFI_ROWS: usize = ((CC_HEIGHT - WIFI_LIST_TOP - 12) / WIFI_ROW) as usize;
-
-pub fn wifi_row(width: i32, index: usize) -> Rect {
-    let cc = control_center(width);
-    Rect::new(
-        cc.x + 12,
-        cc.y + WIFI_LIST_TOP + index as i32 * WIFI_ROW,
-        cc.w - 24,
-        WIFI_ROW - 2,
-    )
-}
-
-/// The password field, and Cancel and Join under it.
-pub fn wifi_field(width: i32) -> Rect {
-    let cc = control_center(width);
-    Rect::new(cc.x + 16, cc.y + WIFI_LIST_TOP + 30, cc.w - 32, 34)
-}
-
-pub fn wifi_button(width: i32, join: bool) -> Rect {
-    let field = wifi_field(width);
-    let w = 92;
-    let x = if join {
-        field.x + field.w - w
-    } else {
-        field.x + field.w - 2 * w - 10
-    };
-    Rect::new(x, field.y + field.h + 14, w, 30)
+/// While editing, the badge at a control's corner that takes it away.
+fn remove_badge(r: Rect) -> Rect {
+    Rect::new(r.x - 4, r.y - 4, 20, 20)
 }
 
 /// The media keys the buttons press: Previous, Play/Pause, Next.
@@ -805,35 +733,330 @@ const MEDIA_KEYS: [u8; 3] = [
     oceans_window::proto::KEY_NEXT,
 ];
 
-/// What plays: Previous, Play/Pause, Next (0, 1, 2), at the card's right
-/// end, as macOS has them.
-pub fn media_button(width: i32, which: usize) -> Rect {
-    let m = cc_module(width, 1);
-    let size = 34;
-    let x = m.x + m.w - 10 - (3 - which as i32) * size;
-    Rect::new(x, m.y + (m.h - size) / 2, size, size)
+// ---- The Wi-Fi panel (ADR-0130), in Control Center's place ----------------
+
+/// Its back button, top left.
+pub fn wifi_back(cc: Rect) -> Rect {
+    Rect::new(cc.x + 12, cc.y + 12, 32, 30)
 }
 
-/// The sound module's slider: a thick track right of the speaker.
-pub fn volume_track(width: i32) -> Rect {
-    card_track(cc_module(width, 4))
+/// Scan, top right.
+pub fn wifi_scan(cc: Rect) -> Rect {
+    Rect::new(cc.x + cc.w - 12 - 64, cc.y + 14, 64, 26)
 }
 
-fn volume_track_target(width: i32) -> Rect {
-    let track = volume_track(width);
-    Rect::new(track.x - 8, track.y - 8, track.w + 16, track.h + 16)
+/// The networks' rows, under the status line.
+const WIFI_ROW: i32 = 34;
+const WIFI_LIST_TOP: i32 = 82;
+pub const WIFI_ROWS: usize = ((CC_MIN_HEIGHT - WIFI_LIST_TOP - 12) / WIFI_ROW) as usize;
+
+pub fn wifi_row(cc: Rect, index: usize) -> Rect {
+    Rect::new(
+        cc.x + 12,
+        cc.y + WIFI_LIST_TOP + index as i32 * WIFI_ROW,
+        cc.w - 24,
+        WIFI_ROW - 2,
+    )
 }
 
-/// The speaker at the sound module's left: it mutes and unmutes.
-pub fn volume_mute(width: i32) -> Rect {
-    let track = volume_track(width);
-    Rect::new(track.x - 44, track.y - 8, 36, 36)
+/// The password field, and Cancel and Join under it.
+pub fn wifi_field(cc: Rect) -> Rect {
+    Rect::new(cc.x + 16, cc.y + WIFI_LIST_TOP + 30, cc.w - 32, 34)
 }
 
-/// The level (0 to 100) at `x` along the slider.
-pub fn volume_at(width: i32, x: i32) -> u8 {
-    let track = volume_track(width);
-    ((x - track.x) * 100 / track.w.max(1)).clamp(0, 100) as u8
+pub fn wifi_button(cc: Rect, join: bool) -> Rect {
+    let field = wifi_field(cc);
+    let w = 92;
+    let x = if join {
+        field.x + field.w - w
+    } else {
+        field.x + field.w - 2 * w - 10
+    };
+    Rect::new(x, field.y + field.h + 14, w, 30)
+}
+
+impl Desktop {
+    /// The controls Control Center shows (ADR-0151), in their order: the
+    /// account's, less what this machine or account cannot have (the
+    /// brightness where it cannot be set, the Terminal but for the
+    /// administrator).
+    pub fn shown_controls(&self) -> Vec<u8> {
+        self.controls
+            .iter()
+            .copied()
+            .filter(|&id| self.control_available(id))
+            .collect()
+    }
+
+    fn control_available(&self, id: u8) -> bool {
+        match id {
+            controls::DISPLAY => self.brightness.is_some(),
+            controls::TERMINAL => self.admin,
+            _ => id < controls::COUNT,
+        }
+    }
+
+    /// The controls the gallery offers: those available and not shown.
+    pub fn hidden_controls(&self) -> Vec<u8> {
+        (0..controls::COUNT)
+            .filter(|&id| self.control_available(id) && !self.controls.contains(&id))
+            .collect()
+    }
+
+    /// Each control shown and where it is, packed on the grid first fit
+    /// (ADR-0151), as macOS lays its out; and the rows used.
+    fn placed_controls(&self, width: i32) -> (Vec<(u8, Rect)>, i32) {
+        let shown = self.shown_controls();
+        let spans: Vec<(i32, i32)> = shown.iter().map(|&id| control_span(id)).collect();
+        let (places, rows) = oceans_draw::layout::pack(CC_COLUMNS, &spans);
+        let (x0, y0) = (width - 12 - CC_WIDTH + CC_PAD, MENU_HEIGHT + 6 + 12);
+        let cell = |n: i32, size: i32| n * size + (n - 1).max(0) * CC_GAP;
+        let placed = shown
+            .iter()
+            .zip(spans.iter().zip(places))
+            .map(|(&id, (&(w, h), (col, row)))| {
+                let r = Rect::new(
+                    x0 + col * (CC_CELL.0 + CC_GAP),
+                    y0 + row * (CC_CELL.1 + CC_GAP),
+                    cell(w.min(CC_COLUMNS), CC_CELL.0),
+                    cell(h, CC_CELL.1),
+                );
+                (id, r)
+            })
+            .collect();
+        (placed, rows)
+    }
+
+    /// Where control `id` is, if it is shown.
+    pub fn control_rect(&self, width: i32, id: u8) -> Option<Rect> {
+        self.placed_controls(width)
+            .0
+            .into_iter()
+            .find(|&(i, _)| i == id)
+            .map(|(_, r)| r)
+    }
+
+    /// The control under (`x`, `y`), if any.
+    pub fn control_under(&self, width: i32, x: i32, y: i32) -> Option<u8> {
+        self.placed_controls(width)
+            .0
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(id, _)| id)
+    }
+
+    /// Control Center (ADR-0118), under the top bar's right end: its
+    /// controls on the grid and Edit Controls at its foot; the whole of it.
+    pub fn control_center(&self, width: i32) -> Rect {
+        let rows = self.placed_controls(width).1;
+        let grid = rows * CC_CELL.1 + (rows - 1).max(0) * CC_GAP;
+        let height = 12 + grid + if rows > 0 { CC_GAP } else { 0 } + CC_EDIT + 12;
+        let height = if self.wifi_open {
+            height.max(CC_MIN_HEIGHT)
+        } else {
+            height
+        };
+        Rect::new(width - 12 - CC_WIDTH, MENU_HEIGHT + 6, CC_WIDTH, height)
+    }
+
+    /// Edit Controls, or Done while editing, at Control Center's foot.
+    pub fn edit_controls_button(&self, width: i32) -> Rect {
+        let cc = self.control_center(width);
+        Rect::new(
+            cc.x + CC_PAD,
+            cc.y + cc.h - 12 - CC_EDIT,
+            cc.w - 2 * CC_PAD,
+            CC_EDIT,
+        )
+    }
+
+    /// The gallery while editing, left of Control Center: its title, a row
+    /// for each control not shown, and Reset at its foot.
+    pub fn gallery(&self, width: i32) -> Rect {
+        let cc = self.control_center(width);
+        let rows = self.hidden_controls().len().max(1) as i32;
+        Rect::new(
+            cc.x - 10 - GALLERY_WIDTH,
+            cc.y,
+            GALLERY_WIDTH,
+            12 + GALLERY_TITLE + rows * GALLERY_ROW + 10 + CC_EDIT + 12,
+        )
+    }
+
+    pub fn gallery_row(&self, width: i32, index: usize) -> Rect {
+        let g = self.gallery(width);
+        Rect::new(
+            g.x + 10,
+            g.y + 12 + GALLERY_TITLE + index as i32 * GALLERY_ROW,
+            g.w - 20,
+            GALLERY_ROW - 4,
+        )
+    }
+
+    /// Reset: back to the controls Oceans starts with.
+    pub fn gallery_reset(&self, width: i32) -> Rect {
+        let g = self.gallery(width);
+        Rect::new(g.x + 12, g.y + g.h - 12 - CC_EDIT, g.w - 24, CC_EDIT)
+    }
+
+    /// Whether (`x`, `y`) is on Control Center while it is open, or on the
+    /// gallery beside it while editing.
+    pub fn over_control_center(&self, width: i32, x: i32, y: i32) -> bool {
+        self.volume_open
+            && (self.control_center(width).contains(x, y)
+                || (self.editing_controls && self.gallery(width).contains(x, y)))
+    }
+
+    /// The brightness's level (`MIN_PERCENT` to 100) at `x` along its
+    /// slider (ADR-0147).
+    pub fn brightness_at(&self, width: i32, x: i32) -> u8 {
+        let min = i32::from(oceans_window::proto::backlight::MIN_PERCENT);
+        self.control_rect(width, controls::DISPLAY)
+            .map_or(100, |r| level_at(control_track(r), x, min))
+    }
+
+    /// The volume (0 to 100) at `x` along the sound's slider.
+    pub fn volume_at(&self, width: i32, x: i32) -> u8 {
+        self.control_rect(width, controls::SOUND)
+            .map_or(0, |r| level_at(control_track(r), x, 0))
+    }
+
+    /// What a click in Control Center hits (not the Wi-Fi panel).
+    fn control_hit(&self, width: i32, x: i32, y: i32) -> Hit {
+        if self.edit_controls_button(width).contains(x, y) {
+            return Hit::EditControls;
+        }
+        let (placed, _) = self.placed_controls(width);
+        if self.editing_controls {
+            // Editing: a badge takes one away, a press picks one up.
+            if let Some(&(id, _)) = placed.iter().find(|(_, r)| remove_badge(*r).contains(x, y)) {
+                return Hit::ControlRemove(id);
+            }
+            return placed
+                .iter()
+                .find(|(_, r)| r.contains(x, y))
+                .map_or(Hit::VolumePanel, |&(id, _)| Hit::ControlGrab(id));
+        }
+        let Some(&(id, r)) = placed.iter().find(|(_, r)| r.contains(x, y)) else {
+            return Hit::VolumePanel;
+        };
+        match id {
+            controls::NETWORK => Hit::Toggle(TOGGLE_NETWORK),
+            controls::DARK_MODE => Hit::Toggle(TOGGLE_DARK),
+            controls::LOCK_SCREEN => Hit::Toggle(TOGGLE_LOCK),
+            controls::SETTINGS => Hit::Toggle(TOGGLE_SETTINGS),
+            controls::LAUNCHPAD => Hit::Toggle(TOGGLE_LAUNCHPAD),
+            controls::NOTIFICATIONS => Hit::Toggle(TOGGLE_NOTIFICATIONS),
+            controls::TERMINAL => Hit::Toggle(TOGGLE_TERMINAL),
+            controls::KEYBOARD => Hit::Layout,
+            controls::ACCENT => Hit::Accent,
+            controls::NOW_PLAYING => (0..3)
+                .find(|&i| self.now_playing.is_some() && media_button(r, i).contains(x, y))
+                .map_or(Hit::VolumePanel, |i| Hit::Media(MEDIA_KEYS[i])),
+            controls::DISPLAY if track_target(control_track(r)).contains(x, y) => {
+                Hit::BrightnessLevel(self.brightness_at(width, x))
+            }
+            controls::SOUND if self.volume.is_some() => {
+                let track = control_track(r);
+                if track_target(track).contains(x, y) {
+                    Hit::VolumeLevel(self.volume_at(width, x))
+                } else if mute_button(track).contains(x, y) {
+                    Hit::VolumeMute
+                } else {
+                    Hit::VolumePanel
+                }
+            }
+            _ => Hit::VolumePanel,
+        }
+    }
+
+    /// What a click in the gallery hits.
+    fn gallery_hit(&self, width: i32, x: i32, y: i32) -> Hit {
+        if self.gallery_reset(width).contains(x, y) {
+            return Hit::ControlsReset;
+        }
+        self.hidden_controls()
+            .into_iter()
+            .enumerate()
+            .find(|&(i, _)| self.gallery_row(width, i).contains(x, y))
+            .map_or(Hit::VolumePanel, |(_, id)| Hit::ControlAdd(id))
+    }
+}
+
+/// What Control Center's toggles do (`Hit::Toggle`).
+pub const TOGGLE_NETWORK: u8 = 0;
+pub const TOGGLE_DARK: u8 = 1;
+pub const TOGGLE_LOCK: u8 = 2;
+pub const TOGGLE_SETTINGS: u8 = 3;
+pub const TOGGLE_LAUNCHPAD: u8 = 4;
+pub const TOGGLE_NOTIFICATIONS: u8 = 5;
+pub const TOGGLE_TERMINAL: u8 = 6;
+
+/// Whether a click on control `id` does something as a whole, so the
+/// pointer over it lights it (sliders and what plays have their own
+/// parts).
+fn hovers(id: u8) -> bool {
+    !matches!(
+        id,
+        controls::NOW_PLAYING | controls::DISPLAY | controls::SOUND
+    )
+}
+
+/// How Control Center's cards look over the glass (ADR-0150), light or
+/// dark.
+struct CardLook {
+    dark: bool,
+    /// The glass's own tint, a pale disc for what is off, the remove
+    /// badge's colour.
+    glass: Rgb,
+    off: Rgb,
+    badge: Rgb,
+}
+
+impl CardLook {
+    fn new(dark: bool) -> CardLook {
+        if dark {
+            CardLook {
+                dark,
+                glass: Rgb(0x26_26_28),
+                off: Rgb(0x5a_5a_5e),
+                badge: Rgb(0x8e_8e_93),
+            }
+        } else {
+            CardLook {
+                dark,
+                glass: Rgb(0xf6_f6_f8),
+                off: Rgb(0xd4_d4_d9),
+                badge: Rgb(0xd1_d1_d6),
+            }
+        }
+    }
+
+    /// A card: white over the glass.
+    fn card(&self, canvas: &mut Canvas, r: Rect) {
+        canvas.tint(r, 14, WHITE, if self.dark { 22 } else { 100 });
+    }
+
+    /// The pointer over something that answers a click.
+    fn hover(&self, canvas: &mut Canvas, r: Rect, radius: i32) {
+        canvas.tint(r, radius, if self.dark { WHITE } else { BLACK }, 14);
+    }
+
+    /// A slider: a thick track, filled to the level, a white knob at its
+    /// end.
+    fn slider(&self, canvas: &mut Canvas, track: Rect, level: u8, ink: Rgb) {
+        canvas.round_fill(track, track.h / 2, self.off);
+        let filled = (track.w * i32::from(level) / 100).max(track.h);
+        canvas.round_fill(
+            Rect::new(track.x, track.y, filled, track.h),
+            track.h / 2,
+            ink,
+        );
+        let r = track.h / 2;
+        let (kx, ky) = (track.x + filled - r, track.y + r);
+        canvas.circle(kx, ky, r + 1, Rgb(0xc7_c7_cc));
+        canvas.circle(kx, ky, r, WHITE);
+    }
 }
 
 /// Wave (ADR-0117): the one round button at the bottom's middle, all the
@@ -1356,22 +1579,23 @@ impl Desktop {
         {
             return Hit::Volume;
         }
-        if self.volume_open && self.wifi_open && control_center(width).contains(x, y) {
-            if wifi_back(width).contains(x, y) {
+        let cc = self.control_center(width);
+        if self.volume_open && self.wifi_open && cc.contains(x, y) {
+            if wifi_back(cc).contains(x, y) {
                 return Hit::WifiBack;
             }
             if self.wifi_entry.is_some() {
-                return if wifi_field(width).contains(x, y) {
+                return if wifi_field(cc).contains(x, y) {
                     Hit::WifiField
-                } else if wifi_button(width, true).contains(x, y) {
+                } else if wifi_button(cc, true).contains(x, y) {
                     Hit::WifiJoin
-                } else if wifi_button(width, false).contains(x, y) {
+                } else if wifi_button(cc, false).contains(x, y) {
                     Hit::WifiCancel
                 } else {
                     Hit::VolumePanel
                 };
             }
-            if wifi_scan(width).contains(x, y) {
+            if wifi_scan(cc).contains(x, y) {
                 return Hit::WifiScan;
             }
             let shown = self
@@ -1379,30 +1603,14 @@ impl Desktop {
                 .as_ref()
                 .map_or(0, |w| w.networks.len().min(WIFI_ROWS));
             return (0..shown)
-                .find(|&i| wifi_row(width, i).contains(x, y))
+                .find(|&i| wifi_row(cc, i).contains(x, y))
                 .map_or(Hit::VolumePanel, Hit::WifiNetwork);
         }
-        if self.volume_open && control_center(width).contains(x, y) {
-            let media = self.now_playing.is_some();
-            return if let Some(i) = (0..4).find(|&i| cc_toggle(width, i).contains(x, y)) {
-                Hit::Toggle(i as u8)
-            } else if let Some(which) =
-                (0..3).find(|&i| media && media_button(width, i).contains(x, y))
-            {
-                Hit::Media(MEDIA_KEYS[which])
-            } else if cc_module(width, 2).contains(x, y) {
-                Hit::Layout
-            } else if cc_module(width, 3).contains(x, y) {
-                Hit::Accent
-            } else if self.brightness.is_some() && brightness_track_target(width).contains(x, y) {
-                Hit::BrightnessLevel(brightness_at(width, x))
-            } else if self.volume.is_some() && volume_track_target(width).contains(x, y) {
-                Hit::VolumeLevel(volume_at(width, x))
-            } else if self.volume.is_some() && volume_mute(width).contains(x, y) {
-                Hit::VolumeMute
-            } else {
-                Hit::VolumePanel
-            };
+        if self.volume_open && cc.contains(x, y) {
+            return self.control_hit(width, x, y);
+        }
+        if self.volume_open && self.editing_controls && self.gallery(width).contains(x, y) {
+            return self.gallery_hit(width, x, y);
         }
         if self.start_open {
             if start_menu(width, height).contains(x, y) {
@@ -1845,12 +2053,12 @@ impl Desktop {
     /// or the password of the one chosen.
     fn draw_wifi(&self, canvas: &mut Canvas) {
         let w = canvas.width;
-        let cc = control_center(w);
+        let cc = self.control_center(w);
         let pointer = self.pointer;
         let hover = |r: Rect| r.contains(pointer.0, pointer.1);
         let clip = Rect::new(cc.x + 12, cc.y, cc.w - 24, cc.h);
 
-        let back = wifi_back(w);
+        let back = wifi_back(cc);
         if hover(back) {
             canvas.tint(back, 8, BLACK, 20);
         }
@@ -1898,7 +2106,7 @@ impl Desktop {
                 colour::text(),
                 clip,
             );
-            let field = wifi_field(w);
+            let field = wifi_field(cc);
             canvas.round_fill(field, 8, colour::surface());
             canvas.round_fill(
                 Rect::new(field.x, field.y + field.h - 2, field.w, 2),
@@ -1927,7 +2135,7 @@ impl Desktop {
                 "Enter joins, Escape cancels"
             };
             // On its own line, under the buttons.
-            let below = wifi_button(w, true);
+            let below = wifi_button(cc, true);
             canvas.text(
                 field.x,
                 below.y + below.h + 14,
@@ -1937,7 +2145,7 @@ impl Desktop {
                 Rect::new(field.x, below.y + below.h, field.w, 40),
             );
             for join in [false, true] {
-                let b = wifi_button(w, join);
+                let b = wifi_button(cc, join);
                 let ready = !join || count >= 8;
                 let fill = if join && ready {
                     colour::accent()
@@ -1962,7 +2170,7 @@ impl Desktop {
             return;
         }
 
-        let scan = wifi_scan(w);
+        let scan = wifi_scan(cc);
         let scanning = matches!(state, WifiState::Scanning);
         canvas.round_fill(scan, 8, colour::button_secondary());
         if hover(scan) && !scanning {
@@ -2001,7 +2209,7 @@ impl Desktop {
             _ => None,
         };
         for (i, network) in networks.iter().take(WIFI_ROWS).enumerate() {
-            let row = wifi_row(w, i);
+            let row = wifi_row(cc, i);
             let name = ssid_name(network.ssid.as_bytes());
             let connected = joined == Some(name.as_str());
             if connected {
@@ -2044,187 +2252,368 @@ impl Desktop {
         }
     }
 
-    /// Control Center (ADR-0118), as ADR-0150 draws it: frosted glass over
-    /// what is behind, with cards on it as macOS has them: the connections
-    /// (the network, Dark Mode, the keyboard), Lock Screen, Settings and the
-    /// accent, the display's brightness, what plays and the sound.
+    /// Control Center (ADR-0118), drawn as ADR-0150 and ADR-0151 have it:
+    /// frosted glass over what is behind, the account's controls on it as
+    /// cards on macOS's grid, and Edit Controls at its foot. While editing,
+    /// each control has a badge that takes it away, and the gallery beside
+    /// it offers the others.
     fn draw_control_center(&self, canvas: &mut Canvas) {
         let w = canvas.width;
-        let cc = control_center(w);
-        let (dark, accent) = oceans_draw::theme::bytes();
-        let dark = dark == 1;
-        canvas.shadow(cc, 18, 70);
-        let (glass, glass_alpha) = if dark {
-            (Rgb(0x26_26_28), 140)
-        } else {
-            (Rgb(0xf6_f6_f8), 104)
-        };
-        canvas.frost(cc, 18, CC_BLUR, glass, glass_alpha);
-        // A hairline of light round the glass's edge, as macOS draws it.
-        canvas.with_surface(|s| s.outline(cc, 18, WHITE, if dark { 40 } else { 150 }));
+        let cc = self.control_center(w);
+        let dark = oceans_draw::theme::bytes().0 == 1;
+        self.draw_glass(canvas, cc, dark);
         if self.wifi_open {
             self.draw_wifi(canvas);
             return;
         }
-        let card = |canvas: &mut Canvas, r: Rect| {
-            if dark {
-                canvas.tint(r, 14, WHITE, 22);
-            } else {
-                canvas.tint(r, 14, WHITE, 100);
-            }
-        };
-        let hover_tint = |canvas: &mut Canvas, r: Rect, radius: i32| {
-            canvas.tint(r, radius, if dark { WHITE } else { BLACK }, 14);
-        };
         let pointer = self.pointer;
-        let hover = |r: Rect| r.contains(pointer.0, pointer.1);
-        // A round button: the accent when on, a pale disc when off.
-        let off = if dark {
-            Rgb(0x5a_5a_5e)
-        } else {
-            Rgb(0xd4_d4_d9)
-        };
-        let disc = |on: bool| if on { colour::accent() } else { off };
+        let look = CardLook::new(dark);
+        let (placed, _) = self.placed_controls(w);
+        let dropping = self
+            .control_drag
+            .and_then(|_| self.control_under(w, pointer.0, pointer.1));
+        for &(id, r) in &placed {
+            look.card(canvas, r);
+            if !self.editing_controls && r.contains(pointer.0, pointer.1) && hovers(id) {
+                look.hover(canvas, r, 14);
+            }
+            self.draw_control(canvas, id, r, &look);
+            if self.editing_controls {
+                // The one picked up shows faded; where it would land, ringed.
+                if self.control_drag == Some(id) {
+                    canvas.tint(r, 14, look.glass, 150);
+                }
+                if dropping == Some(id) && self.control_drag != Some(id) {
+                    canvas.with_surface(|s| s.outline(r, 14, colour::accent(), 255));
+                }
+                let badge = remove_badge(r);
+                let (cx, cy) = (badge.x + badge.w / 2, badge.y + badge.h / 2);
+                canvas.circle(cx, cy, 10, look.badge);
+                canvas.fill(Rect::new(cx - 5, cy - 1, 10, 2), colour::text());
+            }
+        }
+        if placed.is_empty() {
+            let note = "No controls: Edit Controls adds them";
+            canvas.text(
+                cc.x + CC_PAD,
+                cc.y + 14,
+                note,
+                Font::Body,
+                colour::muted(),
+                cc,
+            );
+        }
 
-        // The connections: a row each, its round button, its name and its
-        // state. The network's opens what it is (ADR-0149): with Wi-Fi,
-        // Wi-Fi's panel (ADR-0130); without, Settings.
-        let connections = cc_module(w, 0);
-        card(canvas, connections);
-        let connected = self.network.as_ref().filter(|n| n.connected);
-        let (network_name, network_on, link, network_state) =
-            match self.wifi.as_ref().map(|w| &w.state) {
-                Some(WifiState::Joined { name, rssi }) => (
-                    "Wi-Fi",
-                    true,
-                    Link::Wifi(icon::wifi_bars(*rssi)),
-                    name.clone(),
-                ),
-                Some(WifiState::Off) => ("Wi-Fi", false, Link::WifiOff, String::from("Off")),
-                Some(_) => ("Wi-Fi", false, Link::WifiOff, String::from("Not connected")),
-                None => (
-                    "Ethernet",
-                    connected.is_some(),
-                    Link::Ethernet(connected.is_some()),
-                    connected.map_or(String::from("Not connected"), |n| n.address.clone()),
-                ),
-            };
-        let rows: [(&str, String, bool); 3] = [
-            (network_name, network_state, network_on),
-            (
-                "Dark Mode",
-                String::from(if dark { "On" } else { "Off" }),
-                dark,
-            ),
-            ("Keyboard", String::from(self.layout.name()), false),
-        ];
-        for (i, (name, state, on)) in rows.iter().enumerate() {
-            let row = cc_row(connections, i as i32);
-            if hover(row) {
-                hover_tint(canvas, row, 10);
+        // Edit Controls, or Done.
+        let edit = self.edit_controls_button(w);
+        let label = if self.editing_controls {
+            "Done"
+        } else {
+            "Edit Controls..."
+        };
+        if self.editing_controls {
+            canvas.round_fill(edit, 10, colour::accent());
+        } else {
+            look.card(canvas, edit);
+        }
+        if edit.contains(pointer.0, pointer.1) {
+            look.hover(canvas, edit, 10);
+        }
+        let ink = if self.editing_controls {
+            WHITE
+        } else {
+            colour::text()
+        };
+        let lw = canvas.measure(label, Font::Body);
+        canvas.text(
+            edit.x + (edit.w - lw) / 2,
+            edit.y + 6,
+            label,
+            Font::Body,
+            ink,
+            edit,
+        );
+
+        if self.editing_controls {
+            self.draw_gallery(canvas, dark, &look);
+        }
+    }
+
+    /// The frosted glass under a panel (ADR-0150): what is behind it
+    /// blurred, a tint over it, and a hairline of light round its edge.
+    fn draw_glass(&self, canvas: &mut Canvas, r: Rect, dark: bool) {
+        canvas.shadow(r, 18, 70);
+        let (glass, alpha) = if dark {
+            (Rgb(0x26_26_28), 140)
+        } else {
+            (Rgb(0xf6_f6_f8), 104)
+        };
+        canvas.frost(r, 18, CC_BLUR, glass, alpha);
+        canvas.with_surface(|s| s.outline(r, 18, WHITE, if dark { 40 } else { 150 }));
+    }
+
+    /// The gallery while editing (ADR-0151), left of Control Center: the
+    /// controls not shown, each with its picture, its name and a + that
+    /// adds it; Reset at its foot.
+    fn draw_gallery(&self, canvas: &mut Canvas, dark: bool, look: &CardLook) {
+        let w = canvas.width;
+        let g = self.gallery(w);
+        let pointer = self.pointer;
+        self.draw_glass(canvas, g, dark);
+        canvas.text(
+            g.x + 16,
+            g.y + 16,
+            "Add Controls",
+            Font::Strong,
+            colour::text(),
+            g,
+        );
+        let hidden = self.hidden_controls();
+        if hidden.is_empty() {
+            canvas.text(
+                g.x + 16,
+                g.y + 12 + GALLERY_TITLE + 10,
+                "Every control is shown",
+                Font::Body,
+                colour::muted(),
+                g,
+            );
+        }
+        for (i, &id) in hidden.iter().enumerate() {
+            let row = self.gallery_row(w, i);
+            look.card(canvas, row);
+            if row.contains(pointer.0, pointer.1) {
+                look.hover(canvas, row, 10);
             }
             let (cx, cy) = (row.x + 8 + CC_DISC, row.y + row.h / 2);
-            let fill = disc(*on);
-            canvas.circle(cx, cy, CC_DISC, fill);
-            let ink = if *on { WHITE } else { colour::text() };
-            match i {
-                0 => glyph_at(canvas, (cx, cy), 18, |s, r| {
-                    link.draw(s, r, ink, ink.over(fill, 110))
-                }),
-                1 => moon_icon(canvas, cx, cy, ink),
-                _ => {
-                    let short = self.layout.short_name();
-                    let sw = canvas.measure(short, Font::Body);
-                    canvas.text(cx - sw / 2, cy - 9, short, Font::Body, ink, row);
-                }
-            }
-            let text_x = cx + CC_DISC + 8;
-            let clip = Rect::new(text_x, row.y, row.x + row.w - text_x - 4, row.h);
-            canvas.text(text_x, row.y + 4, name, Font::Strong, colour::text(), clip);
-            canvas.text(text_x, row.y + 23, state, Font::Body, colour::muted(), clip);
-        }
-
-        // Lock Screen: a wide tile, its button and its name.
-        let lock = cc_module(w, 6);
-        card(canvas, lock);
-        if hover(lock) {
-            hover_tint(canvas, lock, 14);
-        }
-        let (cx, cy) = (lock.x + 14 + CC_DISC, lock.y + lock.h / 2);
-        canvas.circle(cx, cy, CC_DISC, off);
-        lock_icon(canvas, cx, cy, colour::text());
-        let text_x = cx + CC_DISC + 10;
-        let clip = Rect::new(text_x, lock.y, lock.x + lock.w - text_x - 4, lock.h);
-        canvas.text(text_x, cy - 20, "Lock", Font::Strong, colour::text(), clip);
-        canvas.text(text_x, cy + 1, "Screen", Font::Strong, colour::text(), clip);
-
-        // Settings and the accent (ADR-0113): small tiles, the picture over
-        // the name.
-        let accents = oceans_draw::theme::ACCENTS;
-        let (accent_name, accent_colour) = accents[usize::from(accent) % accents.len()];
-        for (which, name) in [(7, "Settings"), (3, accent_name)] {
-            let t = cc_module(w, which);
-            card(canvas, t);
-            if hover(t) {
-                hover_tint(canvas, t, 14);
-            }
-            let (cx, cy) = (t.x + t.w / 2, t.y + 25);
-            if which == 7 {
-                canvas.circle(cx, cy, CC_DISC, off);
-                gear_icon(canvas, cx, cy, colour::text());
-            } else {
-                canvas.circle(cx, cy, CC_DISC - 2, Rgb(accent_colour.0));
-                canvas.circle(cx, cy, 5, WHITE);
-            }
-            let nw = canvas.measure(name, Font::Body);
+            canvas.circle(cx, cy, CC_DISC, look.off);
+            self.control_icon(canvas, id, (cx, cy), colour::text());
+            let clip = Rect::new(cx + CC_DISC + 8, row.y, row.w - 80, row.h);
             canvas.text(
-                t.x + (t.w - nw).max(0) / 2,
-                t.y + t.h - 24,
-                name,
+                cx + CC_DISC + 8,
+                row.y + 10,
+                control_name(id),
                 Font::Body,
                 colour::text(),
-                t,
+                clip,
             );
+            // The +, in green as macOS draws it.
+            let (px, py) = (row.x + row.w - 20, cy);
+            canvas.circle(px, py, 10, Rgb(0x34_c7_59));
+            canvas.fill(Rect::new(px - 5, py - 1, 10, 2), WHITE);
+            canvas.fill(Rect::new(px - 1, py - 5, 2, 10), WHITE);
         }
-
-        // The display's brightness (ADR-0147), where the screen's can be
-        // set, and the sound (ADR-0100): a name over a slider, its picture
-        // at the slider's left.
-        let slider = |canvas: &mut Canvas, track: Rect, level: u8, ink: Rgb| {
-            canvas.round_fill(track, track.h / 2, off);
-            let filled = (track.w * i32::from(level) / 100).max(track.h);
-            canvas.round_fill(
-                Rect::new(track.x, track.y, filled, track.h),
-                track.h / 2,
-                ink,
-            );
-            // The knob, white, at the level's end.
-            let r = track.h / 2;
-            let (kx, ky) = (track.x + filled - r, track.y + r);
-            canvas.circle(kx, ky, r + 1, Rgb(0xc7_c7_cc));
-            canvas.circle(kx, ky, r, WHITE);
-        };
-        if let Some(level) = self.brightness {
-            let m = cc_module(w, 5);
-            card(canvas, m);
-            canvas.text(
-                m.x + 14,
-                m.y + 7,
-                "Display",
-                Font::Strong,
-                colour::text(),
-                m,
-            );
-            let track = brightness_track(w);
-            sun_icon(canvas, track.x - 22, track.y + track.h / 2, colour::text());
-            slider(canvas, track, level, colour::accent());
+        let reset = self.gallery_reset(w);
+        look.card(canvas, reset);
+        if reset.contains(pointer.0, pointer.1) {
+            look.hover(canvas, reset, 10);
         }
+        let label = "Reset";
+        let lw = canvas.measure(label, Font::Body);
+        canvas.text(
+            reset.x + (reset.w - lw) / 2,
+            reset.y + 6,
+            label,
+            Font::Body,
+            colour::text(),
+            reset,
+        );
+    }
 
-        // What plays (ADR-0103): the app's icon, the title and the app,
-        // and Previous, Play/Pause, Next at the right.
-        let m = cc_module(w, 1);
-        card(canvas, m);
-        let picture = Rect::new(m.x + 12, m.y + 12, 40, 40);
+    /// A control's picture, centred on `at`.
+    fn control_icon(&self, canvas: &mut Canvas, id: u8, at: (i32, i32), ink: Rgb) {
+        let (cx, cy) = at;
+        match id {
+            controls::NETWORK => {
+                let link = self.cc_link();
+                glyph_at(canvas, at, 18, |s, r| {
+                    link.draw(s, r, ink, ink.over(PANEL_FAINT, 110))
+                });
+            }
+            controls::DARK_MODE => moon_icon(canvas, cx, cy, ink),
+            controls::KEYBOARD => {
+                let short = self.layout.short_name();
+                let sw = canvas.measure(short, Font::Body);
+                canvas.text(
+                    cx - sw / 2,
+                    cy - 9,
+                    short,
+                    Font::Body,
+                    ink,
+                    Rect::new(cx - 15, cy - 15, 30, 30),
+                );
+            }
+            controls::LOCK_SCREEN => lock_icon(canvas, cx, cy, ink),
+            controls::SETTINGS => gear_icon(canvas, cx, cy, ink),
+            controls::DISPLAY => sun_icon(canvas, cx, cy, ink),
+            controls::SOUND => {
+                speaker(canvas, Rect::new(cx - 14, cy - 12, 28, 24), 100, false, ink)
+            }
+            controls::ACCENT => {
+                let (_, accent) = oceans_draw::theme::bytes();
+                let accents = oceans_draw::theme::ACCENTS;
+                canvas.circle(
+                    cx,
+                    cy,
+                    9,
+                    Rgb(accents[usize::from(accent) % accents.len()].1.0),
+                );
+            }
+            controls::NOW_PLAYING => play_icon(canvas, cx, cy),
+            controls::LAUNCHPAD => {
+                for (dx, dy) in [(-6, -6), (2, -6), (-6, 2), (2, 2)] {
+                    canvas.round_fill(Rect::new(cx + dx, cy + dy, 5, 5), 1, ink);
+                }
+            }
+            controls::NOTIFICATIONS => glyph_at(canvas, at, 18, |s, r| icon::bell(s, r, ink)),
+            _ => {
+                // The Terminal: its prompt.
+                canvas.text(
+                    cx - 8,
+                    cy - 9,
+                    ">_",
+                    Font::Strong,
+                    ink,
+                    Rect::new(cx - 15, cy - 15, 30, 30),
+                );
+            }
+        }
+    }
+
+    /// What the network shows (ADR-0149): Wi-Fi's fan with its signal, or
+    /// the cable.
+    fn cc_link(&self) -> Link {
+        let connected = self.network.as_ref().is_some_and(|n| n.connected);
+        match self.wifi.as_ref().map(|w| &w.state) {
+            Some(WifiState::Joined { rssi, .. }) => Link::Wifi(icon::wifi_bars(*rssi)),
+            Some(_) => Link::WifiOff,
+            None => Link::Ethernet(connected),
+        }
+    }
+
+    /// One control in `r`, as its size has it: a wide one's round button,
+    /// name and state; a small one's button over its name; what plays;
+    /// a slider.
+    fn draw_control(&self, canvas: &mut Canvas, id: u8, r: Rect, look: &CardLook) {
+        let dark = oceans_draw::theme::bytes().0 == 1;
+        let connected = self.network.as_ref().filter(|n| n.connected);
+        match id {
+            controls::NOW_PLAYING => self.draw_now_playing(canvas, r, look),
+            controls::DISPLAY => {
+                canvas.text(
+                    r.x + 14,
+                    r.y + 8,
+                    "Display",
+                    Font::Strong,
+                    colour::text(),
+                    r,
+                );
+                let track = control_track(r);
+                sun_icon(canvas, track.x - 22, track.y + track.h / 2, colour::text());
+                if let Some(level) = self.brightness {
+                    look.slider(canvas, track, level, colour::accent());
+                }
+            }
+            controls::SOUND => {
+                canvas.text(r.x + 14, r.y + 8, "Sound", Font::Strong, colour::text(), r);
+                match self.volume {
+                    Some((level, muted)) => {
+                        let track = control_track(r);
+                        let button = mute_button(track);
+                        if !self.editing_controls && button.contains(self.pointer.0, self.pointer.1)
+                        {
+                            look.hover(canvas, button, button.w / 2);
+                        }
+                        speaker(canvas, button, level, muted, colour::text());
+                        let ink = if muted {
+                            colour::muted()
+                        } else {
+                            colour::accent()
+                        };
+                        look.slider(canvas, track, level, ink);
+                    }
+                    None => {
+                        canvas.text(
+                            r.x + 14,
+                            r.y + 34,
+                            "No sound device",
+                            Font::Body,
+                            colour::muted(),
+                            r,
+                        );
+                    }
+                }
+            }
+            controls::NETWORK | controls::DARK_MODE | controls::KEYBOARD => {
+                let (name, state, on) = match id {
+                    controls::NETWORK => match self.wifi.as_ref().map(|w| &w.state) {
+                        Some(WifiState::Joined { name, .. }) => ("Wi-Fi", name.clone(), true),
+                        Some(WifiState::Off) => ("Wi-Fi", String::from("Off"), false),
+                        Some(_) => ("Wi-Fi", String::from("Not connected"), false),
+                        None => (
+                            "Ethernet",
+                            connected.map_or(String::from("Not connected"), |n| n.address.clone()),
+                            connected.is_some(),
+                        ),
+                    },
+                    controls::DARK_MODE => (
+                        "Dark Mode",
+                        String::from(if dark { "On" } else { "Off" }),
+                        dark,
+                    ),
+                    _ => ("Keyboard", String::from(self.layout.name()), false),
+                };
+                let (cx, cy) = (r.x + 10 + CC_DISC, r.y + r.h / 2);
+                let fill = if on { colour::accent() } else { look.off };
+                canvas.circle(cx, cy, CC_DISC, fill);
+                let ink = if on { WHITE } else { colour::text() };
+                if id == controls::NETWORK {
+                    let link = self.cc_link();
+                    glyph_at(canvas, (cx, cy), 18, |s, g| {
+                        link.draw(s, g, ink, ink.over(fill, 110))
+                    });
+                } else {
+                    self.control_icon(canvas, id, (cx, cy), ink);
+                }
+                let text_x = cx + CC_DISC + 8;
+                let clip = Rect::new(text_x, r.y, r.x + r.w - text_x - 4, r.h);
+                canvas.text(text_x, r.y + 13, name, Font::Strong, colour::text(), clip);
+                canvas.text(text_x, r.y + 32, &state, Font::Body, colour::muted(), clip);
+            }
+            _ => {
+                // A small one: its button over its name.
+                let (cx, cy) = (r.x + r.w / 2, r.y + 24);
+                canvas.circle(cx, cy, CC_DISC, look.off);
+                self.control_icon(canvas, id, (cx, cy), colour::text());
+                let name = match id {
+                    controls::LOCK_SCREEN => "Lock",
+                    controls::NOTIFICATIONS => "Alerts",
+                    controls::ACCENT => {
+                        let (_, accent) = oceans_draw::theme::bytes();
+                        let accents = oceans_draw::theme::ACCENTS;
+                        accents[usize::from(accent) % accents.len()].0
+                    }
+                    _ => control_name(id),
+                };
+                let nw = canvas.measure(name, Font::Body);
+                canvas.text(
+                    r.x + (r.w - nw).max(0) / 2,
+                    r.y + r.h - 23,
+                    name,
+                    Font::Body,
+                    colour::text(),
+                    r,
+                );
+            }
+        }
+    }
+
+    /// What plays (ADR-0103) in its large control: the app's icon and the
+    /// title and the app under it, and Previous, Play/Pause and Next
+    /// across its foot.
+    fn draw_now_playing(&self, canvas: &mut Canvas, r: Rect, look: &CardLook) {
+        let picture = Rect::new(r.x + 12, r.y + 12, 40, 40);
+        let clip = Rect::new(r.x + 12, r.y, r.w - 24, r.h);
         match &self.now_playing {
             Some((app, state, title)) => {
                 let id = self
@@ -2233,22 +2622,20 @@ impl Desktop {
                     .find(|a| &a.name == app)
                     .map_or("", |a| a.id.as_str());
                 app_icon(canvas, picture, id, app);
-                let buttons = media_button(w, 0);
-                let clip = Rect::new(m.x + 62, m.y, buttons.x - m.x - 66, m.h);
                 canvas.text(
-                    m.x + 62,
-                    m.y + 12,
+                    r.x + 12,
+                    r.y + 56,
                     title,
                     Font::Strong,
                     colour::text(),
                     clip,
                 );
-                canvas.text(m.x + 62, m.y + 32, app, Font::Body, colour::muted(), clip);
+                canvas.text(r.x + 12, r.y + 75, app, Font::Body, colour::muted(), clip);
                 let playing = *state == oceans_window::proto::playing::PLAYING;
                 for which in 0..3 {
-                    let b = media_button(w, which);
-                    if hover(b) {
-                        hover_tint(canvas, b, b.w / 2);
+                    let b = media_button(r, which);
+                    if !self.editing_controls && b.contains(self.pointer.0, self.pointer.1) {
+                        look.hover(canvas, b, b.w / 2);
                     }
                     let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2);
                     match which {
@@ -2260,48 +2647,21 @@ impl Desktop {
                 }
             }
             None => {
-                canvas.round_fill(picture, 10, off);
+                canvas.round_fill(picture, 10, look.off);
                 // A note: its head and its stem.
                 let (px, py) = (picture.x, picture.y);
                 canvas.circle(px + 17, py + 27, 6, colour::muted());
                 canvas.fill(Rect::new(px + 21, py + 10, 3, 18), colour::muted());
                 canvas.fill(Rect::new(px + 21, py + 10, 9, 3), colour::muted());
-                let clip = Rect::new(m.x + 62, m.y, m.w - 74, m.h);
                 canvas.text(
-                    m.x + 62,
-                    m.y + 21,
+                    r.x + 12,
+                    r.y + 60,
                     "Not Playing",
                     Font::Strong,
                     colour::muted(),
                     clip,
                 );
             }
-        }
-
-        let m = cc_module(w, 4);
-        card(canvas, m);
-        canvas.text(m.x + 14, m.y + 7, "Sound", Font::Strong, colour::text(), m);
-        if let Some((level, muted)) = self.volume {
-            let button = volume_mute(w);
-            if hover(button) {
-                hover_tint(canvas, button, button.w / 2);
-            }
-            speaker(canvas, button, level, muted, colour::text());
-            let ink = if muted {
-                colour::muted()
-            } else {
-                colour::accent()
-            };
-            slider(canvas, volume_track(w), level, ink);
-        } else {
-            canvas.text(
-                m.x + 14,
-                m.y + 32,
-                "No sound device",
-                Font::Body,
-                colour::muted(),
-                m,
-            );
         }
     }
 

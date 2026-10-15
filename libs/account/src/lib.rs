@@ -9,6 +9,8 @@
 
 extern crate alloc;
 
+pub mod controls;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;

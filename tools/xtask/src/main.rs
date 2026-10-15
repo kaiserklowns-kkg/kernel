@@ -587,20 +587,20 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 342 225 d8d8de Music at the end of its list",
     // The media keys (ADR-0102): Music asks for them. (QEMU's USB keyboard
     // sends no media keys; the sound panel's buttons press them below.)
-    // What plays, in Control Center (ADR-0103, ADR-0118, ADR-0150): the
-    // speaker in the top bar (1124,14) opens it, Music's icon in its card
-    // (a white note at 965,245), and Next (1229,238) reaches Music (one
-    // song: nothing else plays, as the recording must not hold more of
-    // it). The mouse is where Text Editor left it, 1014,400, and goes back
-    // there.
+    // What plays, in Control Center (ADR-0103, ADR-0118, ADR-0151): the
+    // speaker in the top bar (1124,14) opens it, Music's icon in Now
+    // Playing (a white note at 1128,85), and Next (1219,157) reaches Music
+    // (one song: nothing else plays, as the recording must not hold more
+    // of it). The mouse is where Text Editor left it, 1014,400, and goes
+    // back there.
     b"@monitor mouse_move 110 -386",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 965 245 ffffff Music's icon in Control Center",
-    b"@monitor mouse_move 105 224",
+    b"@screen 1128 85 ffffff Music's icon in Control Center",
+    b"@monitor mouse_move 95 143",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -105 -224",
+    b"@monitor mouse_move -95 -143",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor mouse_move -110 386",
@@ -677,40 +677,73 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey meta_l-spc",
     b"@wait desktop: keyboard layout English",
     // The system volume (ADR-0100), after every sound this boot records:
-    // set from the shell, then in Control Center (ADR-0118, ADR-0150). The
+    // set from the shell, then in Control Center (ADR-0118, ADR-0151). The
     // speaker in the top bar (1124,14) opens it (Ethernet's button lit in
-    // the accent at 969,87); its sound card has the slider from 988,310,
-    // 254 wide (75% at 1180,320), and the speaker that mutes at 962,320:
-    // muted, the slider's fill is grey. A click on the speaker in the bar
-    // closes it.
+    // the accent at 966,91); its Sound control has the slider from
+    // 989,302, 252 wide (75% at 1179,312), and the speaker that mutes at
+    // 963,312: muted, the slider's fill is grey. A click on the speaker in
+    // the bar closes it.
     b"volume\r\n",
     b"volume 40\r\n",
     b"@monitor mouse_move 322 -312",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 969 87 2f7cf6 Control Center, Ethernet lit",
-    b"@monitor mouse_move 56 306",
+    b"@screen 966 91 2f7cf6 Control Center, Ethernet lit",
+    b"@monitor mouse_move 55 298",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -218 0",
+    b"@monitor mouse_move -216 0",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1000 320 66666b Control Center's slider, muted",
-    b"@monitor mouse_move 162 -306",
+    b"@screen 1000 312 66666b Control Center's slider, muted",
+    b"@monitor mouse_move 161 -298",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    // Its keyboard row (from 946,144) goes to the next layout, as
+    // Its keyboard control (from 941,194) goes to the next layout, as
     // Super+Space does; twice, back to English.
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -108 152",
+    b"@monitor mouse_move -107 212",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@wait desktop: keyboard Thai, from Control Center",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@wait desktop: keyboard English, from Control Center",
-    b"@monitor mouse_move 108 -152",
+    // Editing Control Center (ADR-0151): Edit Controls at its foot
+    // (1098,357) shows the badges and the gallery, left of it; the
+    // gallery's first row (793,100) adds Accent, which lands at the grid's
+    // first free cell (from 941,342), and its badge (947,348) takes it
+    // away. Settings (1219,226), dragged onto Lock Screen (1138,226),
+    // takes its place; Lock Screen, dragged back, takes it again. Done
+    // ends the editing, and the speaker in the bar (1124,14) closes it.
+    b"@monitor mouse_move 81 131",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: editing Control Center",
+    b"@monitor mouse_move -305 -257",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: Control Center: Accent added",
+    b"@monitor mouse_move 154 248",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: Control Center: Accent removed",
+    b"@monitor mouse_move 272 -122",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_move -81 0",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: Control Center: Settings moved",
+    b"@monitor mouse_move 81 0",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_move -81 0",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: Control Center: Lock Screen moved",
+    b"@monitor mouse_move -40 131",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@wait desktop: Control Center edited",
+    b"@monitor mouse_move 26 -343",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // The Wi-Fi panel (ADR-0130), with the shell in the driver's place

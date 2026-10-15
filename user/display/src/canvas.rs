@@ -74,6 +74,10 @@ fn raster_for(px: i32) -> RasterHeight {
 }
 
 /// The back buffer, and what the screen shows now.
+/// How many places frosted glass is kept for (ADR-0151): Control Center
+/// and the gallery beside it, and a little more.
+const FROSTED_KEPT: usize = 4;
+
 pub struct Canvas {
     /// The screen in logical pixels (ADR-0136): what the desktop lays out.
     pub width: i32,
@@ -94,6 +98,10 @@ pub struct Canvas {
     wallpaper: Vec<u32>,
     /// The logo at the size last drawn: its side and `0xAARRGGBB` pixels.
     logo: Option<(i32, Vec<u32>)>,
+    /// Frosted glass blurred lately (ADR-0151): where (device pixels),
+    /// a hash of what was under it, and the blurred pixels. The same
+    /// background again is not blurred again.
+    frosted: Vec<(Rect, u64, Vec<u32>)>,
 }
 
 impl Canvas {
@@ -119,6 +127,7 @@ impl Canvas {
             typesetter: Typesetter::new(),
             wallpaper: Vec::new(),
             logo: None,
+            frosted: Vec::new(),
         }
     }
 
@@ -179,6 +188,9 @@ impl Canvas {
     /// Frosted glass (ADR-0150), as macOS's and Windows' panels are: what
     /// is under the rounded `r` blurred (`blur` logical pixels), then
     /// `tint` laid over it with `alpha`. The rest of the screen is left.
+    /// What is under it is hashed first: the same again (the pointer
+    /// moving over the panel, a slider dragged) takes the blur kept from
+    /// last time (ADR-0151).
     pub fn frost(&mut self, r: Rect, radius: i32, blur: i32, tint: Rgb, alpha: u32) {
         let d = self.scale.rect(r);
         let x0 = d.x.max(0);
@@ -190,26 +202,23 @@ impl Canvas {
         }
         let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
         let stride = self.device_width as usize;
-        // The pixels under it, as channels.
-        let mut channels = [vec![0u32; w * h], vec![0u32; w * h], vec![0u32; w * h]];
+        let under = Rect::new(x0, y0, w as i32, h as i32);
+        // FNV-1a over what is under it, with how far it blurs.
+        let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ blur as u64;
         for y in 0..h {
             let row = (y0 as usize + y) * stride + x0 as usize;
-            for x in 0..w {
-                let p = self.pixels[row + x];
-                channels[0][y * w + x] = (p >> 16) & 0xff;
-                channels[1][y * w + x] = (p >> 8) & 0xff;
-                channels[2][y * w + x] = p & 0xff;
+            for &p in &self.pixels[row..row + w] {
+                hash = (hash ^ u64::from(p)).wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
-        // Three box blurs across and down: close to a Gaussian.
-        let reach = self.scale.len(blur.max(1)) as usize / 2 + 1;
-        let mut scratch = vec![0u32; w.max(h)];
-        for channel in &mut channels {
-            for _ in 0..3 {
-                box_blur(channel, w, h, 1, w, reach, &mut scratch);
-                box_blur(channel, h, w, w, 1, reach, &mut scratch);
-            }
-        }
+        let kept = self
+            .frosted
+            .iter()
+            .position(|(at, h, _)| *at == under && *h == hash);
+        let blurred = match kept {
+            Some(i) => core::mem::take(&mut self.frosted[i].2),
+            None => self.blurred(under, blur),
+        };
         // Back, inside the rounded shape only.
         let corner = self.scale.len(radius).min(d.w / 2).min(d.h / 2);
         for y in 0..h {
@@ -221,12 +230,44 @@ impl Canvas {
                 if dx < inset || dx >= d.w - inset {
                     continue;
                 }
-                let at = y * w + x;
-                self.pixels[row + x0 as usize + x] =
-                    channels[0][at] << 16 | channels[1][at] << 8 | channels[2][at];
+                self.pixels[row + x0 as usize + x] = blurred[y * w + x];
             }
         }
+        // Kept for next time: one a place, a few places.
+        self.frosted.retain(|(at, _, _)| *at != under);
+        if self.frosted.len() >= FROSTED_KEPT {
+            self.frosted.remove(0);
+        }
+        self.frosted.push((under, hash, blurred));
         self.surface().tint(r, radius, tint, alpha);
+    }
+
+    /// The back buffer's pixels in `under` (device pixels, on the screen)
+    /// blurred: three box blurs across and down, close to a Gaussian.
+    fn blurred(&self, under: Rect, blur: i32) -> Vec<u32> {
+        let (w, h) = (under.w as usize, under.h as usize);
+        let stride = self.device_width as usize;
+        let mut channels = [vec![0u32; w * h], vec![0u32; w * h], vec![0u32; w * h]];
+        for y in 0..h {
+            let row = (under.y as usize + y) * stride + under.x as usize;
+            for x in 0..w {
+                let p = self.pixels[row + x];
+                channels[0][y * w + x] = (p >> 16) & 0xff;
+                channels[1][y * w + x] = (p >> 8) & 0xff;
+                channels[2][y * w + x] = p & 0xff;
+            }
+        }
+        let reach = self.scale.len(blur.max(1)) as usize / 2 + 1;
+        let mut scratch = vec![0u32; w.max(h)];
+        for channel in &mut channels {
+            for _ in 0..3 {
+                box_blur(channel, w, h, 1, w, reach, &mut scratch);
+                box_blur(channel, h, w, w, 1, reach, &mut scratch);
+            }
+        }
+        (0..w * h)
+            .map(|at| channels[0][at] << 16 | channels[1][at] << 8 | channels[2][at])
+            .collect()
     }
 
     /// Darkens everything (behind a modal dialog).

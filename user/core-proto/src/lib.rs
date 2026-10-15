@@ -198,6 +198,13 @@ pub mod op {
     /// data = `[minutes i16]`, one of [`crate::TIME_ZONES`]' offsets, kept
     /// across reboots.
     pub const SET_TIME_ZONE: u64 = 48;
+    /// → the ids of the controls Control Center shows (ADR-0151), in
+    /// their order, one byte each (`oceans_account::controls`); the account's
+    /// own, `DEFAULT` until it chooses.
+    pub const CONTROLS: u64 = 49;
+    /// data = the ids, in order (`controls::valid`), kept across
+    /// reboots; none is an empty Control Center.
+    pub const SET_CONTROLS: u64 = 50;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -313,7 +320,8 @@ pub mod access {
             | op::MODE
             | op::BOOT_OK
             | op::SCALE
-            | op::TIME_ZONE => QUERY,
+            | op::TIME_ZONE
+            | op::CONTROLS => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -338,7 +346,8 @@ pub mod access {
             | op::SIGN_IN
             | op::SET_LAYOUT
             | op::SET_SCALE
-            | op::SET_TIME_ZONE => DECIDE,
+            | op::SET_TIME_ZONE
+            | op::SET_CONTROLS => DECIDE,
             op::PROPOSE => PROPOSE,
             op::AUDIT => AUDIT,
             // Minting gives only rights the caller already has.

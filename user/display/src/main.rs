@@ -286,6 +286,7 @@ fn main(start: Start) -> i64 {
             can_power: directory.find("power", "power").is_some(),
             // Until Core says otherwise (without Core, no one else).
             admin: true,
+            controls: oceans_account::controls::DEFAULT.to_vec(),
             ..Desktop::default()
         },
         pending: Vec::new(),
@@ -346,6 +347,7 @@ fn main(start: Start) -> i64 {
     service.refresh_brightness();
     service.apply_scale(&mut canvas);
     service.refresh_layout();
+    service.refresh_controls();
     service.refresh_volume();
     service.refresh_network();
     service.show_mode();
@@ -482,6 +484,10 @@ impl Service {
 
     /// Draws the desktop and the app windows, and shows what changed.
     fn draw(&mut self, canvas: &mut Canvas) {
+        // Control Center closed, however: its editing ends (ADR-0151).
+        if !self.desktop.volume_open || self.desktop.wifi_open {
+            self.end_editing_controls();
+        }
         // What plays (ADR-0103), for the sound panel.
         self.desktop.now_playing = self
             .windows
@@ -580,6 +586,22 @@ impl Service {
             Kind::Button { .. } if self.desktop.lock != desktop::Lock::Open => return false,
             Kind::Button { button, pressed } => {
                 let (x, y) = self.desktop.pointer;
+                // A control let go while editing (ADR-0151): onto another,
+                // it takes that one's place.
+                if button == 1
+                    && !pressed
+                    && let Some(id) = self.desktop.control_drag.take()
+                {
+                    if let Some(onto) = self.desktop.control_under(w, x, y)
+                        && onto != id
+                    {
+                        let ids =
+                            oceans_account::controls::moved(&self.desktop.controls, id, Some(onto));
+                        let name = desktop::control_name(id);
+                        self.set_controls(ids, format_args!("{name} moved"));
+                    }
+                    return true;
+                }
                 // The slider let go (ADR-0100): the level it shows is set.
                 if button == 1 && !pressed && self.brightness_drag {
                     self.brightness_drag = false;
@@ -606,7 +628,7 @@ impl Service {
                     || (bars && y < desktop::MENU_HEIGHT)
                     || (bars && y >= h - desktop::DOCK_RESERVE)
                     || (bars && wave)
-                    || (self.desktop.volume_open && desktop::control_center(w).contains(x, y))
+                    || self.desktop.over_control_center(w, x, y)
                     || (self.desktop.notices_open
                         && desktop::notice_panel(w, self.desktop.notices.len()).contains(x, y))
                     || (self.desktop.user_menu_open
@@ -629,7 +651,7 @@ impl Service {
                 // A press away from Control Center closes it (ADR-0118).
                 if pressed
                     && self.desktop.volume_open
-                    && !desktop::control_center(w).contains(x, y)
+                    && !self.desktop.over_control_center(w, x, y)
                     && ![
                         desktop::ICON_CONTROL,
                         desktop::ICON_NETWORK,
@@ -639,6 +661,7 @@ impl Service {
                     .any(|&i| desktop::status_icon(w, i).contains(x, y))
                 {
                     self.desktop.volume_open = false;
+                    self.end_editing_controls();
                 }
                 // And from the user's menu (ADR-0121).
                 let items = self.desktop.user_items().len();
@@ -697,7 +720,7 @@ impl Service {
         }
         // Dragging the brightness slider: the screen follows at once.
         if self.brightness_drag {
-            let level = desktop::brightness_at(w, self.desktop.pointer.0);
+            let level = self.desktop.brightness_at(w, self.desktop.pointer.0);
             if self.desktop.brightness != Some(level) {
                 self.set_brightness(level);
             }
@@ -707,7 +730,7 @@ impl Service {
         if self.volume_drag
             && let Some((_, muted)) = self.desktop.volume
         {
-            let level = desktop::volume_at(w, self.desktop.pointer.0);
+            let level = self.desktop.volume_at(w, self.desktop.pointer.0);
             self.desktop.volume = Some((level, muted));
             return true;
         }
@@ -783,7 +806,6 @@ impl Service {
             }
         });
         self.desktop.brightness = brightness;
-        desktop::show_brightness(brightness.is_some());
     }
 
     /// Sets the screen's brightness, as the slider shows it.
@@ -1043,15 +1065,53 @@ impl Service {
                 true
             }
             Hit::VolumePanel => false,
-            // Control Center's toggles (ADR-0118).
+            // Editing Control Center (ADR-0151): the badges, the gallery
+            // and dragging; Done ends it.
+            Hit::EditControls => {
+                if self.desktop.editing_controls {
+                    self.end_editing_controls();
+                } else {
+                    self.desktop.editing_controls = true;
+                    say(self.log, format_args!("desktop: editing Control Center"));
+                }
+                true
+            }
+            Hit::ControlGrab(id) => {
+                self.desktop.control_drag = Some(id);
+                true
+            }
+            Hit::ControlRemove(id) => {
+                let ids = self
+                    .desktop
+                    .controls
+                    .iter()
+                    .copied()
+                    .filter(|&i| i != id)
+                    .collect();
+                let name = desktop::control_name(id);
+                self.set_controls(ids, format_args!("{name} removed"));
+                true
+            }
+            Hit::ControlAdd(id) => {
+                let ids = oceans_account::controls::moved(&self.desktop.controls, id, None);
+                let name = desktop::control_name(id);
+                self.set_controls(ids, format_args!("{name} added"));
+                true
+            }
+            Hit::ControlsReset => {
+                let ids = oceans_account::controls::DEFAULT.to_vec();
+                self.set_controls(ids, format_args!("reset"));
+                true
+            }
+            // Control Center's toggles (ADR-0118, ADR-0151).
             Hit::Toggle(which) => {
                 // Dark is seen at once in the open panel; the others leave
                 // it.
-                self.desktop.volume_open = which == 1;
+                self.desktop.volume_open = which == desktop::TOGGLE_DARK;
                 match which {
                     // The network with Wi-Fi: its panel (ADR-0130), a scan
                     // asked for.
-                    0 if self.desktop.wifi.is_some() => {
+                    desktop::TOGGLE_NETWORK if self.desktop.wifi.is_some() => {
                         self.desktop.volume_open = true;
                         self.desktop.wifi_open = true;
                         self.desktop.wifi_entry = None;
@@ -1059,11 +1119,19 @@ impl Service {
                         self.refresh_wifi();
                     }
                     // The network and Settings: Settings, which shows them.
-                    0 | 3 => self.launch("app.oceans.settings", ""),
-                    1 => {
+                    desktop::TOGGLE_NETWORK | desktop::TOGGLE_SETTINGS => {
+                        self.launch("app.oceans.settings", "")
+                    }
+                    desktop::TOGGLE_DARK => {
                         let (dark, accent) = oceans_draw::theme::bytes();
                         self.set_appearance(1 - dark.min(1), accent);
                     }
+                    desktop::TOGGLE_LAUNCHPAD => self.toggle_panel(),
+                    desktop::TOGGLE_NOTIFICATIONS => {
+                        self.desktop.notices_open = true;
+                        self.desktop.unread = 0;
+                    }
+                    desktop::TOGGLE_TERMINAL => self.show_terminal(),
                     _ => self.lock_screen(),
                 }
                 true
@@ -1791,6 +1859,7 @@ impl Service {
         self.refresh_pinned();
         self.refresh_appearance();
         self.refresh_layout();
+        self.refresh_controls();
         self.refresh_apps();
         if !self.desktop.admin {
             self.desktop.terminal_hidden = true;
@@ -2001,6 +2070,43 @@ impl Service {
             && got.len == 1
         {
             self.desktop.layout = oceans_window::layout::Layout::from_byte(reply[0]);
+        }
+    }
+
+    /// The account in use's controls in Control Center, from Core
+    /// (ADR-0151).
+    fn refresh_controls(&mut self) {
+        let Some(core) = self.core else {
+            return;
+        };
+        let mut reply = [0u8; oceans_account::controls::COUNT as usize];
+        if let Ok(got) = core.call(op::CONTROLS, &[], &[], &mut reply)
+            && oceans_account::controls::valid(&reply[..got.len])
+        {
+            self.desktop.controls = reply[..got.len].to_vec();
+        }
+    }
+
+    /// Control Center shows `ids` (ADR-0151), and Core keeps them for the
+    /// account; `what` says what changed, in the log.
+    fn set_controls(&mut self, ids: Vec<u8>, what: core::fmt::Arguments<'_>) {
+        if let Some(core) = self.core {
+            let mut reply = [0u8; 8];
+            if let Err((error, _)) = core.call(op::SET_CONTROLS, &ids, &[], &mut reply) {
+                self.toast(alloc::format!("Control Center: {}", error.message()), true);
+                return;
+            }
+        }
+        self.desktop.controls = ids;
+        say(self.log, format_args!("desktop: Control Center: {what}"));
+    }
+
+    /// Editing Control Center ends (ADR-0151): Done, or it closed.
+    fn end_editing_controls(&mut self) {
+        if self.desktop.editing_controls {
+            self.desktop.editing_controls = false;
+            self.desktop.control_drag = None;
+            say(self.log, format_args!("desktop: Control Center edited"));
         }
     }
 

@@ -7,6 +7,7 @@
 //! - [`Flow`]: items placed left to right that wrap onto the next line.
 //! - [`window_size`]: the size a window opens at on a screen.
 //! - [`grid`]: how many columns and rows of tiles fit.
+//! - [`pack`]: tiles of different sizes placed on a grid, first fit.
 
 use crate::Rect;
 
@@ -151,6 +152,43 @@ pub fn grid(room: (i32, i32), cell: (i32, i32), min: i32, max: i32) -> (i32, i32
     (columns, rows)
 }
 
+/// Places tiles `spans` (columns × rows each) in order on a grid
+/// `columns` wide, each in the first place it fits, row by row, as macOS
+/// lays out Control Center (ADR-0151). Returns each tile's (column, row)
+/// and the rows used. A tile wider than the grid takes all of it.
+pub fn pack(columns: i32, spans: &[(i32, i32)]) -> (alloc::vec::Vec<(i32, i32)>, i32) {
+    let columns = columns.max(1);
+    let mut taken: alloc::vec::Vec<alloc::vec::Vec<bool>> = alloc::vec::Vec::new();
+    let mut places = alloc::vec::Vec::with_capacity(spans.len());
+    let mut rows = 0;
+    for &(w, h) in spans {
+        let (w, h) = (w.clamp(1, columns), h.max(1));
+        let free = |taken: &[alloc::vec::Vec<bool>], col: i32, row: i32| {
+            (row..row + h).all(|r| {
+                (col..col + w).all(|c| taken.get(r as usize).is_none_or(|line| !line[c as usize]))
+            })
+        };
+        let mut row = 0;
+        let place = loop {
+            if let Some(col) = (0..=columns - w).find(|&col| free(&taken, col, row)) {
+                break (col, row);
+            }
+            row += 1;
+        };
+        while taken.len() < (place.1 + h) as usize {
+            taken.push(alloc::vec![false; columns as usize]);
+        }
+        for r in place.1..place.1 + h {
+            for c in place.0..place.0 + w {
+                taken[r as usize][c as usize] = true;
+            }
+        }
+        rows = rows.max(place.1 + h);
+        places.push(place);
+    }
+    (places, rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +243,25 @@ mod tests {
         assert_eq!(grid((880, 336), (120, 112), 3, 10), (7, 3));
         assert_eq!(grid((5000, 50), (120, 112), 3, 10), (10, 1));
         assert_eq!(grid((100, 500), (120, 112), 3, 10), (3, 4));
+    }
+
+    #[test]
+    fn packs_first_fit() {
+        // Control Center's defaults: two wide, a large beside them, then
+        // small ones in the gap, then full-width sliders.
+        let spans = [(2, 1), (2, 2), (2, 1), (2, 1), (1, 1), (1, 1), (4, 1)];
+        let (places, rows) = pack(4, &spans);
+        assert_eq!(
+            places,
+            [(0, 0), (2, 0), (0, 1), (0, 2), (2, 2), (3, 2), (0, 3)]
+        );
+        assert_eq!(rows, 4);
+        // A small one fills a hole left before a wide one.
+        let (places, rows) = pack(4, &[(3, 1), (2, 1), (1, 1)]);
+        assert_eq!(places, [(0, 0), (0, 1), (3, 0)]);
+        assert_eq!(rows, 2);
+        // Too wide: the whole row.
+        assert_eq!(pack(4, &[(9, 1)]), (alloc::vec![(0, 0)], 1));
+        assert_eq!(pack(4, &[]), (alloc::vec![], 0));
     }
 }
