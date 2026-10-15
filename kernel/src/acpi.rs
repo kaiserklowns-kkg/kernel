@@ -97,13 +97,16 @@ pub fn discover(boot: &BootInfo) -> Option<Acpi> {
         let Some(bytes) = read_table_up_to(address, MAX_AML) else {
             continue;
         };
-        let Some(body) = definition_block(address, &bytes) else {
+        let Some(body) = block_aml(address, &bytes) else {
             continue;
         };
         types = types.or_else(|| sleep_type(body, *b"_S5_"));
         record.battery |= declares_device(body, BATTERY_ID);
         record.lid |= declares_device(body, LID_ID);
     }
+    // The definition blocks, for the AML service (ADR-0148): the DSDT
+    // first, then the SSDTs in the root table's order.
+    DEFINITION_BLOCKS.call_once(|| dsdt.into_iter().chain(ssdts.iter().copied()).collect());
     power::init(fadt.as_ref(), types);
     klog::info!(
         "ACPI: power profile {}, battery {}, lid {}: {}",
@@ -120,6 +123,17 @@ pub fn discover(boot: &BootInfo) -> Option<Acpi> {
     acpi
 }
 
+/// The physical addresses of the DSDT and the SSDTs (ADR-0148).
+static DEFINITION_BLOCKS: spin::Once<Vec<u64>> = spin::Once::new();
+
+/// A copy of definition block `index` (0: the DSDT, then the SSDTs), header
+/// and all, as the firmware has it (its checksum is the reader's to check).
+/// `None` past the last.
+pub fn definition_block(index: usize) -> Option<Vec<u8>> {
+    let address = *DEFINITION_BLOCKS.get()?.get(index)?;
+    read_table_up_to(address, MAX_AML)
+}
+
 /// What kind of machine this is (ADR-0152), as `SYSTEM_INFO` `POWER`
 /// says; all zeros without ACPI.
 static POWER_RECORD: spin::Once<PowerRecord> = spin::Once::new();
@@ -129,7 +143,7 @@ pub fn power_record() -> PowerRecord {
 }
 
 /// The AML of the definition block at `address` (its bytes in `bytes`).
-fn definition_block(address: u64, bytes: &[u8]) -> Option<&[u8]> {
+fn block_aml(address: u64, bytes: &[u8]) -> Option<&[u8]> {
     match Table::parse(bytes) {
         Ok(table) => Some(table.body()),
         // Firmware ships DSDTs with wrong checksums; the searches are

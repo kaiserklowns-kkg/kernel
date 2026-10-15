@@ -138,6 +138,8 @@ enum Grant {
     /// Setting the wall clock (ADR-0143): the system information object
     /// with `WRITE`.
     Clock,
+    /// The firmware's ACPI tables (ADR-0148): the device bus with `WRITE`.
+    Firmware,
     /// `args = WORDS`: the service's arguments (`Directory::args`).
     Args(&'static str),
     /// Being asked to stop (ADR-0086): a notification init signals
@@ -458,6 +460,7 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                     ("grant", "display") => Grant::Display,
                     ("grant", "power") => Grant::Power,
                     ("grant", "clock") => Grant::Clock,
+                    ("grant", "firmware") => Grant::Firmware,
                     ("args", words) => Grant::Args(words),
                     ("grant", "stop") => Grant::Stop,
                     ("grant", other) => {
@@ -700,6 +703,11 @@ impl Init {
                         oceans_rt::duplicate(self.sysinfo, CLOCK_RIGHTS)?,
                         "clock",
                         "clock",
+                    ),
+                    Grant::Firmware => (
+                        oceans_rt::duplicate(self.bus, rights::WRITE | rights::TRANSFER)?,
+                        "firmware",
+                        "firmware",
                     ),
                     Grant::Args(words) => (publish(words.as_bytes())?, "args", "args"),
                     // A fresh one per run; init keeps a SIGNAL end.

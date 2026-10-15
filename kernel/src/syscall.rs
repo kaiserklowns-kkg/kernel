@@ -82,6 +82,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DISPLAY_KEYS => display_keys(&process, a0, a1, a2),
         nr::DISPLAY_POINTER => display_pointer(&process, a0, a1, a2),
         nr::CLOCK_SET => clock_set(&process, a0, a1),
+        nr::FIRMWARE_TABLE => firmware_table(&process, a0, a1, a2, a3),
         nr::LOG_READ => log_read(&process, a0, a1, a2, a3),
         nr::SYSTEM_POWER => system_power(&process, a0, a1),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
@@ -1053,6 +1054,25 @@ fn system_info(process: &Process, raw: u64, kind: u64, ptr: u64, capacity: u64) 
 }
 
 // ---- ABI 7 -----------------------------------------------------------------
+
+/// `FIRMWARE_TABLE` (ADR-0148): ACPI definition block `index` (0 the
+/// DSDT, then the SSDTs), copied whole to `ptr` if `capacity` holds it.
+/// Returns its length either way. Needs `WRITE` on the device bus.
+fn firmware_table(
+    process: &Process,
+    bus: u64,
+    index: u64,
+    ptr: u64,
+    capacity: u64,
+) -> SyscallResult {
+    check_bus(process, bus, Rights::WRITE)?;
+    let index = usize::try_from(index).map_err(|_| Error::NotFound)?;
+    let table = crate::acpi::definition_block(index).ok_or(Error::NotFound)?;
+    if table.len() as u64 <= capacity {
+        process.copy_to_user(ptr, &table)?;
+    }
+    Ok((table.len() as u64, 0))
+}
 
 /// Checks that `raw` names the device bus with `required` rights.
 fn check_bus(process: &Process, raw: u64, required: Rights) -> Result<(), Error> {

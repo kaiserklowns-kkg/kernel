@@ -518,6 +518,23 @@ pub fn system_power(system: Handle, action: u64) -> Error {
     }
 }
 
+/// ACPI definition block `index` (ADR-0148) into `buffer`: its length,
+/// copied only if `buffer` holds it. Needs the `firmware` grant.
+pub fn firmware_table(bus: Handle, index: usize, buffer: &mut [u8]) -> Result<usize, Error> {
+    call(
+        nr::FIRMWARE_TABLE,
+        [
+            bus.0,
+            index as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+        ],
+    )
+    .map(|(len, _)| len as usize)
+}
+
 /// Sets the wall clock to `unix_ms` (ADR-0143): needs the `clock` grant.
 pub fn clock_set(system: Handle, unix_ms: u64) -> Result<(), Error> {
     call(nr::CLOCK_SET, [system.0, unix_ms, 0, 0, 0, 0]).map(drop)

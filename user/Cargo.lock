@@ -23,6 +23,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "acpi"
+version = "0.1.0"
+dependencies = [
+ "oceans-aml",
+ "oceans-rt",
+]
+
+[[package]]
 name = "activity-app"
 version = "0.1.0"
 dependencies = [
@@ -812,6 +820,10 @@ dependencies = [
 
 [[package]]
 name = "oceans-ahci"
+version = "0.1.0"
+
+[[package]]
+name = "oceans-aml"
 version = "0.1.0"
 
 [[package]]

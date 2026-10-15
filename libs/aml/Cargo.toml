@@ -1,0 +1,9 @@
+[package]
+name = "oceans-aml"
+description = "ACPI Machine Language for Oceans: definition blocks parsed into a namespace, host-tested (ADR-0148)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -1,0 +1,16 @@
+[package]
+name = "acpi"
+description = "The ACPI service: the firmware's definition blocks read into a namespace (ADR-0148)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "acpi"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-aml.workspace = true

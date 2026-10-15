@@ -57,6 +57,7 @@ const USER_PROGRAMS: &[&str] = &[
     "net-echo",
     "clock",
     "backlight",
+    "acpi",
     "ifconfig",
     "ping",
     "host",
@@ -1392,6 +1393,8 @@ const SHELL_EXPECT: &[Expect] = &[
     // The brightness service (ADR-0147): QEMU's display is no Intel
     // graphics with a PCH PWM, so Control Center has no slider.
     Expect::Contains("backlight: none on this display (1234:1111)"),
+    // ACPI (ADR-0148): QEMU's definition blocks read whole.
+    Expect::Contains(" definition block(s) read, 0 not: "),
     Expect::Contains("init/clock set the clock"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),

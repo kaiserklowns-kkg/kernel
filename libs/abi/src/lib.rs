@@ -33,9 +33,9 @@
 /// desktop); 23 = ADR-0136 (`DISPLAY_INFO`'s record ends with the screen's
 /// size in millimetres, from its EDID); 24 = ADR-0143 (51: setting the
 /// wall clock); 25 = ADR-0146 (`DEBUG_WRITE`'s `level`: lines for the
-/// serial line only, never kept); 27 = ADR-0152 (the `POWER` kind of
-/// `SYSTEM_INFO`: a laptop or not; 26 is ADR-0148's). Versions only add;
-/// existing numbers keep their meaning.
+/// serial line only, never kept); 26 = ADR-0148 (52: the ACPI definition
+/// blocks); 27 = ADR-0152 (the `POWER` kind of `SYSTEM_INFO`: a laptop or
+/// not). Versions only add; existing numbers keep their meaning.
 pub const ABI_VERSION: u64 = 27;
 
 /// System call numbers.
@@ -300,6 +300,15 @@ pub mod nr {
     /// gives only on request (`grant = clock`). `InvalidArgument` for a
     /// time before 2000 or after 2199.
     pub const CLOCK_SET: u64 = 51;
+
+    // ABI 26 (ADR-0148)
+
+    /// `(bus, index, ptr, capacity) -> len` — copies ACPI definition block
+    /// `index` (0 the DSDT, then the SSDTs), header and all, to `ptr` if
+    /// `capacity` holds it; returns its length either way (`NotFound` past
+    /// the last). Needs `WRITE` on the device bus, which init gives only on
+    /// request (`grant = firmware`).
+    pub const FIRMWARE_TABLE: u64 = 52;
 }
 
 /// How `DEVICE_IRQ` delivers a device's interrupt (ABI 18, ADR-0124).

@@ -152,7 +152,10 @@ pub const fn default_rights(kind: ObjectKind) -> Rights {
             .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
+        // WRITE: the firmware (ADR-0148): its ACPI definition blocks for
+        // the AML service, which init gives on request (`grant = firmware`).
         ObjectKind::DeviceBus => Rights::READ
+            .union(Rights::WRITE)
             .union(Rights::MANAGE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER),
