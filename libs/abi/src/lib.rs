@@ -32,15 +32,18 @@
 /// install boot mode); 22 = ADR-0132 (50: the PS/2 pointer's events to the
 /// desktop); 23 = ADR-0136 (`DISPLAY_INFO`'s record ends with the screen's
 /// size in millimetres, from its EDID); 24 = ADR-0143 (51: setting the
-/// wall clock). Versions only add; existing numbers
+/// wall clock); 25 = ADR-0146 (`DEBUG_WRITE`'s `level`: lines for the
+/// serial line only, never kept). Versions only add; existing numbers
 /// keep their meaning.
-pub const ABI_VERSION: u64 = 24;
+pub const ABI_VERSION: u64 = 25;
 
 /// System call numbers.
 pub mod nr {
     /// `() -> ABI_VERSION`
     pub const ABI_VERSION: u64 = 0;
-    /// `(log_handle, ptr, len) -> 0` — needs `WRITE` on a log capability.
+    /// `(log_handle, ptr, len, level) -> 0` — needs `WRITE` on a log
+    /// capability. `level` is a [`log_level`] (ABI 25; 0 before, which is
+    /// [`log_level::INFO`]); any other is `InvalidArgument`.
     pub const DEBUG_WRITE: u64 = 1;
     /// `(code) -> !` — ends the calling process.
     pub const EXIT: u64 = 2;
@@ -651,6 +654,16 @@ pub const IPC_MAX_INLINE: usize = 256;
 
 /// Largest single `DEBUG_WRITE`, in bytes.
 pub const DEBUG_WRITE_MAX: usize = 1024;
+
+/// The levels of a `DEBUG_WRITE` line (ABI 25, ADR-0146).
+pub mod log_level {
+    /// Kept: in the kernel's ring (ADR-0070), on disk (ADR-0074), on the
+    /// serial line. What every line was before ABI 25.
+    pub const INFO: u64 = 0;
+    /// The serial line only, never kept: for what a log on disk must not
+    /// hold, such as where the network went (ADR-0146).
+    pub const DEBUG: u64 = 1;
+}
 
 /// Largest single `CONSOLE_READ` or `CONSOLE_WRITE`, in bytes.
 pub const CONSOLE_IO_MAX: usize = 4096;

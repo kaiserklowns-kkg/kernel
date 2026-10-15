@@ -59,13 +59,15 @@ Sizes: **S** is a day or less, **M** is a few days, **L** is a week or more.
 
 - **Goal:** P1–P10 written as a single ADR, and a smoke check for P1.
 - **Design:**
-  - The `net` service logs every outgoing connection or datagram once per
-    destination and process, as `net: connect <process> -> <host>:<port>`
-    (an address, never the data).
-  - The smoke test boots, waits idle with no user input, and fails if any
-    destination appears other than the NTP server from Settings.
-- **Security:** a log of destinations holds no content. It is readable only
-  with `log-read` (ADR-0070).
+  - The `net` service names each destination once, as `net: first contact
+    udp 10.0.2.2:123` (an address, never the data). Which process opened
+    the socket is not known yet; that is left to WP-2.
+  - Smoke boot 6 (a new computer's first boot) fails if it reaches
+    anything other than its time servers and its scripted fetch.
+- **Security:** the lines go to the serial line only (ABI 25's DEBUG
+  level). They are never kept on disk, since they would be the user's
+  history.
+- **Done:** ADR-0146.
 - **Accepted when:** the ADR is merged, the check runs in `cargo xtask
   smoke`, and a deliberately added test connection makes it fail.
 
@@ -280,7 +282,7 @@ items as follows:
 
 | WP | ADR | State |
 |---|---|---|
-| WP-1 Promises + idle-network check | — | planned |
+| WP-1 Promises + idle-network check | [0146](../adr/0146-promises-to-the-user.md) | done |
 | WP-2 Privacy & Permissions | — | planned |
 | WP-3 Hardware check in Setup | — | planned |
 | WP-4 Updates from Settings | — | planned |
@@ -288,6 +290,6 @@ items as follows:
 | WP-6 Reproducible releases | — | planned |
 | WP-7 Transparency and contrast | — | planned |
 | WP-8 Clean uninstall, reset | — | planned |
-| WP-9 ADR "what the user sees change" | — | planned |
-| WP-10 Support windows | — | planned |
+| WP-9 ADR "what the user sees change" | [0146](../adr/0146-promises-to-the-user.md) | done |
+| WP-10 Support windows | [0146](../adr/0146-promises-to-the-user.md) | done |
 | WP-11 Performance budget | — | planned |

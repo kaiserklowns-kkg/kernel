@@ -13,7 +13,7 @@ pub use oceans_abi::EXIT_KILLED;
 pub use oceans_abi::Error;
 pub use oceans_abi::display::Info as DisplayInfo;
 pub use oceans_abi::{MessageDesc, interrupt, power, prot, rights, sysinfo};
-use oceans_abi::{nr, start::MAX_INITIAL_HANDLES};
+use oceans_abi::{log_level, nr, start::MAX_INITIAL_HANDLES};
 
 /// A capability handle in this process's table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +110,32 @@ pub fn abi_version() -> u64 {
 pub fn debug_write(log: Handle, text: &str) -> Result<(), Error> {
     call(
         nr::DEBUG_WRITE,
-        [log.0, text.as_ptr() as u64, text.len() as u64, 0, 0, 0],
+        [
+            log.0,
+            text.as_ptr() as u64,
+            text.len() as u64,
+            log_level::INFO,
+            0,
+            0,
+        ],
+    )
+    .map(drop)
+}
+
+/// Writes `text` to the serial line only (ABI 25, ADR-0146): never kept in
+/// the kernel's ring or on disk, never shown on the screen. For what a
+/// kept log must not hold.
+pub fn debug_write_unkept(log: Handle, text: &str) -> Result<(), Error> {
+    call(
+        nr::DEBUG_WRITE,
+        [
+            log.0,
+            text.as_ptr() as u64,
+            text.len() as u64,
+            log_level::DEBUG,
+            0,
+            0,
+        ],
     )
     .map(drop)
 }

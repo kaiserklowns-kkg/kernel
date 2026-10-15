@@ -1157,7 +1157,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 24)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 25)"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1325,7 +1325,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 24)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 25)"),
     // The clock (ADR-0143): the host's two test time servers agree, 90 s
     // ahead, so the clock service sets the clock through the kernel.
     Expect::Contains("clock: set from network time, "),
@@ -2362,6 +2362,43 @@ enum Services {
     Usual,
     /// `services-recovery.conf`: the disks, the network and the shell.
     Recovery,
+}
+
+/// The destinations a smoke boot's network may reach (ADR-0146), from the
+/// `net: first contact` lines on the serial line.
+#[derive(Clone, Copy)]
+enum Contacts {
+    /// Whatever the script asks of it.
+    Any,
+    /// Only these: `udp 10.0.2.2:$HTTP`, with the script's `$` names.
+    Only(&'static [&'static str]),
+}
+
+/// How the network service names a destination the first time it is
+/// reached (ADR-0146).
+const FIRST_CONTACT: &str = "net: first contact ";
+
+/// What a new computer's first boot may reach (ADR-0146): with no one
+/// asking, only the time servers it was given; then the scripted fetches.
+/// No telemetry, no checks for updates nobody turned on.
+const NEW_CONTACTS: &[&str] = &[
+    "udp 10.0.2.2:12123",
+    "udp 10.0.2.2:12124",
+    "udp 10.0.2.2:12125",
+    "udp 10.0.2.2:12126",
+    "udp 10.0.2.2:12127",
+    "udp 10.0.2.2:12128",
+    "tcp 10.0.2.2:$HTTP",
+];
+
+/// The `first contact` lines among `lines` naming a destination not in
+/// `allowed`.
+fn unexpected_contacts<'a>(lines: &'a [String], allowed: &[String]) -> Vec<&'a str> {
+    lines
+        .iter()
+        .filter_map(|line| line.split_once(FIRST_CONTACT).map(|(_, rest)| rest.trim()))
+        .filter(|destination| !allowed.iter().any(|ok| ok == destination))
+        .collect()
 }
 
 impl Nic {
@@ -3620,13 +3657,25 @@ fn smoke(profile: Profile) -> Result {
     prepare_stick(SMOKE_STICK_IMAGE, true)?;
     prepare_fat_stick()?;
     println!("smoke boot 1 of 6: blank disk");
-    smoke_boot(SHELL_SCRIPT, SHELL_EXPECT, Nic::Virtio, Services::Usual)?;
+    smoke_boot(
+        SHELL_SCRIPT,
+        SHELL_EXPECT,
+        Nic::Virtio,
+        Services::Usual,
+        Contacts::Any,
+    )?;
     // The second boot records over it.
     check_smoke_audio()?;
     println!("smoke boot 2 of 6: the same disk, an Intel NIC instead of virtio-net");
     // A clean boot image: the first boot's firmware wrote into it (vvfat).
     build_image(profile, Some("oceans.test=smoke"))?;
-    smoke_boot(REBOOT_SCRIPT, REBOOT_EXPECT, Nic::E1000e, Services::Usual)?;
+    smoke_boot(
+        REBOOT_SCRIPT,
+        REBOOT_EXPECT,
+        Nic::E1000e,
+        Services::Usual,
+        Contacts::Any,
+    )?;
     check_smoke_disk()?;
     check_smoke_nvme()?;
     check_smoke_screens()?;
@@ -3642,16 +3691,35 @@ fn smoke(profile: Profile) -> Result {
         RECOVERY_EXPECT,
         Nic::Virtio,
         Services::Recovery,
+        Contacts::Any,
     )?;
     println!("smoke boot 4 of 6: safe mode after three boots that did not finish");
     build_image(profile, Some("oceans.test=smoke"))?;
-    smoke_boot(SAFE_SCRIPT, SAFE_EXPECT, Nic::Virtio, Services::Usual)?;
+    smoke_boot(
+        SAFE_SCRIPT,
+        SAFE_EXPECT,
+        Nic::Virtio,
+        Services::Usual,
+        Contacts::Any,
+    )?;
     println!("smoke boot 5 of 6: recovery mode, a factory reset");
     build_image(profile, Some(recovery))?;
-    smoke_boot(RESET_SCRIPT, RESET_EXPECT, Nic::Virtio, Services::Recovery)?;
+    smoke_boot(
+        RESET_SCRIPT,
+        RESET_EXPECT,
+        Nic::Virtio,
+        Services::Recovery,
+        Contacts::Any,
+    )?;
     println!("smoke boot 6 of 6: a new computer's first boot, an Intel 82576 (igb)");
     build_image(profile, Some("oceans.test=smoke"))?;
-    smoke_boot(NEW_SCRIPT, NEW_EXPECT, Nic::Igb, Services::Usual)?;
+    smoke_boot(
+        NEW_SCRIPT,
+        NEW_EXPECT,
+        Nic::Igb,
+        Services::Usual,
+        Contacts::Only(NEW_CONTACTS),
+    )?;
     println!("smoke test passed: kernel came online, files survived a reboot");
     Ok(())
 }
@@ -3724,7 +3792,13 @@ const CONSENT_PROMPT: &[u8] = b"Allow? [y/N] ";
 /// prompt, and requires every `expected` line, the online banner and a
 /// successful exit. The guest's network card is `nic`; `services`, what
 /// the boot starts.
-fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic, services: Services) -> Result {
+fn smoke_boot(
+    script: &[&[u8]],
+    expected: &[Expect],
+    nic: Nic,
+    services: Services,
+    contacts: Contacts,
+) -> Result {
     let udp_forward = free_udp_port()?;
     let udp_echo = udp_echo_probe(udp_forward);
     let dns_port = dns_server(IPV4_LOOPBACK)?;
@@ -3767,6 +3841,15 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic, services: Service
             .into_bytes()
     };
     // The pairing code `ui pair` printed (ADR-0058), for `@bridge`.
+    // What the network may reach (ADR-0146), with the script's `$` names.
+    let allowed: Vec<String> = match contacts {
+        Contacts::Any => Vec::new(),
+        Contacts::Only(list) => list
+            .iter()
+            .map(|ok| String::from_utf8_lossy(&expand(ok.as_bytes())).into_owned())
+            .collect(),
+    };
+    let mut contacted: Vec<String> = Vec::new();
     let mut pairing_code: Option<String> = None;
     let mut child = qemu_command(
         true,
@@ -3874,6 +3957,9 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic, services: Service
         match events_rx.recv_timeout(remaining) {
             Ok(Console::Line(line)) => {
                 println!("  | {line}");
+                if line.contains(FIRST_CONTACT) {
+                    contacted.push(line.clone());
+                }
                 online |= line.contains(ONLINE_BANNER);
                 if let Some((_, code)) = line.split_once(PAIRING_CODE) {
                     pairing_code = Some(code.trim().to_string());
@@ -4084,6 +4170,19 @@ fn smoke_boot(script: &[&[u8]], expected: &[Expect], nic: Nic, services: Service
     }
     if !unmet.is_empty() {
         return Err(format!("shell output missing: {unmet:?} (QEMU {status})"));
+    }
+    // No telemetry (ADR-0146): only the destinations this boot allows.
+    if let Contacts::Only(_) = contacts {
+        let unexpected = unexpected_contacts(&contacted, &allowed);
+        if !unexpected.is_empty() {
+            return Err(format!(
+                "the network reached what no one asked for: {unexpected:?}"
+            ));
+        }
+        println!(
+            "the network reached only what was asked: {} destinations",
+            contacted.len()
+        );
     }
     match (online, status.code()) {
         (true, Some(QEMU_EXIT_SUCCESS)) => Ok(()),
@@ -5512,6 +5611,32 @@ fn check_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_computer_may_reach_every_time_server_it_was_given() {
+        // ADR-0146: the smoke clock's servers are all allowed, whichever
+        // two of them the host could start.
+        let smoke = include_str!("../../../config/services-smoke.conf");
+        for port in NTP_PORTS {
+            let server = format!("10.0.2.2:{port}");
+            assert!(smoke.contains(&server), "{server} not given to the clock");
+            assert!(NEW_CONTACTS.contains(&format!("udp {server}").as_str()));
+        }
+    }
+
+    #[test]
+    fn contacts_outside_the_allowed_are_found() {
+        let lines = [
+            "[DEBUG] syscall: [init/net] net: first contact udp 10.0.2.2:12123".to_string(),
+            "[DEBUG] syscall: [init/net] net: first contact tcp 203.0.113.9:443".to_string(),
+            "[INFO ] unrelated".to_string(),
+        ];
+        let allowed = ["udp 10.0.2.2:12123".to_string()];
+        assert_eq!(
+            unexpected_contacts(&lines, &allowed),
+            ["tcp 203.0.113.9:443"]
+        );
+    }
 
     #[test]
     fn recovery_mode_keeps_the_disks_the_network_and_the_shell() {

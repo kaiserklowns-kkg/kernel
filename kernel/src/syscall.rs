@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 
 use oceans_abi::{
     CONSOLE_IO_MAX, DEBUG_WRITE_MAX, EVENT_CALL, EVENT_CLOSED, EVENT_NOTIFICATION, Error,
-    IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc, PROCESS_NAME_MAX, SPAWN_MAX_IMAGE, nr, prot,
-    start::MAX_INITIAL_HANDLES,
+    IPC_MAX_HANDLES, IPC_MAX_INLINE, MessageDesc, PROCESS_NAME_MAX, SPAWN_MAX_IMAGE, log_level, nr,
+    prot, start::MAX_INITIAL_HANDLES,
 };
 use oceans_capability::{CapError, Handle, Rights};
 
@@ -43,7 +43,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
     ];
     let result = match frame.rax {
         nr::ABI_VERSION => Ok((oceans_abi::ABI_VERSION, 0)),
-        nr::DEBUG_WRITE => debug_write(&process, a0, a1, a2),
+        nr::DEBUG_WRITE => debug_write(&process, a0, a1, a2, a3),
         nr::EXIT => {
             drop(process);
             process::exit_current(a0 as i64)
@@ -138,7 +138,10 @@ fn len_arg(len: u64, max: usize) -> Result<usize, Error> {
         .ok_or(Error::TooLarge)
 }
 
-fn debug_write(process: &Process, log: u64, ptr: u64, len: u64) -> SyscallResult {
+fn debug_write(process: &Process, log: u64, ptr: u64, len: u64, level: u64) -> SyscallResult {
+    if !matches!(level, log_level::INFO | log_level::DEBUG) {
+        return Err(Error::InvalidArgument);
+    }
     let len = len_arg(len, DEBUG_WRITE_MAX)?;
     arch::without_interrupts(|| {
         let mut table = process.capabilities().lock();
@@ -154,7 +157,14 @@ fn debug_write(process: &Process, log: u64, ptr: u64, len: u64) -> SyscallResult
     let mut buffer = [0u8; DEBUG_WRITE_MAX];
     process.copy_from_user(ptr, &mut buffer[..len])?;
     let text = core::str::from_utf8(&buffer[..len]).unwrap_or("<invalid UTF-8>");
-    klog::info!("[{}] {}", process.name(), text.trim_end_matches('\n'));
+    let text = text.trim_end_matches('\n');
+    // A DEBUG line goes to the serial line only: never to the screen, the
+    // kept ring or the disk (ADR-0146).
+    if level == log_level::DEBUG {
+        klog::debug!("[{}] {}", process.name(), text);
+    } else {
+        klog::info!("[{}] {}", process.name(), text);
+    }
     Ok((0, 0))
 }
 

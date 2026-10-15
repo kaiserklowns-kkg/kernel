@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+pub mod contacts;
 pub mod ipv6;
 mod siphash;
 mod tcp;

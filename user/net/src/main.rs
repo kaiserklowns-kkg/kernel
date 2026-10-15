@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use oceans_net::{
     AddressOrigin, AddressState, Colons, Config, Dotted, IpAddr, Ipv6, Ipv6Config,
     NetError as StackError, Recv, SocketId, Stack, TcpState,
+    contacts::{Contact, Contacts, Destination, Protocol},
 };
 use oceans_net_proto::netdev::{self, BUFFER_SIZE, RX_AREA, TX_AREA};
 use oceans_net_proto::{
@@ -51,6 +52,8 @@ struct Client {
     socket: SocketId,
     notification: Handle,
     bits: u64,
+    /// What the socket speaks, to name what it reaches (ADR-0146).
+    protocol: Protocol,
     /// TCP: the shared buffer (ADR-0030), mapped here.
     buffer: Option<(*mut u8, usize)>,
 }
@@ -66,6 +69,8 @@ struct Net {
     announced: Option<Config>,
     /// IPv6 as last logged: usable and duplicate addresses, router, DNS.
     announced6: Announced6,
+    /// The destinations named so far (ADR-0146).
+    contacts: Contacts,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -81,6 +86,27 @@ fn say(log: Handle, args: core::fmt::Arguments<'_>) {
     let _ = line.write_str("net: ");
     let _ = line.write_fmt(args);
     let _ = oceans_rt::debug_write(log, line.as_str());
+}
+
+/// Names a destination the first time anything reaches it, on the serial
+/// line only: where the network went is never kept (ADR-0146).
+fn contact(log: Handle, contacts: &mut Contacts, protocol: Protocol, address: IpAddr, port: u16) {
+    let port = if protocol == Protocol::Ping { 0 } else { port };
+    let mut line = Buffer::<96>::new();
+    match contacts.note(protocol, address, port) {
+        Contact::Known => return,
+        Contact::First => {
+            let _ = write!(
+                line,
+                "net: first contact {}",
+                Destination(protocol, address, port)
+            );
+        }
+        Contact::Full => {
+            let _ = write!(line, "net: first contacts: no more are named");
+        }
+    }
+    let _ = oceans_rt::debug_write_unkept(log, line.as_str());
 }
 
 fn main(start: Start) -> i64 {
@@ -132,6 +158,7 @@ fn main(start: Start) -> i64 {
         next_badge: 1,
         announced: None,
         announced6: Announced6::default(),
+        contacts: Contacts::new(),
     };
     net.serve()
 }
@@ -561,24 +588,32 @@ impl Net {
                     .stack
                     .tcp_connect(IpAddr::from_mapped(address), port, now)
                     .map_err(status)?;
-                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                self.open_client(socket, received[0], bits, Protocol::Tcp, reply_handle, now)?;
+                let address = IpAddr::from_mapped(address);
+                contact(self.log, &mut self.contacts, Protocol::Tcp, address, port);
                 Ok(0)
             }
             (op::SEND_TO6, badge) if badge != 0 => {
-                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let client = self.clients.get(&badge).ok_or(Status::BadRequest)?;
+                let (socket, protocol) = (client.socket, client.protocol);
                 if data.len() < 18 || data.len() > 18 + MAX_DATA6 {
                     return Err(Status::BadRequest);
                 }
                 let address: Ipv6 = data[..16].try_into().expect("16 bytes");
+                let address = IpAddr::from_mapped(address);
                 let port = u16::from_le_bytes([data[16], data[17]]);
                 self.stack
-                    .send_to(socket, IpAddr::from_mapped(address), port, &data[18..], now)
+                    .send_to(socket, address, port, &data[18..], now)
                     .map_err(status)?;
+                contact(self.log, &mut self.contacts, protocol, address, port);
                 Ok(0)
             }
             (op::RECV6, badge) if badge != 0 => {
-                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let client = self.clients.get(&badge).ok_or(Status::BadRequest)?;
+                let (socket, protocol) = (client.socket, client.protocol);
                 let datagram = self.stack.recv(socket).ok_or(Status::Empty)?;
+                // Answering whoever sent this is not a contact of ours.
+                self.contacts.heard(protocol, datagram.from, datagram.port);
                 let take = datagram.data.len().min(MAX_DATA6);
                 reply[..16].copy_from_slice(&datagram.from.to_mapped());
                 reply[16..18].copy_from_slice(&datagram.port.to_le_bytes());
@@ -605,7 +640,14 @@ impl Net {
                     self.stack.ping_open()
                 }
                 .map_err(status)?;
-                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                self.open_client(
+                    socket,
+                    received[0],
+                    bits,
+                    if udp { Protocol::Udp } else { Protocol::Ping },
+                    reply_handle,
+                    now,
+                )?;
                 let port = self.stack.local_port(socket).unwrap_or(0);
                 reply[..2].copy_from_slice(&port.to_le_bytes());
                 Ok(2)
@@ -621,7 +663,9 @@ impl Net {
                 let address: [u8; 4] = data[..4].try_into().expect("4 bytes");
                 let port = u16::from_le_bytes([data[4], data[5]]);
                 let socket = self.stack.tcp_connect(address, port, now).map_err(status)?;
-                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                self.open_client(socket, received[0], bits, Protocol::Tcp, reply_handle, now)?;
+                let address = IpAddr::V4(address);
+                contact(self.log, &mut self.contacts, Protocol::Tcp, address, port);
                 Ok(0)
             }
             (op::TCP_LISTEN, 0) => {
@@ -636,7 +680,7 @@ impl Net {
                     .stack
                     .tcp_listen(u16::from_le_bytes([data[0], data[1]]))
                     .map_err(status)?;
-                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                self.open_client(socket, received[0], bits, Protocol::Tcp, reply_handle, now)?;
                 Ok(0)
             }
             (op::TCP_ACCEPT, badge) if badge != 0 => {
@@ -650,7 +694,7 @@ impl Net {
                     .tcp_accept(listener)
                     .map_err(status)?
                     .ok_or(Status::Empty)?;
-                self.open_client(socket, received[0], bits, reply_handle, now)?;
+                self.open_client(socket, received[0], bits, Protocol::Tcp, reply_handle, now)?;
                 Ok(0)
             }
             (op::TCP_ATTACH, badge) if badge != 0 => {
@@ -731,7 +775,8 @@ impl Net {
                 Ok(2)
             }
             (op::SEND_TO, badge) if badge != 0 => {
-                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let client = self.clients.get(&badge).ok_or(Status::BadRequest)?;
+                let (socket, protocol) = (client.socket, client.protocol);
                 if data.len() < 6 {
                     return Err(Status::BadRequest);
                 }
@@ -740,10 +785,18 @@ impl Net {
                 self.stack
                     .send_to(socket, address, port, &data[6..], now)
                     .map_err(status)?;
+                contact(
+                    self.log,
+                    &mut self.contacts,
+                    protocol,
+                    IpAddr::V4(address),
+                    port,
+                );
                 Ok(0)
             }
             (op::RECV, badge) if badge != 0 => {
-                let socket = self.clients.get(&badge).ok_or(Status::BadRequest)?.socket;
+                let client = self.clients.get(&badge).ok_or(Status::BadRequest)?;
+                let (socket, protocol) = (client.socket, client.protocol);
                 // This (IPv4) form cannot name an IPv6 sender: such
                 // datagrams are skipped (`RECV6` returns them).
                 let (from, datagram) = loop {
@@ -752,6 +805,9 @@ impl Net {
                         break (from, datagram);
                     }
                 };
+                // Answering whoever sent this is not a contact of ours.
+                self.contacts
+                    .heard(protocol, IpAddr::V4(from), datagram.port);
                 let take = datagram.data.len().min(MAX_DATA);
                 reply[..4].copy_from_slice(&from);
                 reply[4..6].copy_from_slice(&datagram.port.to_le_bytes());
@@ -774,6 +830,7 @@ impl Net {
         socket: SocketId,
         notification: Handle,
         bits: u64,
+        protocol: Protocol,
         reply_handle: &mut Option<Handle>,
         now: u64,
     ) -> Result<(), Status> {
@@ -790,6 +847,7 @@ impl Net {
                 socket,
                 notification,
                 bits,
+                protocol,
                 buffer: None,
             },
         );

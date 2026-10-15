@@ -32,3 +32,21 @@ value. Exact chipsets are added only after research and a test device.
 | Network | virtio-net (modern, `1af4:1041`), userspace driver (ADR-0023); Intel 82574L (`8086:10d3`, QEMU `e1000e`), userspace driver (ADR-0041) | Intel 82574L on real hardware; other Intel e1000e-family parts (82583, I217/I218/I219); Realtek Ethernet |
 
 Tier 3 explicitly: legacy BIOS boot, 32-bit x86, ISA, IDE/PATA, floppy.
+
+## How long support lasts
+
+Promise P8 (ADR-0146): someone choosing a machine can know how long Oceans
+will run on it. Hardware is not cut off by policy as Windows 11 did with
+TPM 2.0 and macOS does with Intel Macs.
+
+- **A Tier 1 machine stays supported for at least 5 years after it is
+  taken off the Tier 1 list.** Supported means that releases still boot and
+  run on it, and that security fixes still reach it.
+- **The CPU and firmware baseline** (x86-64-v2, UEFI 2.x with ACPI; ADR-0005)
+  is raised only by an ADR, published at least 12 months before the first
+  release that needs the new baseline.
+- **A device class leaves Tier 1** (for example a network chip) only by an
+  ADR that says why and which release is the last to carry its driver.
+  That release is then supported for the same 5 years.
+- **Nothing here needs a TPM or a particular vendor.** Secure Boot is
+  supported (ADR-0091), never required.
