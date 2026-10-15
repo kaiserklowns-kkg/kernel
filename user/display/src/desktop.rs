@@ -2403,7 +2403,13 @@ impl Desktop {
         } else {
             (Rgb(0xf6_f6_f8), 104)
         };
-        canvas.frost(r, 18, CC_BLUR, glass, alpha);
+        // Less transparency (ADR-0155): the glass made solid, nothing
+        // behind it showing.
+        if colour::solid() {
+            canvas.round_fill(r, 18, glass);
+        } else {
+            canvas.frost(r, 18, CC_BLUR, glass, alpha);
+        }
         canvas.with_surface(|s| s.outline(r, 18, WHITE, if dark { 40 } else { 150 }));
     }
 

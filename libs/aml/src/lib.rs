@@ -19,12 +19,13 @@
 
 extern crate alloc;
 
+pub mod battery;
+pub mod eval;
 pub mod name;
 pub mod parse;
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use name::{NameString, Path, Seg};
 use parse::{Arity, Error, Expr, MAX_DEPTH, Reader, op};
@@ -43,8 +44,9 @@ pub enum Object {
     Method {
         args: u8,
         serialized: bool,
-        /// Its body: AML read when it runs.
-        body: Vec<u8>,
+        /// Its body: AML read when it runs (shared: a running method
+        /// keeps it while the namespace changes).
+        body: alloc::rc::Rc<[u8]>,
     },
     /// A named data object (`Name`).
     Data(Expr),
@@ -88,6 +90,13 @@ pub enum Object {
         kind: u8,
         args: u8,
     },
+    /// A method the interpreter answers itself (ADR-0153): `_OSI`.
+    Builtin {
+        args: u8,
+    },
+    /// A field of a buffer (`CreateDWordField` and the like, ADR-0153):
+    /// where it is, the interpreter keeps.
+    BufferField,
 }
 
 /// What loading one block found.
@@ -105,6 +114,9 @@ pub struct Namespace {
     objects: BTreeMap<Path, Object>,
 }
 
+/// The name `_OS` gives, as firmware expects of a current system.
+pub const OS_NAME: &[u8] = b"Microsoft Windows NT";
+
 /// The predefined scopes under the root (ACPI 6.5 §5.3.1).
 const PREDEFINED: [&Seg; 5] = [b"_GPE", b"_PR_", b"_SB_", b"_SI_", b"_TZ_"];
 
@@ -114,6 +126,16 @@ impl Namespace {
         for seg in PREDEFINED {
             objects.insert(Path::root().child(*seg), Object::Scope);
         }
+        // What the operating system provides (ACPI 6.5 §5.7): which
+        // interfaces it has, its name, the ACPI revision, the global lock.
+        let root = Path::root();
+        objects.insert(root.child(*b"_OSI"), Object::Builtin { args: 1 });
+        objects.insert(
+            root.child(*b"_OS_"),
+            Object::Data(Expr::Str(OS_NAME.to_vec())),
+        );
+        objects.insert(root.child(*b"_REV"), Object::Data(Expr::Int(2)));
+        objects.insert(root.child(*b"_GL_"), Object::Mutex { sync_level: 0 });
         Self { objects }
     }
 
@@ -131,6 +153,16 @@ impl Namespace {
 
     pub fn iter(&self) -> impl Iterator<Item = (&Path, &Object)> {
         self.objects.iter()
+    }
+
+    /// Puts `object` at `path` (a method's own objects while it runs,
+    /// ADR-0153), replacing what was there.
+    pub(crate) fn insert(&mut self, path: Path, object: Object) {
+        self.objects.insert(path, object);
+    }
+
+    pub(crate) fn remove(&mut self, path: &Path) {
+        self.objects.remove(path);
     }
 
     /// The object `name` refers to from `scope`, following the search rules
@@ -221,9 +253,9 @@ impl Namespace {
 }
 
 /// Method arities from the namespace being loaded.
-struct Methods<'a> {
-    namespace: &'a Namespace,
-    scope: &'a Path,
+pub(crate) struct Methods<'a> {
+    pub(crate) namespace: &'a Namespace,
+    pub(crate) scope: &'a Path,
 }
 
 impl Arity for Methods<'_> {
@@ -232,14 +264,15 @@ impl Arity for Methods<'_> {
         match self.namespace.objects.get(&path)? {
             Object::Method { args, .. } => Some(*args),
             Object::External { kind: 8, args } => Some(*args),
+            Object::Builtin { args } => Some(*args),
             _ => None,
         }
     }
 }
 
-struct Loader<'a> {
-    namespace: &'a mut Namespace,
-    loaded: Loaded,
+pub(crate) struct Loader<'a> {
+    pub(crate) namespace: &'a mut Namespace,
+    pub(crate) loaded: Loaded,
 }
 
 impl Loader<'_> {
@@ -271,7 +304,7 @@ impl Loader<'_> {
         }
     }
 
-    fn term(
+    pub(crate) fn term(
         &mut self,
         r: &mut Reader<'_>,
         scope: &Path,
@@ -331,7 +364,7 @@ impl Loader<'_> {
                 if r.at > block_end {
                     return Err(Error::Malformed(at));
                 }
-                let body = r.bytes[r.at..block_end].to_vec();
+                let body: alloc::rc::Rc<[u8]> = r.bytes[r.at..block_end].into();
                 r.at = block_end;
                 let method = Object::Method {
                     args: flags & 7,

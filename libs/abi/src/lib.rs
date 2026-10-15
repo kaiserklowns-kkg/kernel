@@ -35,8 +35,10 @@
 /// wall clock); 25 = ADR-0146 (`DEBUG_WRITE`'s `level`: lines for the
 /// serial line only, never kept); 26 = ADR-0148 (52: the ACPI definition
 /// blocks); 27 = ADR-0152 (the `POWER` kind of `SYSTEM_INFO`: a laptop or
-/// not). Versions only add; existing numbers keep their meaning.
-pub const ABI_VERSION: u64 = 27;
+/// not); 28 = ADR-0153 (53–55: firmware ports, memory and PCI
+/// configuration for AML). Versions only add; existing numbers keep their
+/// meaning.
+pub const ABI_VERSION: u64 = 28;
 
 /// System call numbers.
 pub mod nr {
@@ -309,6 +311,26 @@ pub mod nr {
     /// the last). Needs `WRITE` on the device bus, which init gives only on
     /// request (`grant = firmware`).
     pub const FIRMWARE_TABLE: u64 = 52;
+
+    // ABI 28 (ADR-0153)
+
+    /// `(bus, port, width, value, write) -> value` — reads (`write` 0) or
+    /// writes `width` bytes (1, 2 or 4) at an I/O port, for AML's `SystemIO`
+    /// regions and the embedded controller. `MissingRights` for a port
+    /// the kernel keeps. Needs `WRITE` on the device bus (`grant =
+    /// firmware`).
+    pub const FIRMWARE_PORT: u64 = 53;
+    /// `(bus, base, size) -> (memory, offset)` — a memory object for the
+    /// firmware's memory at `base..base + size` (whole pages; `offset` is
+    /// `base`'s in it), for AML's `SystemMemory` regions: reserved memory,
+    /// ACPI NVS, or what the memory map does not list, never a device's
+    /// BAR. Needs `WRITE` on the device bus.
+    pub const FIRMWARE_MEMORY: u64 = 54;
+    /// `(bus, address, width) -> value` — reads PCI configuration space at
+    /// `bus << 20 | device << 15 | function << 12 | offset`, for AML's
+    /// `PCI_Config` regions; all ones where there is no such function.
+    /// Needs `WRITE` on the device bus.
+    pub const FIRMWARE_PCI_READ: u64 = 55;
 }
 
 /// How `DEVICE_IRQ` delivers a device's interrupt (ABI 18, ADR-0124).

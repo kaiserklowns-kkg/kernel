@@ -83,6 +83,9 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         nr::DISPLAY_POINTER => display_pointer(&process, a0, a1, a2),
         nr::CLOCK_SET => clock_set(&process, a0, a1),
         nr::FIRMWARE_TABLE => firmware_table(&process, a0, a1, a2, a3),
+        nr::FIRMWARE_PORT => firmware_port(&process, a0, a1, a2, a3, a4),
+        nr::FIRMWARE_MEMORY => firmware_memory(&process, a0, a1, a2),
+        nr::FIRMWARE_PCI_READ => firmware_pci_read(&process, a0, a1, a2),
         nr::LOG_READ => log_read(&process, a0, a1, a2, a3),
         nr::SYSTEM_POWER => system_power(&process, a0, a1),
         nr::ENDPOINT_MINT => endpoint_mint(&process, a0, a1),
@@ -1074,6 +1077,108 @@ fn firmware_table(
     Ok((table.len() as u64, 0))
 }
 
+/// I/O ports the kernel and its devices keep, which AML never reaches
+/// (ADR-0153): DMA, the interrupt controllers, the timer, the keyboard
+/// controller, the clock, the serial ports, PCI configuration.
+const KERNEL_PORTS: [core::ops::RangeInclusive<u16>; 12] = [
+    0x00..=0x1f,
+    0x20..=0x21,
+    0x40..=0x43,
+    0x60..=0x60,
+    0x64..=0x64,
+    0x70..=0x71,
+    0xa0..=0xa1,
+    0xc0..=0xdf,
+    0x2e8..=0x2ff,
+    0x3e8..=0x3ef,
+    0x3f8..=0x3ff,
+    0xcf8..=0xcff,
+];
+
+/// `FIRMWARE_PORT` (ADR-0153): reads or writes `width` bytes (1, 2 or 4)
+/// at I/O port `port` for AML's `SystemIO` regions and the embedded
+/// controller; never a port the kernel keeps. Needs `WRITE` on the device
+/// bus.
+fn firmware_port(
+    process: &Process,
+    bus: u64,
+    port: u64,
+    width: u64,
+    value: u64,
+    write: u64,
+) -> SyscallResult {
+    use ::x86_64::instructions::port::Port;
+    check_bus(process, bus, Rights::WRITE)?;
+    let port = u16::try_from(port).map_err(|_| Error::InvalidArgument)?;
+    if !matches!(width, 1 | 2 | 4) || u64::from(port) + width > 0x1_0000 {
+        return Err(Error::InvalidArgument);
+    }
+    let last = port + (width as u16 - 1);
+    if KERNEL_PORTS
+        .iter()
+        .any(|kept| port <= *kept.end() && *kept.start() <= last)
+    {
+        return Err(Error::MissingRights);
+    }
+    // SAFETY: the port is none the kernel uses (above); what firmware's
+    // own registers do is the firmware's, as on every system that runs
+    // its AML.
+    let read = unsafe {
+        match (width, write != 0) {
+            (1, true) => {
+                Port::<u8>::new(port).write(value as u8);
+                0
+            }
+            (2, true) => {
+                Port::<u16>::new(port).write(value as u16);
+                0
+            }
+            (_, true) => {
+                Port::<u32>::new(port).write(value as u32);
+                0
+            }
+            (1, false) => u64::from(Port::<u8>::new(port).read()),
+            (2, false) => u64::from(Port::<u16>::new(port).read()),
+            (_, false) => u64::from(Port::<u32>::new(port).read()),
+        }
+    };
+    Ok((read, 0))
+}
+
+/// `FIRMWARE_MEMORY` (ADR-0153): a memory object for the firmware's
+/// memory at `base..base + size` (whole pages; `base`'s offset in it
+/// returned), for AML's `SystemMemory` regions. Only reserved memory, ACPI
+/// NVS, or what the map does not list, and no device's BAR. Needs `WRITE`
+/// on the device bus.
+fn firmware_memory(process: &Process, bus: u64, base: u64, size: u64) -> SyscallResult {
+    check_bus(process, bus, Rights::WRITE)?;
+    let memory = crate::pci::firmware_memory(base, size)?;
+    let raw = insert(
+        process,
+        Capability::new(KernelObject::Memory(memory), DRIVER_MEMORY_RIGHTS),
+    )?;
+    Ok((raw, base % oceans_memory_map::PAGE_SIZE))
+}
+
+/// `FIRMWARE_PCI_READ` (ADR-0153): `width` bytes of PCI configuration
+/// space at `address` (`bus << 20 | device << 15 | function << 12 |
+/// offset`), for AML's `PCI_Config` regions; all ones where there is no
+/// such function. Reads only. Needs `WRITE` on the device bus.
+fn firmware_pci_read(process: &Process, bus: u64, address: u64, width: u64) -> SyscallResult {
+    check_bus(process, bus, Rights::WRITE)?;
+    let offset = (address & 0xfff) as u16;
+    if !matches!(width, 1 | 2 | 4) || !(offset as u64).is_multiple_of(width) {
+        return Err(Error::InvalidArgument);
+    }
+    let value = crate::pci::firmware_config_read(
+        ((address >> 20) & 0xff) as u8,
+        ((address >> 15) & 0x1f) as u8,
+        ((address >> 12) & 0x7) as u8,
+        offset,
+        width as u8,
+    );
+    Ok((u64::from(value), 0))
+}
 /// Checks that `raw` names the device bus with `required` rights.
 fn check_bus(process: &Process, raw: u64, required: Rights) -> Result<(), Error> {
     arch::without_interrupts(|| {

@@ -654,6 +654,55 @@ fn overlaps_ram(range: Range<u64>) -> bool {
     })
 }
 
+// ---- Firmware access for the AML service (ADR-0153) -------------------------
+
+/// The most firmware memory one request maps.
+const MAX_FIRMWARE_MEMORY: u64 = 16 * 1024 * 1024;
+
+/// A memory object for the firmware's memory at `base..base + size`, the
+/// whole pages around it, for an operation region of AML (ADR-0153).
+/// Only memory the map calls reserved or ACPI NVS, or does not list (a
+/// device's registers), and never a page a PCI device's BAR decodes: a
+/// driver's device stays its own, and RAM the kernel uses is never reached.
+pub fn firmware_memory(base: u64, size: u64) -> Result<Arc<MemoryObject>, DeviceError> {
+    if size == 0 || size > MAX_FIRMWARE_MEMORY {
+        return Err(DeviceError::BadArgument);
+    }
+    let end = base.checked_add(size).ok_or(DeviceError::BadArgument)?;
+    let start = base - base % PAGE_SIZE;
+    let end = end.next_multiple_of(PAGE_SIZE);
+    let allowed = boot::info().memory_regions().iter().all(|region| {
+        let overlaps = region.base() < end && start < region.end();
+        !overlaps || matches!(region.kind(), RegionKind::Reserved | RegionKind::AcpiNvs)
+    });
+    if !allowed {
+        klog::warn!("ACPI: refusing firmware memory at {base:#x}: not reserved or ACPI NVS");
+        return Err(DeviceError::BadArgument);
+    }
+    let decoded = functions().iter().any(|function| {
+        (0..function.bars.len()).any(|i| {
+            function
+                .memory_bar(i)
+                .is_some_and(|(b, s)| s > 0 && b < end && start < b + s)
+        })
+    });
+    if decoded {
+        klog::warn!("ACPI: refusing firmware memory at {base:#x}: a device's BAR is there");
+        return Err(DeviceError::BadArgument);
+    }
+    Ok(MemoryObject::new_device(start, end - start, [0..0, 0..0]))
+}
+
+/// Reads `width` bytes (1, 2 or 4) of PCI configuration space at `offset`
+/// of segment 0's `bus`, `slot` and `function`, for AML (ADR-0153): all
+/// ones where there is no such function, as the hardware answers.
+pub fn firmware_config_read(bus: u8, slot: u8, function: u8, offset: u16, width: u8) -> u32 {
+    functions()
+        .iter()
+        .find(|f| f.segment == 0 && f.bus == bus && f.slot == slot && f.function == function)
+        .and_then(|f| oceans_pci::read(&f.ecam(), offset, width))
+        .unwrap_or(u32::MAX)
+}
 /// Device capability checks, for smoke-test boots: exclusive open, kernel
 /// refusal to touch device memory, contiguous DMA, and release on close.
 pub fn self_test() {

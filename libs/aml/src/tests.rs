@@ -5,7 +5,7 @@ use std::vec;
 use std::vec::Vec as StdVec;
 
 /// AML for the tests, put together as an ASL compiler would.
-mod asl {
+pub(super) mod asl {
     use super::StdVec;
 
     /// A package: its length (which counts its own bytes), then `body`.
@@ -329,3 +329,5 @@ fn damaged_aml_is_an_error_never_a_panic() {
         Err(Error::UnknownOpcode(0, 0x5b77))
     ));
 }
+
+mod run;

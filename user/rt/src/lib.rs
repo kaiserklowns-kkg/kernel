@@ -535,6 +535,35 @@ pub fn firmware_table(bus: Handle, index: usize, buffer: &mut [u8]) -> Result<us
     .map(|(len, _)| len as usize)
 }
 
+/// Reads (`write` `None`) or writes `width` bytes at I/O port `port` for
+/// AML (ADR-0153). Needs the `firmware` grant.
+pub fn firmware_port(bus: Handle, port: u16, width: u8, write: Option<u64>) -> Result<u64, Error> {
+    let (value, writing) = write.map_or((0, 0), |v| (v, 1));
+    call(
+        nr::FIRMWARE_PORT,
+        [bus.0, u64::from(port), u64::from(width), value, writing, 0],
+    )
+    .map(|(value, _)| value)
+}
+
+/// A memory object for the firmware's memory at `base..base + size`, and
+/// `base`'s offset in it (ADR-0153). Needs the `firmware` grant.
+pub fn firmware_memory(bus: Handle, base: u64, size: u64) -> Result<(Handle, u64), Error> {
+    call(nr::FIRMWARE_MEMORY, [bus.0, base, size, 0, 0, 0])
+        .map(|(handle, offset)| (Handle(handle), offset))
+}
+
+/// `width` bytes of PCI configuration space at `address` (`bus << 20 |
+/// device << 15 | function << 12 | offset`) for AML (ADR-0153). Needs the
+/// `firmware` grant.
+pub fn firmware_pci_read(bus: Handle, address: u64, width: u8) -> Result<u64, Error> {
+    call(
+        nr::FIRMWARE_PCI_READ,
+        [bus.0, address, u64::from(width), 0, 0, 0],
+    )
+    .map(|(value, _)| value)
+}
+
 /// Sets the wall clock to `unix_ms` (ADR-0143): needs the `clock` grant.
 pub fn clock_set(system: Handle, unix_ms: u64) -> Result<(), Error> {
     call(nr::CLOCK_SET, [system.0, unix_ms, 0, 0, 0, 0]).map(drop)

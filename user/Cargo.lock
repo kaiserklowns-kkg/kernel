@@ -27,7 +27,9 @@ name = "acpi"
 version = "0.1.0"
 dependencies = [
  "oceans-aml",
+ "oceans-fs-proto",
  "oceans-rt",
+ "oceans-window",
 ]
 
 [[package]]

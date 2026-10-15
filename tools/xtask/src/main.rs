@@ -758,6 +758,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: Wi-Fi not connected",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
+    // Open, its network button Wi-Fi's, off (966,91), before it is clicked.
+    b"@screen 966 91 d4d4d9 Control Center, Wi-Fi off",
     b"@monitor mouse_move -146 66",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
@@ -1213,7 +1215,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 27)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 28)"),
     // What kind of machine (ADR-0152): QEMU's says nothing and names no
     // battery or lid.
     Expect::Contains("ACPI: power profile 0, battery none, lid none: not portable"),
@@ -1384,7 +1386,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 27)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 28)"),
     // The clock (ADR-0143): the host's two test time servers agree, 90 s
     // ahead, so the clock service sets the clock through the kernel.
     Expect::Contains("clock: set from network time, "),
@@ -1395,6 +1397,12 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("backlight: none on this display (1234:1111)"),
     // ACPI (ADR-0148): QEMU's definition blocks read whole.
     Expect::Contains(" definition block(s) read, 0 not: "),
+    // Running AML (ADR-0153): the devices initialised, each one's _STA and
+    // _CRS run on QEMU's own AML without a failure; QEMU's machine has
+    // no battery, so the service ends.
+    Expect::Contains("acpi: _INI ran "),
+    Expect::Contains("acpi: _STA and _CRS failed 0 of "),
+    Expect::Contains("acpi: no battery on this machine"),
     Expect::Contains("init/clock set the clock"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),
