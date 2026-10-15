@@ -834,6 +834,15 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait desktop: opening Calculator, from the desktop",
     b"@wait display: windows for app.oceans.calculator",
     b"app stop app.oceans.calculator\r\n",
+    // The power button (ADR-0160): QEMU's (ACPI's fixed button) pressed,
+    // the acpi service sees it, and the desktop asks whether to shut down
+    // (its dialog, as the install dialog's, at 380,494); Escape answers
+    // no.
+    b"@monitor system_powerdown",
+    b"@wait desktop: power button",
+    b"@screen 380 494 f9f9fb the power button's dialog",
+    b"@monitor sendkey esc",
+    b"@wait desktop: power dialog cancelled",
     // The lock screen (ADR-0110): a name and a password, then Super+L
     // locks; its field (from 480,400, 320 by 44) is white. A wrong
     // password is refused, the right one opens it. The password stays:
@@ -1228,7 +1237,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 28)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 29)"),
     // What kind of machine (ADR-0152): QEMU's says nothing and names no
     // battery or lid.
     Expect::Contains("ACPI: power profile 0, battery none, lid none: not portable"),
@@ -1405,7 +1414,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 28)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 29)"),
     // The clock (ADR-0143): the host's two test time servers agree, 90 s
     // ahead, so the clock service sets the clock through the kernel.
     Expect::Contains("clock: set from network time, "),
@@ -1422,6 +1431,8 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("acpi: _INI ran "),
     Expect::Contains("acpi: _STA and _CRS failed 0 of "),
     Expect::Contains("acpi: no battery on this machine"),
+    Expect::Contains("acpi: watching: power button fixed, lid none, embedded controller none"),
+    Expect::Contains("acpi: power button"),
     Expect::Contains("init/clock set the clock"),
     Expect::Contains(" seconds"),
     Expect::Contains("MiB free of"),

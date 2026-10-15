@@ -86,6 +86,8 @@ const TICK: u64 = 1 << 1;
 const KEYS: u64 = 1 << 2;
 /// How often the clock, the console mirror and the app list are checked.
 const TICK_MS: u64 = 100;
+/// How often the power button and the lid are looked at (ADR-0160).
+const EVENTS_EVERY_MS: u64 = 500;
 const APPS_EVERY_MS: u64 = 2000;
 /// How often the desktop asks whether the microphone is recording
 /// (ADR-0156): often enough that a short recording shows.
@@ -145,6 +147,10 @@ struct Service {
     wifi_dir: Option<oceans_fs_proto::Node>,
     /// `/system/battery` (ADR-0152): where the battery's status is.
     battery_dir: Option<oceans_fs_proto::Node>,
+    /// What the user last did to the machine (ADR-0160), and when it was
+    /// last read.
+    events: Option<oceans_window::battery::Events>,
+    events_read_ms: u64,
     wifi_refreshed_ms: u64,
     /// When the desktop started, and whether it told Core this boot
     /// finished (ADR-0122).
@@ -311,6 +317,8 @@ fn main(start: Start) -> i64 {
         net_reader: None,
         wifi_dir: directory.find("use", "storage").map(oceans_fs_proto::Node),
         battery_dir: directory.find("use", "battery").map(oceans_fs_proto::Node),
+        events: None,
+        events_read_ms: 0,
         wifi_refreshed_ms: 0,
         started_ms: oceans_rt::clock_ms(),
         boot_reported: false,
@@ -422,6 +430,11 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_user();
             }
             dirty |= service.refresh_terminal();
+            // The power button and the lid (ADR-0160), twice a second.
+            if now.saturating_sub(service.events_read_ms) >= EVENTS_EVERY_MS {
+                service.events_read_ms = now;
+                dirty |= service.refresh_events();
+            }
             // The Wi-Fi panel open (ADR-0130): what the driver does, often.
             if service.desktop.wifi_open && now.saturating_sub(service.wifi_refreshed_ms) >= 500 {
                 dirty |= service.refresh_wifi();
@@ -908,7 +921,13 @@ impl Service {
                     }
                     continue;
                 }
+                // A dialog takes no keys but Escape, which answers no, as on
+                // other systems (ADR-0160).
                 if self.desktop.dialog.is_some() && VolumeKey::of(byte).is_none() {
+                    if byte == 0x1b {
+                        self.answer(false);
+                        dirty = true;
+                    }
                     continue;
                 }
                 // A Wi-Fi password being typed (ADR-0130): the keys are its.
@@ -1229,25 +1248,7 @@ impl Service {
             }
             Hit::Restart | Hit::ShutDown => {
                 self.desktop.start_open = false;
-                let off = hit == Hit::ShutDown;
-                self.desktop.dialog = Some(Dialog {
-                    question: Question::Power(if off {
-                        oceans_rt::power::OFF
-                    } else {
-                        oceans_rt::power::RESTART
-                    }),
-                    title: if off {
-                        "Shut down Oceans?"
-                    } else {
-                        "Restart Oceans?"
-                    },
-                    app: String::from("Every app and service stops first."),
-                    ask: "Files are saved to disk before the machine",
-                    description: String::from(if off { "switches off." } else { "restarts." }),
-                    note: String::new(),
-                    deny: "Cancel",
-                    allow: if off { "Shut Down" } else { "Restart" },
-                });
+                self.ask_power(hit == Hit::ShutDown);
                 true
             }
             Hit::StartTerminal => {
@@ -2150,6 +2151,79 @@ impl Service {
         }
     }
 
+    /// Asks whether to switch off or restart (ADR-0085): Launchpad's
+    /// buttons, and the power button (ADR-0160).
+    fn ask_power(&mut self, off: bool) {
+        self.desktop.dialog = Some(Dialog {
+            question: Question::Power(if off {
+                oceans_rt::power::OFF
+            } else {
+                oceans_rt::power::RESTART
+            }),
+            title: if off {
+                "Shut down Oceans?"
+            } else {
+                "Restart Oceans?"
+            },
+            app: String::from("Every app and service stops first."),
+            ask: "Files are saved to disk before the machine",
+            description: String::from(if off { "switches off." } else { "restarts." }),
+            note: String::new(),
+            deny: "Cancel",
+            allow: if off { "Shut Down" } else { "Restart" },
+        });
+    }
+
+    /// The power button and the lid (ADR-0160), from
+    /// `/system/battery/events`: a press asks whether to shut down, as
+    /// other systems do; the lid closed locks the screen. `true` if what
+    /// shows changed.
+    fn refresh_events(&mut self) -> bool {
+        use oceans_window::battery::{EVENTS, Events};
+        let read = self.battery_dir.as_ref().and_then(|dir| {
+            let (node, kind) = dir.open(EVENTS, 0).ok()?;
+            let mut data = [0u8; 64];
+            let len = (kind == oceans_fs_proto::Kind::File)
+                .then(|| node.read(0, &mut data).ok())
+                .flatten();
+            node.close();
+            Events::parse(&data[..len?])
+        });
+        let Some(now) = read else {
+            return false;
+        };
+        // The first reading is how things are, not something done.
+        let Some(before) = self.events.replace(now) else {
+            return false;
+        };
+        let mut changed = false;
+        if now.button != before.button {
+            say(self.log, format_args!("desktop: power button"));
+            if self.desktop.lock == desktop::Lock::Open
+                && self.desktop.dialog.is_none()
+                && self.desktop.can_power
+            {
+                self.desktop.start_open = false;
+                self.desktop.volume_open = false;
+                self.ask_power(true);
+                changed = true;
+            }
+        }
+        if now.lid_open != before.lid_open {
+            match now.lid_open {
+                Some(false) => {
+                    say(self.log, format_args!("desktop: lid closed"));
+                    if self.desktop.password_set && self.desktop.lock == desktop::Lock::Open {
+                        self.lock_screen();
+                        changed = true;
+                    }
+                }
+                Some(true) => say(self.log, format_args!("desktop: lid open")),
+                None => {}
+            }
+        }
+        changed
+    }
     /// The battery from `/system/battery/status` (ADR-0152); `true` if
     /// what shows changed. Down to a warning level while discharging, it
     /// says so.
@@ -2411,7 +2485,11 @@ impl Service {
     /// Restart or Shut Down, confirmed (ADR-0085): init stops the system,
     /// this desktop too.
     fn answer_power(&mut self, action: u64, confirmed: bool) {
-        let Some(power) = self.power.filter(|_| confirmed) else {
+        if !confirmed {
+            say(self.log, format_args!("desktop: power dialog cancelled"));
+            return;
+        }
+        let Some(power) = self.power else {
             return;
         };
         let what = if action == oceans_rt::power::OFF {

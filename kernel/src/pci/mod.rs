@@ -693,6 +693,18 @@ pub fn firmware_memory(base: u64, size: u64) -> Result<Arc<MemoryObject>, Device
     Ok(MemoryObject::new_device(start, end - start, [0..0, 0..0]))
 }
 
+/// Whether I/O ports `first..=last` are a PCI device's (one of its I/O
+/// BARs, ADR-0160): its driver's alone, never the firmware's to reach.
+pub fn io_ports_decoded(first: u16, last: u16) -> bool {
+    functions().iter().any(|function| {
+        function.bars.iter().any(|bar| match *bar {
+            Bar::Io { base, size } if size > 0 => {
+                u32::from(first) < base + size && base <= u32::from(last)
+            }
+            _ => false,
+        })
+    })
+}
 /// Reads `width` bytes (1, 2 or 4) of PCI configuration space at `offset`
 /// of segment 0's `bus`, `slot` and `function`, for AML (ADR-0153): all
 /// ones where there is no such function, as the hardware answers.

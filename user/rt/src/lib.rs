@@ -518,6 +518,9 @@ pub fn system_power(system: Handle, action: u64) -> Error {
     }
 }
 
+/// The `firmware_table` index of the FADT (ABI 29, ADR-0160).
+pub const FIRMWARE_FADT: usize = nr::FIRMWARE_FADT as usize;
+
 /// ACPI definition block `index` (ADR-0148) into `buffer`: its length,
 /// copied only if `buffer` holds it. Needs the `firmware` grant.
 pub fn firmware_table(bus: Handle, index: usize, buffer: &mut [u8]) -> Result<usize, Error> {

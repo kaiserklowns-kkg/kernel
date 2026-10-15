@@ -319,7 +319,13 @@ impl GenericAddress {
 const FADT_DSDT: usize = 40;
 const FADT_SMI_CMD: usize = 48;
 const FADT_ACPI_ENABLE: usize = 52;
+const FADT_SCI_INT: usize = 46;
+const FADT_PM1A_EVT: usize = 56;
+const FADT_PM1B_EVT: usize = 60;
 const FADT_PM1A_CNT: usize = 64;
+const FADT_PM1_EVT_LEN: usize = 88;
+const FADT_X_PM1A_EVT: usize = 148;
+const FADT_X_PM1B_EVT: usize = 160;
 const FADT_PM1B_CNT: usize = 68;
 const FADT_PM1_CNT_LEN: usize = 89;
 const FADT_FLAGS: usize = 112;
@@ -335,6 +341,8 @@ const FADT_PM_PROFILE: usize = 45;
 const FADT_V1_LEN: usize = 116;
 const FLAG_RESET_REG_SUP: u32 = 1 << 10;
 const FLAG_HW_REDUCED_ACPI: u32 = 1 << 20;
+/// The power button is a device (`PNP0C0C`), not the fixed one.
+const FLAG_PWR_BUTTON: u32 = 1 << 4;
 
 /// What the Fixed ACPI Description Table says about power (ADR-0085).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,6 +366,13 @@ pub struct Fadt {
     /// The firmware's preferred power profile ([`pm_profile`]): a desktop,
     /// a laptop ("mobile"), a server...
     pub pm_profile: u8,
+    /// The PM1 event registers (status, then enable, each half the
+    /// length; ADR-0160), and whether the fixed power button is there.
+    pub pm1a_event: Option<GenericAddress>,
+    pub pm1b_event: Option<GenericAddress>,
+    pub fixed_power_button: bool,
+    /// The interrupt the firmware signals ACPI events on (SCI).
+    pub sci_interrupt: u16,
 }
 
 impl Fadt {
@@ -398,6 +413,14 @@ impl Fadt {
             hardware_reduced: flags & FLAG_HW_REDUCED_ACPI != 0,
             sleep_control: GenericAddress::at(bytes, FADT_SLEEP_CONTROL),
             pm_profile: bytes[FADT_PM_PROFILE],
+            pm1a_event: GenericAddress::at(bytes, FADT_X_PM1A_EVT).or_else(|| {
+                GenericAddress::io(u32_at(bytes, FADT_PM1A_EVT), bytes[FADT_PM1_EVT_LEN])
+            }),
+            pm1b_event: GenericAddress::at(bytes, FADT_X_PM1B_EVT).or_else(|| {
+                GenericAddress::io(u32_at(bytes, FADT_PM1B_EVT), bytes[FADT_PM1_EVT_LEN])
+            }),
+            fixed_power_button: flags & FLAG_PWR_BUTTON == 0,
+            sci_interrupt: u16_at(bytes, FADT_SCI_INT),
         })
     }
 }
@@ -711,6 +734,9 @@ mod tests {
         put(FADT_DSDT, &0x7ff0_0000u32.to_le_bytes());
         put(FADT_SMI_CMD, &0xb2u32.to_le_bytes());
         put(FADT_ACPI_ENABLE, &[0xf1]);
+        put(FADT_PM1A_EVT, &0x600u32.to_le_bytes());
+        put(FADT_PM1_EVT_LEN, &[4]);
+        put(FADT_SCI_INT, &9u16.to_le_bytes());
         put(FADT_PM1A_CNT, &0x604u32.to_le_bytes());
         put(FADT_PM1_CNT_LEN, &[2]);
         put(FADT_FLAGS, &flags.to_le_bytes());
@@ -733,6 +759,17 @@ mod tests {
         let (reset, value) = parsed.reset.unwrap();
         assert_eq!((reset.space, reset.address, value), (1, 0xcf9, 0x0f));
         assert!(!parsed.hardware_reduced);
+        // The power button's registers (ADR-0160): status then enable.
+        let event = parsed.pm1a_event.unwrap();
+        assert_eq!(
+            (event.space, event.bit_width, event.address),
+            (1, 32, 0x600)
+        );
+        assert_eq!(parsed.pm1b_event, None);
+        assert!(parsed.fixed_power_button);
+        assert_eq!(parsed.sci_interrupt, 9);
+        let parsed = Fadt::parse(Table::parse(&fadt(244, FLAG_PWR_BUTTON)).unwrap()).unwrap();
+        assert!(!parsed.fixed_power_button, "a button device instead");
 
         // Without RESET_REG_SUP the register is not to be used.
         let parsed = Fadt::parse(Table::parse(&fadt(244, 0)).unwrap()).unwrap();

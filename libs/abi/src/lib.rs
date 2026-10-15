@@ -36,9 +36,10 @@
 /// serial line only, never kept); 26 = ADR-0148 (52: the ACPI definition
 /// blocks); 27 = ADR-0152 (the `POWER` kind of `SYSTEM_INFO`: a laptop or
 /// not); 28 = ADR-0153 (53–55: firmware ports, memory and PCI
-/// configuration for AML). Versions only add; existing numbers keep their
+/// configuration for AML); 29 = ADR-0160 (`FIRMWARE_TABLE` gives the FADT
+/// at `FIRMWARE_FADT`). Versions only add; existing numbers keep their
 /// meaning.
-pub const ABI_VERSION: u64 = 28;
+pub const ABI_VERSION: u64 = 29;
 
 /// System call numbers.
 pub mod nr {
@@ -309,8 +310,11 @@ pub mod nr {
     /// `index` (0 the DSDT, then the SSDTs), header and all, to `ptr` if
     /// `capacity` holds it; returns its length either way (`NotFound` past
     /// the last). Needs `WRITE` on the device bus, which init gives only on
-    /// request (`grant = firmware`).
+    /// request (`grant = firmware`). Index [`FIRMWARE_FADT`] (ABI 29,
+    /// ADR-0160) is the FADT instead.
     pub const FIRMWARE_TABLE: u64 = 52;
+    /// The `FIRMWARE_TABLE` index of the FADT (ABI 29, ADR-0160).
+    pub const FIRMWARE_FADT: u64 = 0x1000;
 
     // ABI 28 (ADR-0153)
 

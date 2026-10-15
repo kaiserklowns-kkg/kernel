@@ -26,6 +26,7 @@ dependencies = [
 name = "acpi"
 version = "0.1.0"
 dependencies = [
+ "oceans-acpi",
  "oceans-aml",
  "oceans-fs-proto",
  "oceans-rt",
@@ -819,6 +820,10 @@ version = "0.1.0"
 dependencies = [
  "argon2",
 ]
+
+[[package]]
+name = "oceans-acpi"
+version = "0.1.0"
 
 [[package]]
 name = "oceans-ahci"

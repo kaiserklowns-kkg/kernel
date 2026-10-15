@@ -1078,19 +1078,27 @@ fn firmware_table(
 }
 
 /// I/O ports the kernel and its devices keep, which AML never reaches
-/// (ADR-0153): DMA, the interrupt controllers, the timer, the keyboard
-/// controller, the clock, the serial ports, PCI configuration.
-const KERNEL_PORTS: [core::ops::RangeInclusive<u16>; 12] = [
+/// (ADR-0153, ADR-0160): DMA, the interrupt controllers, the timer, the
+/// speaker and NMI control, the keyboard controller, the clock, the fast
+/// reset (0x92), the legacy disk controllers, VGA, the serial ports, PCI
+/// configuration. A PCI device's own I/O ports are refused too.
+const KERNEL_PORTS: [core::ops::RangeInclusive<u16>; 18] = [
     0x00..=0x1f,
     0x20..=0x21,
     0x40..=0x43,
-    0x60..=0x60,
+    0x60..=0x61,
     0x64..=0x64,
     0x70..=0x71,
+    0x92..=0x92,
     0xa0..=0xa1,
     0xc0..=0xdf,
+    0x170..=0x177,
+    0x1f0..=0x1f7,
     0x2e8..=0x2ff,
+    0x376..=0x376,
+    0x3c0..=0x3df,
     0x3e8..=0x3ef,
+    0x3f6..=0x3f6,
     0x3f8..=0x3ff,
     0xcf8..=0xcff,
 ];
@@ -1117,6 +1125,7 @@ fn firmware_port(
     if KERNEL_PORTS
         .iter()
         .any(|kept| port <= *kept.end() && *kept.start() <= last)
+        || crate::pci::io_ports_decoded(port, last)
     {
         return Err(Error::MissingRights);
     }

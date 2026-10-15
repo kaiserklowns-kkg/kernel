@@ -123,13 +123,23 @@ pub fn discover(boot: &BootInfo) -> Option<Acpi> {
     acpi
 }
 
+/// Where `FIRMWARE_TABLE` gives the FADT (ADR-0160).
+pub const FADT_INDEX: usize = oceans_abi::nr::FIRMWARE_FADT as usize;
+/// The FADT's physical address.
+static FADT_ADDRESS: spin::Once<u64> = spin::Once::new();
+
 /// The physical addresses of the DSDT and the SSDTs (ADR-0148).
 static DEFINITION_BLOCKS: spin::Once<Vec<u64>> = spin::Once::new();
 
 /// A copy of definition block `index` (0: the DSDT, then the SSDTs), header
 /// and all, as the firmware has it (its checksum is the reader's to check).
 /// `None` past the last.
+/// At [`FADT_INDEX`], the FADT (ADR-0160): where the power button's
+/// registers are.
 pub fn definition_block(index: usize) -> Option<Vec<u8>> {
+    if index == FADT_INDEX {
+        return read_table(*FADT_ADDRESS.get()?);
+    }
     let address = *DEFINITION_BLOCKS.get()?.get(index)?;
     read_table_up_to(address, MAX_AML)
 }
@@ -200,7 +210,10 @@ fn discover_tables(boot: &BootInfo, fadt: &mut Option<Fadt>, ssdts: &mut Vec<u64
                     continue;
                 };
                 match Table::parse(&bytes).and_then(Fadt::parse) {
-                    Ok(parsed) => *fadt = Some(parsed),
+                    Ok(parsed) => {
+                        *fadt = Some(parsed);
+                        FADT_ADDRESS.call_once(|| address);
+                    }
                     Err(err) => klog::warn!("invalid FADT: {err:?}"),
                 }
             }

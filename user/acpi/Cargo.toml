@@ -16,3 +16,4 @@ oceans-rt = { workspace = true, features = ["alloc"] }
 oceans-aml.workspace = true
 oceans-fs-proto.workspace = true
 oceans-window.workspace = true
+oceans-acpi.workspace = true

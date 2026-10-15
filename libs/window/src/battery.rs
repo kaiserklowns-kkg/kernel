@@ -105,6 +105,49 @@ impl Battery {
     }
 }
 
+/// The events file's name in `/system/battery` (ADR-0160).
+pub const EVENTS: &str = "events";
+
+/// What the user did to the machine (ADR-0160), as the `acpi` service
+/// writes it: the lid's state if there is one, and how many times the
+/// power button has been pressed since it started (the desktop acts on
+/// each change of the count).
+///
+/// The file is lines of `lid open` or `lid closed`, and `button N`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Events {
+    pub lid_open: Option<bool>,
+    pub button: u32,
+}
+
+impl Events {
+    pub fn parse(text: &[u8]) -> Option<Events> {
+        let text = core::str::from_utf8(text).ok()?;
+        let mut events = Events::default();
+        for line in text.lines() {
+            let mut words = line.split_ascii_whitespace();
+            match (words.next(), words.next(), words.next()) {
+                (Some("lid"), Some("open"), None) => events.lid_open = Some(true),
+                (Some("lid"), Some("closed"), None) => events.lid_open = Some(false),
+                (Some("button"), Some(n), None) => events.button = n.parse().ok()?,
+                (None, ..) => {}
+                _ => return None,
+            }
+        }
+        Some(events)
+    }
+
+    pub fn to_text(&self) -> String {
+        let mut text = String::new();
+        match self.lid_open {
+            Some(true) => text.push_str("lid open\n"),
+            Some(false) => text.push_str("lid closed\n"),
+            None => {}
+        }
+        text.push_str(&format!("button {}\n", self.button));
+        text
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +203,24 @@ mod tests {
         assert_eq!(at(15, State::Charging).warning(None), None);
         assert!(at(20, d).low());
         assert!(!at(20, State::Charging).low());
+    }
+
+    #[test]
+    fn events_lines() {
+        let e = Events {
+            lid_open: Some(false),
+            button: 3,
+        };
+        assert_eq!(Events::parse(e.to_text().as_bytes()), Some(e));
+        assert_eq!(
+            Events::parse(b"button 1\n"),
+            Some(Events {
+                lid_open: None,
+                button: 1
+            })
+        );
+        assert_eq!(Events::parse(b"lid ajar\n"), None);
+        assert_eq!(Events::parse(b"button x\n"), None);
+        assert_eq!(Events::parse(b""), Some(Events::default()));
     }
 }

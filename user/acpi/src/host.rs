@@ -70,6 +70,21 @@ impl Firmware {
         Err(HostError::Failed)
     }
 
+    /// One byte at an I/O port, if it can be read.
+    pub fn read_port(&self, port: u16) -> Option<u64> {
+        self.port(port, 1, None).ok()
+    }
+
+    /// Sends a command with no address to the EC and reads its answer
+    /// (the query command's event number, ADR-0160).
+    pub fn ec_command(&self, command: u64) -> Option<u8> {
+        let ec = self.ec?;
+        self.ec_wait(ec, IBF, false).ok()?;
+        self.port(ec.command, 1, Some(command)).ok()?;
+        self.ec_wait(ec, OBF, true).ok()?;
+        Some(self.port(ec.data, 1, None).ok()? as u8)
+    }
+
     fn ec_read(&self, address: u8) -> Result<u8, HostError> {
         let ec = self.ec.ok_or(HostError::Failed)?;
         self.ec_wait(ec, IBF, false)?;

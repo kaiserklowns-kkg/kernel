@@ -1,4 +1,4 @@
-//! acpi: the firmware's AML, read and run (ADR-0148, ADR-0153).
+//! acpi: the firmware's AML, read and run (ADR-0148, ADR-0153, ADR-0160).
 //!
 //! The DSDT and every SSDT, copied by the kernel (`FIRMWARE_TABLE`), are
 //! checked (signature, length, checksum) and read by `oceans-aml` into a
@@ -8,6 +8,10 @@
 //! there is a battery, it is read every few seconds (`_BIX`/`_BIF`,
 //! `_BST`, the adapter's `_PSR`) into `/system/battery/status`, which the
 //! desktop shows (ADR-0152).
+//!
+//! It also watches what the user does to the machine (ADR-0160, `events`):
+//! the power button, the lid and the embedded controller's events, into
+//! `/system/battery/events`.
 //!
 //! The AML runs here, in a service, not in the kernel: firmware's code is
 //! untrusted, and a fault in it ends this service, nothing else. What it
@@ -22,6 +26,7 @@
 
 extern crate alloc;
 
+mod events;
 mod host;
 
 use alloc::string::String;
@@ -33,7 +38,7 @@ use oceans_aml::eval::{Machine, RunError, Value, space};
 use oceans_aml::name::Path;
 use oceans_aml::{Namespace, Object, battery};
 use oceans_rt::{Buffer, Directory, Handle, Start};
-use oceans_window::battery::{Battery, State};
+use oceans_window::battery::{Battery, Events, State};
 
 oceans_rt::entry!(main);
 
@@ -100,13 +105,70 @@ fn main(start: Start) -> i64 {
     initialise(log, &mut machine, &devices);
     connect_ec(log, &mut machine, &found);
 
-    let batteries = kind(&found, "battery");
-    let adapters = kind(&found, "AC adapter");
-    if batteries.is_empty() {
+    // The power button and the lid (ADR-0160): the FADT says where the
+    // fixed button is; the firmware hands its events over in ACPI mode.
+    let fadt = fadt(firmware);
+    let pm1 = fadt.as_ref().and_then(|fadt| {
+        if !events::enable_acpi_mode(machine.host(), fadt) {
+            say(
+                log,
+                format_args!("acpi: the firmware did not enter ACPI mode"),
+            );
+        }
+        events::Pm1::new(fadt, machine.host())
+    });
+    let watched = Watched {
+        batteries: kind(&found, "battery"),
+        adapters: kind(&found, "AC adapter"),
+        lids: kind(&found, "lid"),
+        buttons: kind(&found, "power button"),
+        ec: machine
+            .host()
+            .ec
+            .and_then(|_| kind(&found, "embedded controller").into_iter().next()),
+        pm1,
+    };
+    if watched.batteries.is_empty() {
         say(log, format_args!("acpi: no battery on this machine"));
+    }
+    say(
+        log,
+        format_args!(
+            "acpi: watching: power button {}, lid {}, embedded controller {}",
+            if watched.pm1.is_some() {
+                "fixed"
+            } else if watched.buttons.is_empty() {
+                "none"
+            } else {
+                "device"
+            },
+            if watched.lids.is_empty() {
+                "none"
+            } else {
+                "yes"
+            },
+            if watched.ec.is_some() { "yes" } else { "none" },
+        ),
+    );
+    if watched.batteries.is_empty()
+        && watched.lids.is_empty()
+        && watched.pm1.is_none()
+        && watched.ec.is_none()
+    {
         return 0;
     }
-    watch(log, &mut machine, &batteries, &adapters, storage.as_ref())
+    watch(log, &mut machine, &watched, storage.as_ref())
+}
+
+/// The FADT (ADR-0160), if the kernel has one.
+fn fadt(firmware: Handle) -> Option<oceans_acpi::Fadt> {
+    let index = oceans_rt::FIRMWARE_FADT;
+    let length = oceans_rt::firmware_table(firmware, index, &mut []).ok()?;
+    let mut table = vec![0u8; length];
+    oceans_rt::firmware_table(firmware, index, &mut table).ok()?;
+    oceans_acpi::Table::parse(&table)
+        .and_then(oceans_acpi::Fadt::parse)
+        .ok()
 }
 
 fn kind(found: &[(Path, &str)], what: &str) -> Vec<Path> {
@@ -280,56 +342,137 @@ fn connect_ec(log: Handle, machine: &mut Machine<host::Firmware>, found: &[(Path
     }
 }
 
-/// Reads the batteries every few seconds, and when they notify, into
-/// `/system/battery/status`. Runs until the service is stopped.
+/// What the service watches (ADR-0153, ADR-0160).
+struct Watched {
+    batteries: Vec<Path>,
+    adapters: Vec<Path>,
+    lids: Vec<Path>,
+    buttons: Vec<Path>,
+    ec: Option<Path>,
+    pm1: Option<events::Pm1>,
+}
+
+/// How often the button, the EC and the lid are looked at; how often the
+/// lid is read when nothing notifies.
+const POLL_MS: u64 = 200;
+const LID_EVERY_MS: u64 = 1_000;
+
+/// Watches until the service is stopped: the power button and the EC's
+/// events every 200 ms, the lid every second, the batteries every 5 s,
+/// and each at once when the firmware notifies it.
 fn watch(
     log: Handle,
     machine: &mut Machine<host::Firmware>,
-    batteries: &[Path],
-    adapters: &[Path],
+    watched: &Watched,
     storage: Option<&oceans_fs_proto::Node>,
 ) -> i64 {
     let mut shown: Option<Battery> = None;
     let mut first = true;
     let mut said_error = false;
+    let mut events = Events::default();
+    // How things are at start, so that the desktop sees the first press
+    // as one.
+    write_events(storage, &events);
+    let mut since_lid = LID_EVERY_MS;
+    let mut since_battery = EVERY_MS;
     loop {
-        machine.host().notified.clear();
-        match read_batteries(machine, batteries, adapters) {
-            Ok(now) => {
-                said_error = false;
-                if now != shown || first {
-                    match now {
-                        Some(b) => say(
-                            log,
-                            format_args!("acpi: battery {}%, {}", b.percent, b.describe()),
-                        ),
-                        None => say(log, format_args!("acpi: battery not present")),
+        let (mut lid_now, mut battery_now) = (false, false);
+        // The fixed power button.
+        if watched
+            .pm1
+            .as_ref()
+            .is_some_and(|pm1| pm1.pressed(machine.host()))
+        {
+            events.button = events.button.wrapping_add(1);
+            say(log, format_args!("acpi: power button"));
+            write_events(storage, &events);
+        }
+        // The EC's events, a few at a time.
+        if let Some(ec) = &watched.ec {
+            for _ in 0..8 {
+                let Some(query) = events::ec_event(machine) else {
+                    break;
+                };
+                events::run_query(machine, ec, query);
+            }
+        }
+        // What the firmware notified: a button device, the lid, a battery.
+        let notified = core::mem::take(&mut machine.host().notified);
+        for (object, value) in &notified {
+            if watched.buttons.contains(object) && *value == STATUS_CHANGED {
+                events.button = events.button.wrapping_add(1);
+                say(log, format_args!("acpi: power button ({object})"));
+                write_events(storage, &events);
+            }
+            lid_now |= watched.lids.contains(object);
+            battery_now |= *value >= STATUS_CHANGED
+                && (watched.batteries.contains(object) || watched.adapters.contains(object));
+        }
+        // The lid.
+        if let Some(lid) = watched.lids.first()
+            && (lid_now || since_lid >= LID_EVERY_MS)
+        {
+            since_lid = 0;
+            let open = events::lid_open(machine, lid);
+            if open.is_some() && open != events.lid_open {
+                events.lid_open = open;
+                let state = if open == Some(true) { "open" } else { "closed" };
+                say(log, format_args!("acpi: lid {state}"));
+                write_events(storage, &events);
+            }
+        }
+        // The batteries.
+        if !watched.batteries.is_empty() && (battery_now || since_battery >= EVERY_MS) {
+            since_battery = 0;
+            match read_batteries(machine, &watched.batteries, &watched.adapters) {
+                Ok(now) => {
+                    said_error = false;
+                    if now != shown || first {
+                        match now {
+                            Some(b) => say(
+                                log,
+                                format_args!("acpi: battery {}%, {}", b.percent, b.describe()),
+                            ),
+                            None => say(log, format_args!("acpi: battery not present")),
+                        }
+                        write_status(storage, now.as_ref());
+                        shown = now;
+                        first = false;
                     }
-                    write_status(storage, now.as_ref());
-                    shown = now;
-                    first = false;
                 }
-            }
-            Err(error) if !said_error => {
-                said_error = true;
-                say(log, format_args!("acpi: battery not read: {error:?}"));
-            }
-            Err(_) => {}
-        }
-        // Sooner if a battery or adapter said it changed.
-        let mut waited = 0;
-        while waited < EVERY_MS {
-            oceans_rt::sleep_ms(500);
-            waited += 500;
-            if machine
-                .host()
-                .notified
-                .iter()
-                .any(|(_, value)| *value >= STATUS_CHANGED)
-            {
-                break;
+                Err(error) if !said_error => {
+                    said_error = true;
+                    say(log, format_args!("acpi: battery not read: {error:?}"));
+                }
+                Err(_) => {}
             }
         }
+        oceans_rt::sleep_ms(POLL_MS);
+        since_lid += POLL_MS;
+        since_battery += POLL_MS;
+    }
+}
+
+/// Writes what the user did (ADR-0160) for the desktop.
+fn write_events(storage: Option<&oceans_fs_proto::Node>, events: &Events) {
+    write_file(
+        storage,
+        oceans_window::battery::EVENTS,
+        events.to_text().as_bytes(),
+    );
+}
+
+fn write_file(storage: Option<&oceans_fs_proto::Node>, name: &str, bytes: &[u8]) {
+    let Some(dir) = storage else {
+        return;
+    };
+    let create = oceans_fs_proto::flags::CREATE_FILE | oceans_fs_proto::flags::WRITE;
+    if let Ok((node, kind)) = dir.open(name, create) {
+        if kind == oceans_fs_proto::Kind::File {
+            let _ = node.truncate(0);
+            let _ = node.write_all(0, bytes);
+        }
+        node.close();
     }
 }
 
@@ -401,12 +544,5 @@ fn write_status(storage: Option<&oceans_fs_proto::Node>, battery: Option<&Batter
         let _ = dir.remove(STATUS);
         return;
     };
-    let create = oceans_fs_proto::flags::CREATE_FILE | oceans_fs_proto::flags::WRITE;
-    if let Ok((node, kind)) = dir.open(STATUS, create) {
-        if kind == oceans_fs_proto::Kind::File {
-            let _ = node.truncate(0);
-            let _ = node.write_all(0, battery.to_text().as_bytes());
-        }
-        node.close();
-    }
+    write_file(storage, STATUS, battery.to_text().as_bytes());
 }

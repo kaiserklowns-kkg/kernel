@@ -57,6 +57,7 @@ oceans-install = { path = "../libs/install" }
 oceans-iwm = { path = "../libs/iwm" }
 oceans-wifi = { path = "../libs/wifi" }
 oceans-line = { path = "../libs/line" }
+oceans-acpi = { path = "../libs/acpi" }
 oceans-aml = { path = "../libs/aml" }
 oceans-ntp = { path = "../libs/ntp" }
 oceans-wpa = { path = "../libs/wpa" }
