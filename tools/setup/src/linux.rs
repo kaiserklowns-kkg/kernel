@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::linux_plan::{self, Esp, LinuxDisk};
-use crate::{efi, release};
+use crate::{efi, hardware, release};
 
 const USAGE: &str =
     "usage: sudo ./OceansSetup-linux [--from DIR] [--key HEX PUBLISHER] [--no-restart]";
@@ -89,6 +89,23 @@ fn install(args: &[String]) -> Result<(), String> {
         disk.esp.device,
         disk.esp.mount
     );
+
+    // Know before you install (ADR-0161): every device, judged by the
+    // table Oceans itself uses.
+    step("checking this PC's hardware");
+    let report = hardware::report(&pci_functions());
+    for line in &report.lines {
+        println!("  {line}");
+    }
+    let saved = std::env::current_dir().map(|dir| dir.join("oceans-hardware.txt"));
+    if let Ok(path) = saved
+        && std::fs::write(&path, report.text()).is_ok()
+    {
+        println!("    (this list is saved in {})", path.display());
+    }
+    if let Some(why) = report.assessment.refusal() {
+        return Err(format!("not installed: {why}"));
+    }
 
     step("getting the release");
     let (key, publisher) = match options.key {
@@ -350,4 +367,19 @@ fn boot_entries(esp: &Esp, installed_esp: &[u8; 16]) -> Result<(), String> {
         "    Boot{oceans:04X} \"Oceans\" first; Boot{installer:04X} \"Oceans Setup\" for the next start"
     );
     Ok(())
+}
+
+/// Every PCI function Linux lists (`/sys/bus/pci/devices/*`).
+fn pci_functions() -> Vec<oceans_hardware::assess::Function> {
+    let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let field = |name: &str| std::fs::read_to_string(path.join(name)).ok();
+            hardware::from_sysfs(&field("vendor")?, &field("device")?, &field("class")?)
+        })
+        .collect()
 }

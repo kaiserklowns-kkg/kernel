@@ -6,6 +6,8 @@
 
 #![no_std]
 
+pub mod assess;
+
 /// CPUID leaves as `sysreport` reads them: `(eax, ebx, ecx, edx)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cpuid {

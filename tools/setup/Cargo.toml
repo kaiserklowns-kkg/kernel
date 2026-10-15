@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 oceans-dev = { path = "../oceans" }
 oceans-install.workspace = true
+# Knowing the hardware before installing (ADR-0161): the table Oceans uses.
+oceans-hardware.workspace = true
 oceans-package.workspace = true
 
 [target.'cfg(windows)'.dependencies]

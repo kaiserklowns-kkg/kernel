@@ -781,6 +781,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "oceans-dev",
+ "oceans-hardware",
  "oceans-install",
  "oceans-package",
  "windows-sys 0.59.0",

@@ -5,7 +5,10 @@ tiers are defined in [support-tiers.md](support-tiers.md).
 
 The device rows below are checked against what the system itself reports
 (`libs/hardware`, the table `sysreport` uses), so this page and the system
-cannot disagree.
+cannot disagree. Oceans Setup judges a PC by the same table before it
+erases anything (ADR-0161): it lists what works, what works only through
+the firmware and what will not, refuses a PC whose storage controller
+Oceans cannot drive, and saves the list as `oceans-hardware.txt`.
 
 ## The Tier 1 list
 

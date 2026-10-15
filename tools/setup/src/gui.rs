@@ -12,7 +12,7 @@ use windows_sys::Win32::UI::Controls::{EM_REPLACESEL, EM_SETSEL};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::{plan, release, windows};
+use crate::{hardware, plan, release, windows};
 
 const BUTTON: isize = 1;
 /// A log line (a boxed `String` in `lparam`).
@@ -147,10 +147,34 @@ fn check(poster: Poster, state: &Mutex<State>) -> usize {
         return FAILED;
     }
     poster.say(&format!(
-        "  UEFI, Secure Boot off, Windows on {} ({} GB, NVMe): Oceans can be installed.",
+        "  UEFI, Secure Boot off, Windows on {} ({} GB, NVMe).",
         disk.model,
         disk.size / 1_000_000_000
     ));
+    // Know before you install (ADR-0161): every device, judged by the
+    // table Oceans itself uses; kept beside Oceans Setup as a text file.
+    poster.say("Checking this PC's hardware...");
+    let functions: Vec<_> = windows::powershell(hardware::WINDOWS_PCI_SCRIPT)
+        .map(|text| {
+            text.lines()
+                .filter_map(hardware::from_windows_ids)
+                .collect()
+        })
+        .unwrap_or_default();
+    let report = hardware::report(&functions);
+    for line in &report.lines {
+        poster.say(line);
+    }
+    if let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("oceans-hardware.txt")))
+        && std::fs::write(&path, report.text()).is_ok()
+    {
+        poster.say(&format!("  (this list is saved in {})", path.display()));
+    }
+    if report.assessment.refusal().is_some() {
+        return FAILED;
+    }
     state.lock().expect("state").disk = Some(disk);
     DOWNLOAD
 }

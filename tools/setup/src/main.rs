@@ -33,6 +33,9 @@ mod efi;
 mod gui;
 #[cfg(target_os = "linux")]
 mod linux;
+// Checked on Windows and Linux; elsewhere only its tests run.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+mod hardware;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod linux_plan;
 #[cfg_attr(not(windows), allow(dead_code))]

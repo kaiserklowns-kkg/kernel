@@ -284,7 +284,7 @@ items as follows:
 |---|---|---|
 | WP-1 Promises + idle-network check | [0146](../adr/0146-promises-to-the-user.md) | done |
 | WP-2 Privacy & Permissions | [0156](../adr/0156-privacy.md) | done (exact use per app still open) |
-| WP-3 Hardware check in Setup | — | planned |
+| WP-3 Hardware check in Setup | [0161](../adr/0161-know-before-you-install.md) | done |
 | WP-4 Updates from Settings | [0158](../adr/0158-updates-from-settings.md) | done |
 | WP-5 Driver comes back | — | planned |
 | WP-6 Reproducible releases | — | planned |
