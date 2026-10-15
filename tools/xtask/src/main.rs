@@ -783,6 +783,19 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"rm /system/wifi/ssid\r\n",
     b"rm /system/wifi/password\r\n",
     b"rm /system/wifi/scan\r\n",
+    // The battery (ADR-0152), with the shell in the place of what reads it
+    // (QEMU's machine has none): its status file makes the desktop show it
+    // in the top bar and in Control Center, its card after Settings, its
+    // gauge (from 989,302) filled to 64 % in the accent. The file gone, it
+    // goes.
+    b"write /system/battery/status 64 discharging 150\r\n",
+    b"@wait desktop: battery 64%, 2:30 left",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 1000 312 2f7cf6 Control Center's battery",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"rm /system/battery/status\r\n",
     // Keeping apps in Wave (ADR-0109, ADR-0117): Super and "calc"; a right
     // click on the first result (its row from 340,124) keeps Calculator;
     // Escape. With no window open Wave holds the Terminal and Calculator:
@@ -1199,7 +1212,10 @@ const REBOOT_EXPECT: &[Expect] = &[
     Expect::Line("  docs/"),
     Expect::Line("  bin/"),
     Expect::Contains("write: /bin/evil: permission denied"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 25)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 27)"),
+    // What kind of machine (ADR-0152): QEMU's says nothing and names no
+    // battery or lid.
+    Expect::Contains("ACPI: power profile 0, battery none, lid none: not portable"),
     // The NIC is an 82574L: virtio-net's device is absent, so init cannot
     // start it, and e1000e's endpoint is the stack's `netdev`.
     Expect::Contains("init: cannot start netdev: "),
@@ -1367,7 +1383,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Line("hello-client exited with 0"),
     Expect::Contains("crasher was killed by CPU exception 14"),
     Expect::Contains("run: use:nothing: this shell does not hold it"),
-    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 25)"),
+    Expect::Contains("Oceans 0.1.0 x86_64 (ABI 27)"),
     // The clock (ADR-0143): the host's two test time servers agree, 90 s
     // ahead, so the clock service sets the clock through the kernel.
     Expect::Contains("clock: set from network time, "),

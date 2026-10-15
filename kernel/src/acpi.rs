@@ -5,14 +5,16 @@
 //! Parsing and validation live in `oceans-acpi`; this module only reads the
 //! physical tables. Only what the kernel needs is used: the I/O APICs, the
 //! ISA interrupt overrides, the ECAM regions and the power registers. No
-//! AML is interpreted: the DSDT and SSDTs are only searched for `\_S5`.
+//! AML is interpreted: the DSDT and SSDTs are only searched for `\_S5`
+//! and for the devices a laptop has, a battery and a lid (ADR-0152).
 
 use alloc::vec;
 use alloc::vec::Vec;
 
+use oceans_abi::sysinfo::PowerRecord;
 use oceans_acpi::{
-    AcpiError, EcamRegion, Fadt, Madt, MadtEntry, RootTable, SDT_HEADER_LEN, Table, mcfg_regions,
-    parse_rsdp, root_entries, sleep_type, table_length,
+    AcpiError, BATTERY_ID, EcamRegion, Fadt, LID_ID, Madt, MadtEntry, RootTable, SDT_HEADER_LEN,
+    Table, declares_device, mcfg_regions, parse_rsdp, root_entries, sleep_type, table_length,
 };
 
 use crate::boot::BootInfo;
@@ -76,37 +78,68 @@ impl Acpi {
     }
 }
 
-/// Reads and validates the tables, and tells `power` how this machine
-/// switches off. `None` (logged) if the firmware has no usable ACPI.
+/// Reads and validates the tables, tells `power` how this machine
+/// switches off, and notes what kind of machine it is (ADR-0152). `None`
+/// (logged) if the firmware has no usable ACPI.
 pub fn discover(boot: &BootInfo) -> Option<Acpi> {
     let mut fadt = None;
     let mut ssdts = Vec::new();
     let acpi = discover_tables(boot, &mut fadt, &mut ssdts);
-    let types = fadt.as_ref().and_then(|fadt: &Fadt| {
-        let dsdt = (fadt.dsdt != 0).then_some(fadt.dsdt);
-        dsdt.into_iter()
-            .chain(ssdts.iter().copied())
-            .find_map(sleep_type_s5)
-    });
+    let mut types = None;
+    let mut record = PowerRecord {
+        pm_profile: fadt.as_ref().map_or(0, |fadt: &Fadt| fadt.pm_profile),
+        ..PowerRecord::default()
+    };
+    let dsdt = fadt
+        .as_ref()
+        .and_then(|fadt| (fadt.dsdt != 0).then_some(fadt.dsdt));
+    for address in dsdt.into_iter().chain(ssdts.iter().copied()) {
+        let Some(bytes) = read_table_up_to(address, MAX_AML) else {
+            continue;
+        };
+        let Some(body) = definition_block(address, &bytes) else {
+            continue;
+        };
+        types = types.or_else(|| sleep_type(body, *b"_S5_"));
+        record.battery |= declares_device(body, BATTERY_ID);
+        record.lid |= declares_device(body, LID_ID);
+    }
     power::init(fadt.as_ref(), types);
+    klog::info!(
+        "ACPI: power profile {}, battery {}, lid {}: {}",
+        record.pm_profile,
+        if record.battery { "named" } else { "none" },
+        if record.lid { "named" } else { "none" },
+        if record.portable() {
+            "portable"
+        } else {
+            "not portable"
+        },
+    );
+    POWER_RECORD.call_once(|| record);
     acpi
 }
 
-/// The `\_S5` sleep types of the definition block at `address`, if it has
-/// them.
-fn sleep_type_s5(address: u64) -> Option<(u8, u8)> {
-    let bytes = read_table_up_to(address, MAX_AML)?;
-    let body = match Table::parse(&bytes) {
-        Ok(table) => table.body(),
-        // Firmware ships DSDTs with wrong checksums; the search is
-        // bounds-checked and its result cut to 3 bits, so it still runs.
+/// What kind of machine this is (ADR-0152), as `SYSTEM_INFO` `POWER`
+/// says; all zeros without ACPI.
+static POWER_RECORD: spin::Once<PowerRecord> = spin::Once::new();
+
+pub fn power_record() -> PowerRecord {
+    POWER_RECORD.get().copied().unwrap_or_default()
+}
+
+/// The AML of the definition block at `address` (its bytes in `bytes`).
+fn definition_block(address: u64, bytes: &[u8]) -> Option<&[u8]> {
+    match Table::parse(bytes) {
+        Ok(table) => Some(table.body()),
+        // Firmware ships DSDTs with wrong checksums; the searches are
+        // bounds-checked and their results small, so they still run.
         Err(AcpiError::BadChecksum) => {
             klog::warn!("ACPI: definition block at {address:#x} has a bad checksum");
-            &bytes[SDT_HEADER_LEN..]
+            bytes.get(SDT_HEADER_LEN..)
         }
-        Err(_) => return None,
-    };
-    sleep_type(body, *b"_S5_")
+        Err(_) => None,
+    }
 }
 
 fn discover_tables(boot: &BootInfo, fadt: &mut Option<Fadt>, ssdts: &mut Vec<u64>) -> Option<Acpi> {

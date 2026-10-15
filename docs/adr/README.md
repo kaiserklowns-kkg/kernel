@@ -157,6 +157,7 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0149](0149-desktop-at-first-sight.md) | The desktop at first sight: the Terminal put away at start (Wave, Launchpad or Ctrl+Tab bring it), Control Center's network button named and drawn for Wi-Fi or Ethernet as the top bar shows it | Accepted |
 | [0150](0150-control-center-glass-and-bangkok-time.md) | Control Center in frosted glass (`Canvas::frost`), its cards laid out as macOS has them; Bangkok's time zone (`DEFAULT_TIME_ZONE`, UTC+7) until one is chosen | Accepted |
 | [0151](0151-control-center-you-arrange.md) | Control Center you arrange: Edit Controls, badges, a gallery and dragging on macOS's four-cell grid (`layout::pack`); each account's own, kept by Core (`CONTROLS`, `SET_CONTROLS`); frosted glass not blurred again over the same background | Accepted |
+| [0152](0152-laptop-or-desktop.md) | A laptop or a desktop (ABI 27: `SYSTEM_INFO` `POWER`, the FADT's power profile and the battery and lid the AML names); the battery in the top bar and Control Center on a laptop, from `/system/battery/status`; init's `storage:/PATH as NAME` | Accepted |
 | [0155](0155-legibility.md) | Legibility: Increase contrast and Reduce transparency in Settings → Appearance (`theme::Options`; `APPEARANCE` answers 3 bytes, `kind::THEME`'s `x`), the top bar solid; a WCAG test over every design value | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

@@ -18,19 +18,23 @@ pub const LAUNCHPAD: u8 = 9;
 pub const NOTIFICATIONS: u8 = 10;
 /// The administrator's console (ADR-0115): offered only to it.
 pub const TERMINAL: u8 = 11;
+/// The battery (ADR-0152): shown only on a laptop.
+pub const BATTERY: u8 = 12;
 /// How many there are: every id is below.
-pub const COUNT: u8 = 12;
+pub const COUNT: u8 = 13;
 
 /// What Control Center shows until the account chooses, as macOS's
 /// starts: the network and what plays at the top, then Dark Mode, the
-/// keyboard, Lock Screen and Settings, then the sliders.
-pub const DEFAULT: [u8; 8] = [
+/// keyboard, Lock Screen and Settings, the battery on a laptop, then the
+/// sliders.
+pub const DEFAULT: [u8; 9] = [
     NETWORK,
     NOW_PLAYING,
     DARK_MODE,
     KEYBOARD,
     LOCK_SCREEN,
     SETTINGS,
+    BATTERY,
     DISPLAY,
     SOUND,
 ];

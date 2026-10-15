@@ -1024,6 +1024,12 @@ fn system_info(process: &Process, raw: u64, kind: u64, ptr: u64, capacity: u64) 
                 bytes.extend_from_slice(&encoded);
             }
         }
+        // What kind of machine this is (ABI 27, ADR-0152).
+        sysinfo::POWER => {
+            let mut record = [0u8; sysinfo::PowerRecord::SIZE];
+            crate::acpi::power_record().encode(&mut record);
+            bytes.extend_from_slice(&record);
+        }
         // How this boot was started (ABI 17, ADR-0122).
         sysinfo::BOOT => {
             let info = crate::boot::info();

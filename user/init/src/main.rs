@@ -130,7 +130,8 @@ enum Grant {
     Module(&'static str),
     /// A directory of the filesystem (`storage:/PATH`, ADR-0053), created
     /// if missing, opened writable and handed over as `use storage`: the
-    /// service's own files and nothing else.
+    /// service's own files and nothing else. `storage:/PATH as NAME`
+    /// (ADR-0152) names it `NAME`, for a service with more than one.
     Storage(&'static str),
     /// Asking init to switch the machine off or restart it (ADR-0085).
     Power,
@@ -465,9 +466,10 @@ fn parse(text: &'static str, services: &mut [Service]) -> Result<usize, (usize, 
                         {
                             Grant::Module(module)
                         } else if let Some(path) = other.strip_prefix("storage:") {
-                            if !valid_storage_path(path) {
+                            let (dir, alias) = storage_parts(path);
+                            if !valid_storage_path(dir) || alias.is_empty() {
                                 return error(
-                                    "storage grants are storage:/DIR[/DIR...] (plain names)",
+                                    "storage grants are storage:/DIR[/DIR...] [as NAME] (plain names)",
                                 );
                             }
                             Grant::Storage(path)
@@ -684,9 +686,10 @@ impl Init {
                         let module = self.module(name).ok_or(Error::InvalidImage)?;
                         (oceans_rt::duplicate(module, MODULE_RIGHTS)?, "module", name)
                     }
-                    Grant::Storage(path) => {
+                    Grant::Storage(value) => {
+                        let (path, alias) = storage_parts(value);
                         let fs = self.registry.get("fs").ok_or(Error::NotFound)?;
-                        (open_storage(fs, path)?, "use", "storage")
+                        (open_storage(fs, path)?, "use", alias)
                     }
                     Grant::Power => (
                         oceans_rt::duplicate(self.power, USE_RIGHTS)?,
@@ -993,6 +996,15 @@ fn use_parts(value: &'static str) -> (&'static str, &'static str) {
     match value.split_once(" as ") {
         Some((name, alias)) => (name.trim(), alias.trim()),
         None => (value, value),
+    }
+}
+
+/// A storage grant's directory and the name it is handed over as:
+/// `storage` unless `as NAME` says otherwise (ADR-0152).
+fn storage_parts(value: &'static str) -> (&'static str, &'static str) {
+    match value.split_once(" as ") {
+        Some((path, alias)) => (path.trim(), alias.trim()),
+        None => (value, "storage"),
     }
 }
 

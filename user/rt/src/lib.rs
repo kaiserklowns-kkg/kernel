@@ -860,6 +860,15 @@ pub fn boot_mode(sysinfo: Handle) -> u64 {
         .map_or(mode::NORMAL, |boot| boot.mode)
 }
 
+/// What kind of machine this is (ABI 27, ADR-0152): a laptop or not, as
+/// ACPI says; `None` on an older kernel.
+pub fn power_record(sysinfo: Handle) -> Option<oceans_abi::sysinfo::PowerRecord> {
+    use oceans_abi::sysinfo::{POWER, PowerRecord};
+    let mut record = [0u8; PowerRecord::SIZE];
+    let len = system_info(sysinfo, POWER, &mut record).ok()?;
+    PowerRecord::decode(&record[..len.min(PowerRecord::SIZE)])
+}
+
 /// The GPT partition the kernel was loaded from (ABI 20, ADR-0126), as
 /// stored on disk; `None` if unknown or not a GPT partition.
 pub fn boot_partition(sysinfo: Handle) -> Option<[u8; 16]> {

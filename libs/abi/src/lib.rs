@@ -33,9 +33,10 @@
 /// desktop); 23 = ADR-0136 (`DISPLAY_INFO`'s record ends with the screen's
 /// size in millimetres, from its EDID); 24 = ADR-0143 (51: setting the
 /// wall clock); 25 = ADR-0146 (`DEBUG_WRITE`'s `level`: lines for the
-/// serial line only, never kept). Versions only add; existing numbers
-/// keep their meaning.
-pub const ABI_VERSION: u64 = 25;
+/// serial line only, never kept); 27 = ADR-0152 (the `POWER` kind of
+/// `SYSTEM_INFO`: a laptop or not; 26 is ADR-0148's). Versions only add;
+/// existing numbers keep their meaning.
+pub const ABI_VERSION: u64 = 27;
 
 /// System call numbers.
 pub mod nr {
@@ -686,6 +687,9 @@ pub mod sysinfo {
     pub const PROCESSES: u64 = 3;
     /// A [`BootRecord`] (ABI 17, ADR-0122): how this boot was started.
     pub const BOOT: u64 = 4;
+    /// A [`PowerRecord`] (ABI 27, ADR-0152): what kind of machine this
+    /// is, as ACPI says.
+    pub const POWER: u64 = 5;
 
     fn put(out: &mut [u8], at: usize, value: u64) {
         out[at..at + 8].copy_from_slice(&value.to_le_bytes());
@@ -844,6 +848,48 @@ pub mod sysinfo {
                 record.partition.copy_from_slice(&rest[16..]);
             }
             Some(record)
+        }
+    }
+
+    /// What kind of machine this is (ABI 27, ADR-0152), from ACPI: the
+    /// FADT's preferred power profile (`oceans_acpi::pm_profile`) and
+    /// whether the firmware's AML names a battery (`PNP0C0A`) and a lid
+    /// (`PNP0C0D`). The desktop shows a battery on a portable one.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct PowerRecord {
+        pub pm_profile: u8,
+        pub battery: bool,
+        pub lid: bool,
+    }
+
+    impl PowerRecord {
+        pub const SIZE: usize = 8;
+
+        /// A laptop or a tablet: the firmware says so, or, where it says
+        /// nothing, it has both a battery and a lid. (Desktops' firmware
+        /// often names a battery it does not have.)
+        pub fn portable(&self) -> bool {
+            match self.pm_profile {
+                2 | 8 => true,
+                0 => self.battery && self.lid,
+                _ => false,
+            }
+        }
+
+        pub fn encode(&self, out: &mut [u8; Self::SIZE]) {
+            *out = [0; Self::SIZE];
+            out[0] = self.pm_profile;
+            out[1] = u8::from(self.battery);
+            out[2] = u8::from(self.lid);
+        }
+
+        pub fn decode(bytes: &[u8]) -> Option<Self> {
+            let bytes = bytes.get(..Self::SIZE)?;
+            Some(Self {
+                pm_profile: bytes[0],
+                battery: bytes[1] != 0,
+                lid: bytes[2] != 0,
+            })
         }
     }
 
@@ -1063,6 +1109,39 @@ mod tests {
                 ..BootRecord::default()
             })
         );
+    }
+
+    #[test]
+    fn power_records_say_portable() {
+        use super::sysinfo::PowerRecord;
+        let laptop = PowerRecord {
+            pm_profile: 2,
+            battery: true,
+            lid: true,
+        };
+        let mut out = [0u8; PowerRecord::SIZE];
+        laptop.encode(&mut out);
+        assert_eq!(PowerRecord::decode(&out), Some(laptop));
+        assert!(laptop.portable());
+        let desktop_naming_a_battery = PowerRecord {
+            pm_profile: 1,
+            battery: true,
+            lid: false,
+        };
+        assert!(!desktop_naming_a_battery.portable());
+        let silent = PowerRecord {
+            pm_profile: 0,
+            ..laptop
+        };
+        assert!(silent.portable());
+        assert!(
+            !PowerRecord {
+                lid: false,
+                ..silent
+            }
+            .portable()
+        );
+        assert_eq!(PowerRecord::decode(&out[..4]), None);
     }
 
     #[test]

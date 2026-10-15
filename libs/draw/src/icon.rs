@@ -6,7 +6,7 @@
 //!
 //! They follow the shapes people know from other systems, so they read at
 //! a glance: Wi-Fi's fan, Ethernet's ports, a speaker with waves, a bell,
-//! two switches for Control Center, a person.
+//! two switches for Control Center, a person, a battery.
 
 use core::f32::consts::PI;
 
@@ -442,3 +442,45 @@ mod more_tests {
         }
     }
 }
+
+/// The battery (ADR-0152): a rounded case and its terminal in `ink`,
+/// filled from the left as far as `percent` in `level`; charging, a bolt
+/// in `ink` over it.
+pub fn battery(s: &mut Surface<'_>, r: Rect, percent: u8, charging: bool, ink: Rgb, level: Rgb) {
+    let g = Grid::new(r);
+    let u = g.u;
+    // The case: an outline, its inside cut away.
+    let mut case = Path::new();
+    g.round_rect(&mut case, 1.0, 6.5, 19.5, 11.0, 3.0);
+    let mut inside = Path::new();
+    inside.round_rect(2.6 * u, 8.1 * u, 16.3 * u, 7.8 * u, 1.8 * u);
+    reverse_into(&mut case, &inside);
+    g.round_rect(&mut case, 21.3, 10.0, 1.9, 4.0, 0.9);
+    g.fill(s, &case, ink);
+    // The charge.
+    let full = 13.9 * f32::from(percent.min(100)) / 100.0;
+    if full > 0.4 {
+        let mut fill = Path::new();
+        g.round_rect(&mut fill, 3.8, 9.3, full.max(1.2), 5.4, 1.0);
+        g.fill(s, &fill, level);
+    }
+    if charging {
+        let mut bolt = Path::new();
+        bolt.move_to(BOLT[0].0 * u, BOLT[0].1 * u);
+        for &(x, y) in &BOLT[1..] {
+            bolt.line_to(x * u, y * u);
+        }
+        bolt.close();
+        g.fill(s, &bolt, ink);
+    }
+}
+
+/// A lightning bolt across the battery's middle.
+const BOLT: [(f32, f32); 6] = [
+    (12.6, 5.0),
+    (7.6, 12.6),
+    (10.6, 12.6),
+    (9.4, 19.0),
+    (14.4, 11.2),
+    (11.4, 11.2),
+];

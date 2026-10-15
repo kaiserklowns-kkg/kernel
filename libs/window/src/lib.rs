@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+pub mod battery;
 pub mod dock;
 pub mod layout;
 pub mod proto;

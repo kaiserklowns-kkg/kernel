@@ -140,6 +140,8 @@ struct Service {
     net_reader: Option<Handle>,
     /// Wi-Fi's files (ADR-0130): `/system/wifi`, granted as storage.
     wifi_dir: Option<oceans_fs_proto::Node>,
+    /// `/system/battery` (ADR-0152): where the battery's status is.
+    battery_dir: Option<oceans_fs_proto::Node>,
     wifi_refreshed_ms: u64,
     /// When the desktop started, and whether it told Core this boot
     /// finished (ADR-0122).
@@ -305,6 +307,7 @@ fn main(start: Start) -> i64 {
         power: directory.find("power", "power"),
         net_reader: None,
         wifi_dir: directory.find("use", "storage").map(oceans_fs_proto::Node),
+        battery_dir: directory.find("use", "battery").map(oceans_fs_proto::Node),
         wifi_refreshed_ms: 0,
         started_ms: oceans_rt::clock_ms(),
         boot_reported: false,
@@ -348,6 +351,11 @@ fn main(start: Start) -> i64 {
     service.apply_scale(&mut canvas);
     service.refresh_layout();
     service.refresh_controls();
+    service.desktop.portable = service
+        .sysinfo
+        .and_then(oceans_rt::power_record)
+        .is_some_and(|power| power.portable());
+    service.refresh_battery();
     service.refresh_volume();
     service.refresh_network();
     service.show_mode();
@@ -439,6 +447,7 @@ fn main(start: Start) -> i64 {
                 dirty |= service.refresh_apps();
                 dirty |= service.refresh_user();
                 dirty |= service.refresh_appearance();
+                dirty |= service.refresh_battery();
                 if service.refresh_time_zone() {
                     dirty |= service.refresh_clock();
                 }
@@ -652,13 +661,7 @@ impl Service {
                 if pressed
                     && self.desktop.volume_open
                     && !self.desktop.over_control_center(w, x, y)
-                    && ![
-                        desktop::ICON_CONTROL,
-                        desktop::ICON_NETWORK,
-                        desktop::ICON_SPEAKER,
-                    ]
-                    .iter()
-                    .any(|&i| desktop::status_icon(w, i).contains(x, y))
+                    && !self.desktop.over_status_opener(w, x, y)
                 {
                     self.desktop.volume_open = false;
                     self.end_editing_controls();
@@ -2108,6 +2111,43 @@ impl Service {
             self.desktop.control_drag = None;
             say(self.log, format_args!("desktop: Control Center edited"));
         }
+    }
+
+    /// The battery from `/system/battery/status` (ADR-0152); `true` if
+    /// what shows changed. Down to a warning level while discharging, it
+    /// says so.
+    fn refresh_battery(&mut self) -> bool {
+        use oceans_window::battery::{Battery, STATUS};
+        let read = self.battery_dir.as_ref().and_then(|dir| {
+            let (node, kind) = dir.open(STATUS, 0).ok()?;
+            let mut data = [0u8; 64];
+            let len = (kind == oceans_fs_proto::Kind::File)
+                .then(|| node.read(0, &mut data).ok())
+                .flatten();
+            node.close();
+            Battery::parse(&data[..len?])
+        });
+        if read == self.desktop.battery {
+            return false;
+        }
+        if let Some(battery) = read {
+            if let Some(level) = battery.warning(self.desktop.battery.as_ref()) {
+                self.toast(
+                    alloc::format!("Battery low: {level}% left. Plug in the charger."),
+                    true,
+                );
+            }
+            say(
+                self.log,
+                format_args!(
+                    "desktop: battery {}%, {}",
+                    battery.percent,
+                    battery.describe()
+                ),
+            );
+        }
+        self.desktop.battery = read;
+        true
     }
 
     /// A key while Launchpad is open (ADR-0108): typed into the

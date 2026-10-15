@@ -329,6 +329,8 @@ const FADT_X_DSDT: usize = 140;
 const FADT_X_PM1A_CNT: usize = 172;
 const FADT_X_PM1B_CNT: usize = 184;
 const FADT_SLEEP_CONTROL: usize = 244;
+/// Preferred_PM_Profile (ACPI 6.5 §5.2.9): what kind of machine it is.
+const FADT_PM_PROFILE: usize = 45;
 /// The shortest FADT (ACPI 1.0) ends after the flags.
 const FADT_V1_LEN: usize = 116;
 const FLAG_RESET_REG_SUP: u32 = 1 << 10;
@@ -353,6 +355,9 @@ pub struct Fadt {
     /// `sleep_control`.
     pub hardware_reduced: bool,
     pub sleep_control: Option<GenericAddress>,
+    /// The firmware's preferred power profile ([`pm_profile`]): a desktop,
+    /// a laptop ("mobile"), a server...
+    pub pm_profile: u8,
 }
 
 impl Fadt {
@@ -392,6 +397,7 @@ impl Fadt {
             reset,
             hardware_reduced: flags & FLAG_HW_REDUCED_ACPI != 0,
             sleep_control: GenericAddress::at(bytes, FADT_SLEEP_CONTROL),
+            pm_profile: bytes[FADT_PM_PROFILE],
         })
     }
 }
@@ -460,6 +466,56 @@ fn aml_integer(bytes: &mut &[u8]) -> Option<u64> {
     };
     *bytes = &rest[used..];
     Some(value)
+}
+
+/// Preferred_PM_Profile values (ACPI 6.5 §5.2.9) that the desktop tells
+/// apart (ADR-0152).
+pub mod pm_profile {
+    pub const UNSPECIFIED: u8 = 0;
+    pub const DESKTOP: u8 = 1;
+    /// A laptop.
+    pub const MOBILE: u8 = 2;
+    pub const WORKSTATION: u8 = 3;
+    pub const TABLET: u8 = 8;
+}
+
+/// Plug-and-play ids of the devices a portable machine has (ADR-0152).
+pub const BATTERY_ID: &str = "PNP0C0A";
+pub const LID_ID: &str = "PNP0C0D";
+
+/// A plug-and-play id (`PNP0C0A`: three letters, four hex digits) as AML
+/// encodes it with `EisaId`: the letters in five bits each, then the
+/// digits, big-endian, the integer stored little-endian.
+pub fn eisa_id(id: &str) -> Option<u32> {
+    let b = id.as_bytes();
+    if b.len() != 7 || !b[..3].iter().all(u8::is_ascii_uppercase) {
+        return None;
+    }
+    let letters = b[..3]
+        .iter()
+        .fold(0u32, |v, &c| (v << 5) | u32::from(c - b'@'));
+    let digits = u32::from_str_radix(core::str::from_utf8(&b[3..]).ok()?, 16).ok()?;
+    let value = (letters << 16) | digits;
+    // AML keeps the bytes in the order they were written.
+    Some(value.swap_bytes())
+}
+
+/// Whether a definition block's AML names a device with plug-and-play id
+/// `id`, as `EisaId ("PNP0C0A")` or the string `"PNP0C0A"`. A search of
+/// the bytes, not an interpretation: a device that `_STA` says is absent
+/// still counts.
+pub fn declares_device(aml: &[u8], id: &str) -> bool {
+    const DWORD_PREFIX: u8 = 0x0c;
+    const STRING_PREFIX: u8 = 0x0d;
+    let Some(eisa) = eisa_id(id) else {
+        return false;
+    };
+    let mut encoded = [DWORD_PREFIX, 0, 0, 0, 0];
+    encoded[1..].copy_from_slice(&eisa.to_le_bytes());
+    let mut text = [0u8; 9];
+    text[0] = STRING_PREFIX;
+    text[1..8].copy_from_slice(id.as_bytes());
+    aml.windows(encoded.len()).any(|w| w == encoded) || aml.windows(text.len()).any(|w| w == text)
 }
 
 /// MPS INTI flags: active low polarity.
@@ -719,6 +775,30 @@ mod tests {
         );
         assert!(parsed.hardware_reduced);
         assert_eq!(parsed.sleep_control.unwrap().address, 0x1004);
+    }
+
+    #[test]
+    fn finds_portable_devices() {
+        assert_eq!(
+            eisa_id(BATTERY_ID).map(u32::to_le_bytes),
+            Some([0x41, 0xd0, 0x0c, 0x0a])
+        );
+        assert_eq!(eisa_id("pnp0c0a"), None);
+        assert_eq!(eisa_id("PNP0C0"), None);
+        // Device (BAT0) { Name (_HID, EisaId ("PNP0C0A")) ... }
+        let battery = [
+            0x5b, 0x82, 0x10, b'B', b'A', b'T', b'0', 0x08, b'_', b'H', b'I', b'D', 0x0c, 0x41,
+            0xd0, 0x0c, 0x0a,
+        ];
+        assert!(declares_device(&battery, BATTERY_ID));
+        assert!(!declares_device(&battery, LID_ID));
+        // Name (_HID, "PNP0C0D")
+        let mut lid = [0u8; 15];
+        lid[..5].copy_from_slice(&[0x08, b'_', b'H', b'I', b'D']);
+        lid[5] = 0x0d;
+        lid[6..13].copy_from_slice(b"PNP0C0D");
+        assert!(declares_device(&lid, LID_ID));
+        assert!(!declares_device(&[], LID_ID));
     }
 
     #[test]

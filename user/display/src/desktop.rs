@@ -376,6 +376,11 @@ pub struct Desktop {
     pub controls: Vec<u8>,
     pub editing_controls: bool,
     pub control_drag: Option<u8>,
+    /// A laptop (ADR-0152), as ACPI says: the top bar and Control Center
+    /// show the battery. And the battery, as `/system/battery/status`
+    /// says, once something reads it.
+    pub portable: bool,
+    pub battery: Option<oceans_window::battery::Battery>,
 }
 
 /// An app's notification (ADR-0065, ADR-0119), kept for its panel: the
@@ -571,6 +576,14 @@ pub fn layout_button(width: i32) -> Rect {
     Rect::new(speaker.x - 8 - 32, 2, 32, MENU_HEIGHT - 4)
 }
 
+/// The battery in the top bar (ADR-0152), on a laptop: its charge and
+/// its picture, left of the keyboard layout. A click opens Control
+/// Center, where the battery's card is.
+pub fn battery_button(width: i32) -> Rect {
+    let layout = layout_button(width);
+    Rect::new(layout.x - 6 - 64, 2, 64, MENU_HEIGHT - 4)
+}
+
 /// The bell at the top bar's right end (ADR-0119, ADR-0121): it opens the
 /// notifications, its count of new ones on it.
 pub fn bell_button(width: i32) -> Rect {
@@ -668,7 +681,7 @@ const GALLERY_ROW: i32 = 44;
 pub fn control_span(id: u8) -> (i32, i32) {
     match id {
         controls::NOW_PLAYING => (2, 2),
-        controls::DISPLAY | controls::SOUND => (4, 1),
+        controls::DISPLAY | controls::SOUND | controls::BATTERY => (4, 1),
         controls::NETWORK | controls::DARK_MODE | controls::KEYBOARD => (2, 1),
         _ => (1, 1),
     }
@@ -688,6 +701,7 @@ pub fn control_name(id: u8) -> &'static str {
         controls::ACCENT => "Accent",
         controls::LAUNCHPAD => "Launchpad",
         controls::NOTIFICATIONS => "Notifications",
+        controls::BATTERY => "Battery",
         _ => "Terminal",
     }
 }
@@ -792,6 +806,7 @@ impl Desktop {
         match id {
             controls::DISPLAY => self.brightness.is_some(),
             controls::TERMINAL => self.admin,
+            controls::BATTERY => self.battery_shown(),
             _ => id < controls::COUNT,
         }
     }
@@ -998,7 +1013,7 @@ pub const TOGGLE_TERMINAL: u8 = 6;
 fn hovers(id: u8) -> bool {
     !matches!(
         id,
-        controls::NOW_PLAYING | controls::DISPLAY | controls::SOUND
+        controls::NOW_PLAYING | controls::DISPLAY | controls::SOUND | controls::BATTERY
     )
 }
 
@@ -1572,11 +1587,9 @@ impl Desktop {
                 .find(|&i| user_menu_item(width, items.len(), i).contains(x, y))
                 .map_or(Hit::NoticePanel, |i| Hit::UserItem(items[i].1));
         }
-        // The other status icons open Control Center (ADR-0118).
-        if [ICON_CONTROL, ICON_NETWORK, ICON_SPEAKER]
-            .iter()
-            .any(|&i| status_icon(width, i).contains(x, y))
-        {
+        // The other status icons open Control Center (ADR-0118), and the
+        // battery (ADR-0152).
+        if self.over_status_opener(width, x, y) {
             return Hit::Volume;
         }
         let cc = self.control_center(width);
@@ -1875,6 +1888,48 @@ impl Desktop {
         let name = self.layout.short_name();
         let x = r.x + (r.w - canvas.measure(name, Font::Strong)) / 2;
         canvas.text(x, 6, name, Font::Strong, WHITE, bar);
+        // The battery on a laptop (ADR-0152): its charge, then its picture.
+        if self.battery_shown() {
+            let r = battery_button(w);
+            lit(canvas, r, false);
+            let icon_box = Rect::new(r.x + r.w - 28, r.y, 26, r.h);
+            match self.battery {
+                Some(battery) => {
+                    let text = alloc::format!("{}%", battery.percent);
+                    let tw = canvas.measure(&text, Font::Strong);
+                    canvas.text(icon_box.x - 4 - tw, 6, &text, Font::Strong, WHITE, bar);
+                    let charging = battery.state == oceans_window::battery::State::Charging;
+                    let level = if battery.low() {
+                        Rgb(0xff_3b_30)
+                    } else if charging {
+                        Rgb(0x34_c7_59)
+                    } else {
+                        WHITE
+                    };
+                    glyph(canvas, icon_box, 24, |s, g| {
+                        icon::battery(s, g, battery.percent, charging, WHITE, level)
+                    });
+                }
+                None => glyph(canvas, icon_box, 24, |s, g| {
+                    icon::battery(s, g, 0, false, BAR_FAINT, BAR_FAINT)
+                }),
+            }
+        }
+    }
+
+    /// Whether the battery shows (ADR-0152): on a laptop, or wherever its
+    /// status is known.
+    pub fn battery_shown(&self) -> bool {
+        self.portable || self.battery.is_some()
+    }
+
+    /// Whether (`x`, `y`) is on a top bar icon that opens Control Center:
+    /// the controls, the network, the speaker, the battery.
+    pub fn over_status_opener(&self, width: i32, x: i32, y: i32) -> bool {
+        [ICON_CONTROL, ICON_NETWORK, ICON_SPEAKER]
+            .iter()
+            .any(|&i| status_icon(width, i).contains(x, y))
+            || (self.battery_shown() && battery_button(width).contains(x, y))
     }
 
     /// The user's menu (ADR-0121): the account's name, then Lock Screen,
@@ -2466,6 +2521,17 @@ impl Desktop {
                 }
             }
             controls::NOTIFICATIONS => glyph_at(canvas, at, 18, |s, r| icon::bell(s, r, ink)),
+            controls::BATTERY => {
+                let (percent, charging) = self.battery.map_or((0, false), |b| {
+                    (
+                        b.percent,
+                        b.state == oceans_window::battery::State::Charging,
+                    )
+                });
+                glyph_at(canvas, at, 22, |s, r| {
+                    icon::battery(s, r, percent, charging, ink, ink)
+                });
+            }
             _ => {
                 // The Terminal: its prompt.
                 canvas.text(
@@ -2514,6 +2580,7 @@ impl Desktop {
                     look.slider(canvas, track, level, colour::accent());
                 }
             }
+            controls::BATTERY => self.draw_battery_control(canvas, r, look),
             controls::SOUND => {
                 canvas.text(r.x + 14, r.y + 8, "Sound", Font::Strong, colour::text(), r);
                 match self.volume {
@@ -2663,6 +2730,66 @@ impl Desktop {
                 );
             }
         }
+    }
+
+    /// The battery's card (ADR-0152): its name and state, its picture and
+    /// a gauge of its charge, green while it charges, red when low.
+    fn draw_battery_control(&self, canvas: &mut Canvas, r: Rect, look: &CardLook) {
+        use oceans_window::battery::State;
+        canvas.text(
+            r.x + 14,
+            r.y + 8,
+            "Battery",
+            Font::Strong,
+            colour::text(),
+            r,
+        );
+        let track = control_track(r);
+        let Some(battery) = self.battery else {
+            let note = "Not read yet";
+            let nw = canvas.measure(note, Font::Body);
+            canvas.text(
+                r.x + r.w - 14 - nw,
+                r.y + 9,
+                note,
+                Font::Body,
+                colour::muted(),
+                r,
+            );
+            glyph_at(canvas, (track.x - 22, track.y + track.h / 2), 24, |s, g| {
+                icon::battery(s, g, 0, false, colour::muted(), colour::muted())
+            });
+            canvas.round_fill(track, track.h / 2, look.off);
+            return;
+        };
+        let state = alloc::format!("{}%  ·  {}", battery.percent, battery.describe());
+        let sw = canvas.measure(&state, Font::Body);
+        canvas.text(
+            r.x + r.w - 14 - sw,
+            r.y + 9,
+            &state,
+            Font::Body,
+            colour::muted(),
+            r,
+        );
+        let charging = battery.state == State::Charging;
+        let level = if battery.low() {
+            Rgb(0xff_3b_30)
+        } else if battery.state != State::Discharging {
+            Rgb(0x34_c7_59)
+        } else {
+            colour::accent()
+        };
+        glyph_at(canvas, (track.x - 22, track.y + track.h / 2), 24, |s, g| {
+            icon::battery(s, g, battery.percent, charging, colour::text(), level)
+        });
+        canvas.round_fill(track, track.h / 2, look.off);
+        let filled = (track.w * i32::from(battery.percent) / 100).max(track.h);
+        canvas.round_fill(
+            Rect::new(track.x, track.y, filled, track.h),
+            track.h / 2,
+            level,
+        );
     }
 
     /// Wave (ADR-0117): closed, one round glass button with the Oceans logo
