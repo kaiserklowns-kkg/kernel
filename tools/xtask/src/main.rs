@@ -406,9 +406,13 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move 0 -456",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
+    // Captured once drawn: Notes' title bar in the focus colour, then the
+    // Terminal's.
+    b"@screen 850 262 e3e3e8 Notes' window, focused",
     b"@monitor screendump build/smoke-window.ppm",
     b"@keys note\r",
     b"@monitor sendkey ctrl-tab",
+    b"@screen 800 90 e3e3e8 the Terminal, focused",
     b"@monitor screendump build/smoke-focus.ppm",
     b"@monitor mouse_move 225 -55",
     b"@monitor mouse_button 1",
