@@ -809,7 +809,7 @@ impl Core {
     }
 
     /// The time zone chosen (ADR-0143), from `/system/timezone`: minutes
-    /// ahead of UTC; UTC until one is.
+    /// ahead of UTC; Bangkok (ADR-0150) until one is.
     fn time_zone(&self) -> i16 {
         read_path(&self.system_dir, TIME_ZONE_FILE)
             .ok()
@@ -821,7 +821,7 @@ impl Core {
                     .ok()
             })
             .filter(|&minutes| oceans_core_proto::valid_time_zone(minutes))
-            .unwrap_or(0)
+            .unwrap_or(oceans_core_proto::DEFAULT_TIME_ZONE)
     }
 
     /// The appearance, accent and legibility options the user chose

@@ -587,19 +587,20 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 342 225 d8d8de Music at the end of its list",
     // The media keys (ADR-0102): Music asks for them. (QEMU's USB keyboard
     // sends no media keys; the sound panel's buttons press them below.)
-    // What plays, in Control Center (ADR-0103, ADR-0118): the speaker in
-    // the top bar (1124,14) opens it, Music's song in its module (white at
-    // 1240,60), and Next (1222,159) reaches Music (one song: nothing else
-    // plays, as the recording must not hold more of it). The mouse is
-    // where Text Editor left it, 1014,400, and goes back there.
+    // What plays, in Control Center (ADR-0103, ADR-0118, ADR-0150): the
+    // speaker in the top bar (1124,14) opens it, Music's icon in its card
+    // (a white note at 965,245), and Next (1229,238) reaches Music (one
+    // song: nothing else plays, as the recording must not hold more of
+    // it). The mouse is where Text Editor left it, 1014,400, and goes back
+    // there.
     b"@monitor mouse_move 110 -386",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1240 60 ffffff Music's song in Control Center",
-    b"@monitor mouse_move 98 145",
+    b"@screen 965 245 ffffff Music's icon in Control Center",
+    b"@monitor mouse_move 105 224",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -98 -145",
+    b"@monitor mouse_move -105 -224",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor mouse_move -110 386",
@@ -676,46 +677,46 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey meta_l-spc",
     b"@wait desktop: keyboard layout English",
     // The system volume (ADR-0100), after every sound this boot records:
-    // set from the shell, then in Control Center (ADR-0118). The speaker
-    // in the top bar (1124,14) opens it (its own colour at 1098,100,
-    // between modules); its sound module has the slider from 994,277, 248
-    // wide (75% at 1180,288), and the speaker that mutes at 967,288: muted,
-    // the slider's fill is grey. A click on the speaker in the bar closes
-    // it.
+    // set from the shell, then in Control Center (ADR-0118, ADR-0150). The
+    // speaker in the top bar (1124,14) opens it (Ethernet's button lit in
+    // the accent at 969,87); its sound card has the slider from 988,310,
+    // 254 wide (75% at 1180,320), and the speaker that mutes at 962,320:
+    // muted, the slider's fill is grey. A click on the speaker in the bar
+    // closes it.
     b"volume\r\n",
     b"volume 40\r\n",
     b"@monitor mouse_move 322 -312",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1098 100 f2f2f7 Control Center",
-    b"@monitor mouse_move 56 274",
+    b"@screen 969 87 2f7cf6 Control Center, Ethernet lit",
+    b"@monitor mouse_move 56 306",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -213 0",
+    b"@monitor mouse_move -218 0",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1000 288 66666b Control Center's slider, muted",
-    b"@monitor mouse_move 157 -274",
+    b"@screen 1000 320 66666b Control Center's slider, muted",
+    b"@monitor mouse_move 162 -306",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    // Its keyboard tile (from 940,196) goes to the next layout, as
+    // Its keyboard row (from 946,144) goes to the next layout, as
     // Super+Space does; twice, back to English.
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move -108 210",
+    b"@monitor mouse_move -108 152",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@wait desktop: keyboard Thai, from Control Center",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@wait desktop: keyboard English, from Control Center",
-    b"@monitor mouse_move 108 -210",
+    b"@monitor mouse_move 108 -152",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // The Wi-Fi panel (ADR-0130), with the shell in the driver's place
     // (QEMU has no Wi-Fi): its files say idle, and one WPA2 network,
     // "oceans". Control Center (the speaker, 1124,14) opens; its network
-    // toggle (978,80) opens the panel, which asks for a scan. The network's
+    // row (978,80) opens the panel, which asks for a scan. The network's
     // row (from 940,116) asks for its password; typed, Enter sets the
     // network: the password, then the name. The "driver" says joined.
     b"write /system/wifi/networks W -48 6 6f6365616e73\r\n",

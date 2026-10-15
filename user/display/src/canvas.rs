@@ -176,6 +176,59 @@ impl Canvas {
         draw(&mut self.surface());
     }
 
+    /// Frosted glass (ADR-0150), as macOS's and Windows' panels are: what
+    /// is under the rounded `r` blurred (`blur` logical pixels), then
+    /// `tint` laid over it with `alpha`. The rest of the screen is left.
+    pub fn frost(&mut self, r: Rect, radius: i32, blur: i32, tint: Rgb, alpha: u32) {
+        let d = self.scale.rect(r);
+        let x0 = d.x.max(0);
+        let y0 = d.y.max(0);
+        let x1 = (d.x + d.w).min(self.device_width);
+        let y1 = (d.y + d.h).min(self.device_height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let stride = self.device_width as usize;
+        // The pixels under it, as channels.
+        let mut channels = [vec![0u32; w * h], vec![0u32; w * h], vec![0u32; w * h]];
+        for y in 0..h {
+            let row = (y0 as usize + y) * stride + x0 as usize;
+            for x in 0..w {
+                let p = self.pixels[row + x];
+                channels[0][y * w + x] = (p >> 16) & 0xff;
+                channels[1][y * w + x] = (p >> 8) & 0xff;
+                channels[2][y * w + x] = p & 0xff;
+            }
+        }
+        // Three box blurs across and down: close to a Gaussian.
+        let reach = self.scale.len(blur.max(1)) as usize / 2 + 1;
+        let mut scratch = vec![0u32; w.max(h)];
+        for channel in &mut channels {
+            for _ in 0..3 {
+                box_blur(channel, w, h, 1, w, reach, &mut scratch);
+                box_blur(channel, h, w, w, 1, reach, &mut scratch);
+            }
+        }
+        // Back, inside the rounded shape only.
+        let corner = self.scale.len(radius).min(d.w / 2).min(d.h / 2);
+        for y in 0..h {
+            let dy = y0 + y as i32 - d.y;
+            let inset = rounded_inset(dy, d.h, corner);
+            let row = (y0 as usize + y) * stride;
+            for x in 0..w {
+                let dx = x0 + x as i32 - d.x;
+                if dx < inset || dx >= d.w - inset {
+                    continue;
+                }
+                let at = y * w + x;
+                self.pixels[row + x0 as usize + x] =
+                    channels[0][at] << 16 | channels[1][at] << 8 | channels[2][at];
+            }
+        }
+        self.surface().tint(r, radius, tint, alpha);
+    }
+
     /// Darkens everything (behind a modal dialog).
     pub fn dim(&mut self, shade: Rgb, alpha: u32) {
         self.surface().dim(shade, alpha);
@@ -429,4 +482,58 @@ impl Canvas {
         }
         written
     }
+}
+
+/// One box blur pass over `data` (a channel, `lines` lines of `len`
+/// values, `step` apart within a line and `next` from one line to the
+/// next): each value the mean of those within `reach` of it.
+fn box_blur(
+    data: &mut [u32],
+    len: usize,
+    lines: usize,
+    step: usize,
+    next: usize,
+    reach: usize,
+    scratch: &mut [u32],
+) {
+    let window = (2 * reach + 1) as u32;
+    for line in 0..lines {
+        let base = line * next;
+        let at = |i: usize| base + i.min(len - 1) * step;
+        // The window round the first value, its edges repeated.
+        let mut sum = data[at(0)] * (reach as u32 + 1);
+        for i in 1..=reach {
+            sum += data[at(i)];
+        }
+        for i in 0..len {
+            scratch[i] = sum / window;
+            let leaving = data[at(i.saturating_sub(reach))];
+            let coming = data[at(i + reach + 1)];
+            sum = sum + coming - leaving;
+        }
+        for (i, &value) in scratch[..len].iter().enumerate() {
+            data[base + i * step] = value;
+        }
+    }
+}
+
+/// How far row `dy` of a `height`-row shape with corners of `radius` is
+/// inset at each end (as `oceans_draw` rounds its rectangles).
+fn rounded_inset(dy: i32, height: i32, radius: i32) -> i32 {
+    let above = if dy < radius {
+        radius - dy
+    } else if dy >= height - radius {
+        dy - (height - radius) + 1
+    } else {
+        0
+    };
+    if above == 0 {
+        return 0;
+    }
+    let n = radius * radius - (above - 1) * (above - 1);
+    let mut root = 0;
+    while (root + 1) * (root + 1) <= n {
+        root += 1;
+    }
+    radius - root
 }

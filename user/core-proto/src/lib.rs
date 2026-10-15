@@ -193,7 +193,7 @@ pub mod op {
     pub const SET_SCALE: u64 = 46;
     /// → `[minutes i16]` (ADR-0143): the time zone, as minutes ahead of
     /// UTC (Bangkok: 420), one of [`crate::TIME_ZONES`]. The machine's, not
-    /// an account's; 0 (UTC) until one is chosen.
+    /// an account's; [`crate::DEFAULT_TIME_ZONE`] until one is chosen.
     pub const TIME_ZONE: u64 = 47;
     /// data = `[minutes i16]`, one of [`crate::TIME_ZONES`]' offsets, kept
     /// across reboots.
@@ -240,6 +240,10 @@ pub const TIME_ZONES: [(i16, &str); 24] = [
     (720, "Auckland"),
     (780, "Tonga"),
 ];
+
+/// The time zone until one is chosen (ADR-0150): Bangkok's, UTC+7, where
+/// Oceans is made and first used.
+pub const DEFAULT_TIME_ZONE: i16 = 420;
 
 /// Whether `minutes` is one of [`TIME_ZONES`]' offsets.
 pub fn valid_time_zone(minutes: i16) -> bool {
