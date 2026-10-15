@@ -529,6 +529,17 @@ fn wsl_path(arg: &str) -> String {
     }
 }
 
+/// Deletes a scratch image when dropped, so a skipped or failing check leaves nothing in the temp dir.
+struct TempImage(std::path::PathBuf);
+
+impl Drop for TempImage {
+    fn drop(&mut self) {
+        if std::env::var("OCEANS_FAT_KEEP").is_err() {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
 /// fsck.fat finds nothing to fix, and mtools reads our files the same.
 fn reference_tools_accept(name: &str, offset: u64, bytes: &[u8], expected: &[(&str, Vec<u8>)]) {
     // Tests run in parallel: every image gets its own file.
@@ -542,6 +553,8 @@ fn reference_tools_accept(name: &str, offset: u64, bytes: &[u8], expected: &[(&s
     // fsck.fat works on a volume: cut the partition out.
     let volume = &bytes[offset as usize..];
     std::fs::write(&file, volume).unwrap();
+    // Removed on every exit path (fsck.fat missing, failed assert), unless OCEANS_FAT_KEEP is set.
+    let _cleanup = TempImage(file.clone());
     let Some((clean, output, _)) = tool(&["fsck.fat", "-n", "-v", &file_name]) else {
         std::eprintln!("fsck.fat not available: reference check skipped");
         return;
@@ -562,9 +575,6 @@ fn reference_tools_accept(name: &str, offset: u64, bytes: &[u8], expected: &[(&s
             "{name}: mtools reads {path} differently: {:?}",
             String::from_utf8_lossy(&data)
         );
-    }
-    if std::env::var("OCEANS_FAT_KEEP").is_err() {
-        let _ = std::fs::remove_file(&file);
     }
 }
 
