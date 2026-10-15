@@ -83,6 +83,9 @@ const DOCK_FILE: &str = "dock";
 const USER_FILE: &str = "user";
 /// The appearance and accent (ADR-0113), in `/system`: `APPEARANCE ACCENT`.
 const APPEARANCE_FILE: &str = "appearance";
+/// When each app last started holding each permission (ADR-0156):
+/// `APP PERMISSION SECONDS` lines.
+const USED_FILE: &str = "permissions-used";
 /// The keyboard layout in use (ADR-0116): `0` English, `1` Thai.
 const LAYOUT_FILE: &str = "layout";
 /// The controls Control Center shows (ADR-0151): their ids, in order.
@@ -373,6 +376,9 @@ struct Core {
     apps: BTreeMap<String, App>,
     /// The user's decisions: `true` allowed, `false` denied.
     decisions: BTreeMap<(String, Permission), bool>,
+    /// When each app last started holding each permission it asks the
+    /// user for (ADR-0156), kept in `/system/permissions-used`.
+    used: oceans_package::privacy::Used,
     running: [Option<Running>; MAX_RUNNING],
     notification: Handle,
     audit: VecDeque<String>,
@@ -476,6 +482,7 @@ impl Core {
             bundled: BTreeSet::new(),
             apps: BTreeMap::new(),
             decisions: BTreeMap::new(),
+            used: oceans_package::privacy::Used::default(),
             running: [const { None }; MAX_RUNNING],
             notification: Handle(0),
             audit: VecDeque::new(),
@@ -493,6 +500,10 @@ impl Core {
         };
         core.load_apps();
         core.load_decisions();
+        core.used = oceans_package::privacy::Used::parse(
+            core::str::from_utf8(&read_path(&core.system_dir, USED_FILE).unwrap_or_default())
+                .unwrap_or(""),
+        );
         core.install_bundled(directory);
         core.load_enabled();
         core.restore_volume();
@@ -1407,6 +1418,50 @@ impl Core {
         }
     }
 
+    /// When each app last started holding each permission (ADR-0156).
+    fn save_used(&self) -> Result<(), Refusal> {
+        write_file(&self.system_dir, USED_FILE, self.used.to_text().as_bytes()).map_err(io)
+    }
+
+    /// `PRIVACY` (ADR-0156): entry `index` of every installed app's every
+    /// permission it asks the user for (apps by id, permissions as the
+    /// manifest asks): the decision and when it last started holding it,
+    /// as one `oceans_package::privacy::Entry` line. `NotFound` past the
+    /// last.
+    fn privacy(&self, data: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        let index = u32_at(data)? as usize;
+        let (id, permission) = self
+            .apps
+            .iter()
+            .flat_map(|(id, app)| {
+                app.requests
+                    .iter()
+                    .filter(|(p, _)| !p.automatic())
+                    .map(move |(p, _)| (id, *p))
+            })
+            .nth(index)
+            .ok_or(Status::NotFound)?;
+        let mut text = String::new();
+        oceans_package::privacy::Entry {
+            permission,
+            decision: self.decision(id, permission) as u8,
+            last: self.used.last(id, permission).unwrap_or(0),
+            app: id,
+        }
+        .write_to(&mut text);
+        reply.extend_from_slice(text.as_bytes());
+        Ok(())
+    }
+
+    /// `IN_USE` (ADR-0156): bit 0, the microphone is recording now.
+    fn in_use(&self) -> u8 {
+        let recording = self
+            .audio
+            .and_then(|audio| oceans_audio_proto::recording(audio).ok())
+            .unwrap_or(false);
+        u8::from(recording)
+    }
+
     fn save_decisions(&self) -> Result<(), Refusal> {
         let mut text = String::new();
         for ((id, permission), allowed) in &self.decisions {
@@ -1872,6 +1927,11 @@ impl Core {
                         }
                         _ => Err(Status::BadRequest.into()),
                     },
+                    op::PRIVACY => self.privacy(data, reply),
+                    op::IN_USE => {
+                        reply.push(self.in_use());
+                        Ok(())
+                    }
                     op::AUDIT => {
                         let index = u32_at(data)? as usize;
                         let entry = self.audit.get(index).ok_or(Status::NotFound)?;
@@ -2302,6 +2362,8 @@ impl Core {
         removed.and_then(|()| self.apps_dir.sync()).map_err(io)?;
         self.apps.remove(&id);
         self.decisions.retain(|(app_id, _), _| *app_id != id);
+        self.used.forget(&id);
+        let _ = self.save_used();
         if self.enabled.remove(&id) {
             let _ = self.save_enabled();
         }
@@ -2588,6 +2650,18 @@ impl Core {
                 granted: granted.clone(),
                 window,
             });
+            // When it last started holding what the user decided
+            // (ADR-0156); the automatic ones are not worth a line.
+            if let Some(now_ms) = oceans_rt::unix_time_ms() {
+                let mut asked = false;
+                for permission in granted.iter().filter(|p| !p.automatic()) {
+                    self.used.note(&id, *permission, now_ms / 1000);
+                    asked = true;
+                }
+                if asked {
+                    let _ = self.save_used();
+                }
+            }
             let mut names = String::new();
             for (i, permission) in granted.iter().enumerate() {
                 let _ = write!(

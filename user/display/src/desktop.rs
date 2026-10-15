@@ -303,6 +303,9 @@ pub struct Desktop {
     /// The system volume, as Core says (ADR-0100): `None` without a sound
     /// device. The speaker in the menu bar shows it.
     pub volume: Option<(u8, bool)>,
+    /// The microphone is recording now (ADR-0156): an orange dot in the
+    /// top bar, drawn by the system, never by an app.
+    pub recording: bool,
     /// The screen's brightness in percent (ADR-0147), where it can be set.
     pub brightness: Option<u8>,
     /// The sound panel is open below the speaker.
@@ -583,6 +586,20 @@ pub fn battery_button(width: i32) -> Rect {
     let layout = layout_button(width);
     Rect::new(layout.x - 6 - 64, 2, 64, MENU_HEIGHT - 4)
 }
+
+/// The microphone indicator's centre (ADR-0156), while anything records:
+/// left of the battery where it shows, else of the keyboard layout's name.
+pub fn microphone_dot(width: i32, battery: bool) -> (i32, i32) {
+    let left = if battery {
+        battery_button(width).x
+    } else {
+        layout_button(width).x
+    };
+    (left - 10, MENU_HEIGHT / 2)
+}
+
+/// The microphone indicator's colour: orange, as macOS shows it.
+const MICROPHONE_DOT: Rgb = Rgb(0xff_9f_0a);
 
 /// The bell at the top bar's right end (ADR-0119, ADR-0121): it opens the
 /// notifications, its count of new ones on it.
@@ -1914,6 +1931,12 @@ impl Desktop {
                     icon::battery(s, g, 0, false, BAR_FAINT, BAR_FAINT)
                 }),
             }
+        }
+        // The microphone in use (ADR-0156): drawn by the system, so no app
+        // can record unseen or hide it.
+        if self.recording {
+            let (cx, cy) = microphone_dot(w, self.battery_shown());
+            canvas.circle(cx, cy, 4, MICROPHONE_DOT);
         }
     }
 

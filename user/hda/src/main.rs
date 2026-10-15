@@ -1077,8 +1077,18 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>, stop: Option<Ha
         let mut number: Option<[u8; 4]> = None;
         // The volume, as `[level][muted]` (ADR-0100).
         let mut pair: Option<[u8; 2]> = None;
+        // Whether the input is recording (ADR-0156).
+        let mut flag: Option<[u8; 1]> = None;
         let status = match (sound.as_mut(), got.label, session) {
             (None, _, _) => Status::IoError,
+            // The microphone indicator (ADR-0156): not for a player, which
+            // has nothing to do with the input.
+            (Some(_), op::RECORDING, _) if got.badge == PLAYER_BADGE => Status::BadRequest,
+            (Some(sound), op::RECORDING, _) => {
+                let recording = sound.input.as_ref().is_some_and(|input| input.running);
+                flag = Some([u8::from(recording)]);
+                Status::Ok
+            }
             (Some(sound), op::QUEUED, Some(session)) if !session.capture => {
                 number = Some(sound.queued().to_le_bytes());
                 Status::Ok
@@ -1206,10 +1216,11 @@ fn serve(log: Handle, server: Handle, sound: &mut Option<Sound>, stop: Option<Ha
             Some(handle) => core::slice::from_ref(handle),
             None => &[],
         };
-        let data = match (&number, &pair) {
-            (Some(bytes), _) => &bytes[..],
-            (None, Some(pair)) => &pair[..],
-            (None, None) => text.as_str().as_bytes(),
+        let data = match (&number, &pair, &flag) {
+            (Some(bytes), _, _) => &bytes[..],
+            (None, Some(pair), _) => &pair[..],
+            (None, None, Some(flag)) => &flag[..],
+            (None, None, None) => text.as_str().as_bytes(),
         };
         if oceans_rt::ipc_reply_msg(status as u64, data, reply).is_err()
             && let Some(handle) = reply_handle

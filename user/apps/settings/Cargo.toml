@@ -17,5 +17,5 @@ oceans-abi.workspace = true
 oceans-core-proto.workspace = true
 oceans-net-proto.workspace = true
 oceans-audio-proto.workspace = true
-oceans-package.workspace = true
+oceans-package = { workspace = true, features = ["alloc"] }
 oceans-ui.workspace = true

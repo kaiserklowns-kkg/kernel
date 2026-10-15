@@ -20,7 +20,7 @@ use super::{LINE_MAX, Shell};
 const USAGE: &str = "usage: app list | info ID | install PATH | run ID [ARGS...] | \
                      start ID [ARGS...] | stop ID | enable ID | disable ID | \
                      remove ID [--keep-data] | \
-                     grant ID PERMISSION | revoke ID PERMISSION | rollback ID | audit | \
+                     grant ID PERMISSION | revoke ID PERMISSION | rollback ID | audit | privacy | \
                      trust [add KEY PUBLISHER [--until YYYY-MM-DD] | remove KEY]\r\n";
 
 impl Shell {
@@ -60,6 +60,7 @@ impl Shell {
                 }
             }
             ["audit"] => self.app_audit(core),
+            ["privacy"] => self.app_privacy(core),
             ["trust"] => self.app_trusted(core),
             ["trust", "add", key, publisher @ ..] if !publisher.is_empty() => {
                 self.app_trust(core, true, key, publisher)
@@ -468,6 +469,39 @@ impl Shell {
                 "app: {permission} for {id} will be asked again\r\n"
             )),
             Err((error, _)) => self.app_error(id, error, &[]),
+        }
+    }
+
+    /// `app privacy` (ADR-0156): each app's permissions asked of the user,
+    /// the decision, and whether it ever started holding them.
+    fn app_privacy(&self, core: Core) {
+        let mut reply = [0u8; 256];
+        let mut index = 0u32;
+        while let Ok(got) = core.call(op::PRIVACY, &index.to_le_bytes(), &[], &mut reply) {
+            index += 1;
+            let line = core::str::from_utf8(&reply[..got.len]).unwrap_or("");
+            let Some(entry) = oceans_package::privacy::Entry::parse(line.trim_end()) else {
+                continue;
+            };
+            let decision = match oceans_core_proto::Decision::from_byte(entry.decision) {
+                Some(oceans_core_proto::Decision::Allowed) => "allowed",
+                Some(oceans_core_proto::Decision::Denied) => "denied",
+                Some(oceans_core_proto::Decision::Undecided) => "undecided",
+                _ => "?",
+            };
+            self.print(format_args!(
+                "  {} {} {decision}, {}\r\n",
+                entry.app,
+                entry.permission.name(),
+                if entry.last == 0 {
+                    "never used"
+                } else {
+                    "used"
+                }
+            ));
+        }
+        if index == 0 {
+            self.print(format_args!("app: no app asks for a permission\r\n"));
         }
     }
 

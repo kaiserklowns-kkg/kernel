@@ -17,7 +17,7 @@ oceans-fs-proto.workspace = true
 oceans-audio-proto.workspace = true
 oceans-net-proto.workspace = true
 oceans-core-proto.workspace = true
-oceans-package.workspace = true
+oceans-package = { workspace = true, features = ["alloc"] }
 oceans-search.workspace = true
 oceans-account.workspace = true
 # The packages the system image brings (ADR-0080).

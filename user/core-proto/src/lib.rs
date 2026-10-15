@@ -205,6 +205,15 @@ pub mod op {
     /// data = the ids, in order (`controls::valid`), kept across
     /// reboots; none is an empty Control Center.
     pub const SET_CONTROLS: u64 = 50;
+    /// data = `[index u32]` → one line, `oceans_package::privacy::Entry`
+    /// (ADR-0156): of every installed app, each permission it asks the
+    /// user for, its decision, and when the app last started holding it
+    /// (seconds since 1970, 0: never). `NotFound` past the last. Needs
+    /// `AUDIT`: what apps were let do is the user's business.
+    pub const PRIVACY: u64 = 51;
+    /// → `[flags u8]` (ADR-0156): bit 0, the microphone is recording now.
+    /// Says nothing of who: for the indicator in the top bar.
+    pub const IN_USE: u64 = 52;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -321,7 +330,8 @@ pub mod access {
             | op::BOOT_OK
             | op::SCALE
             | op::TIME_ZONE
-            | op::CONTROLS => QUERY,
+            | op::CONTROLS
+            | op::IN_USE => QUERY,
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
@@ -349,7 +359,7 @@ pub mod access {
             | op::SET_TIME_ZONE
             | op::SET_CONTROLS => DECIDE,
             op::PROPOSE => PROPOSE,
-            op::AUDIT => AUDIT,
+            op::AUDIT | op::PRIVACY => AUDIT,
             // Minting gives only rights the caller already has.
             op::MINT => 0,
             _ => return None,

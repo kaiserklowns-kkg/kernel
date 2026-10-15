@@ -81,6 +81,10 @@ pub mod op {
     /// [`super::MAX_VOLUME`] is the most) → the new `[level][muted]`.
     /// Applies to what is played from then on.
     pub const SET_VOLUME: u64 = 12;
+    /// On any end or session but a player's: → `[recording u8]`, 1 while
+    /// the input is running for a capture session (ADR-0156): what the
+    /// desktop's microphone indicator shows. Says nothing of who.
+    pub const RECORDING: u64 = 13;
 }
 
 /// The badge of reader ends (ADR-0096); like [`PLAYER_BADGE`], beyond any
@@ -250,6 +254,16 @@ pub fn reader(driver: Handle) -> Result<Handle, AudioError> {
         return Err(AudioError::Status(Status::BadRequest));
     }
     Ok(end[0])
+}
+
+/// Whether the input is recording now (ADR-0156): for the microphone
+/// indicator. Any end but a player's may ask.
+pub fn recording(handle: Handle) -> Result<bool, AudioError> {
+    let mut reply = [0u8; 1];
+    match request(handle, op::RECORDING, &[], &[], &mut reply, &mut [])? {
+        (1, _) => Ok(reply[0] != 0),
+        _ => Err(AudioError::Status(Status::BadRequest)),
+    }
 }
 
 /// The system volume (ADR-0100): its level (0 to [`MAX_VOLUME`]) and

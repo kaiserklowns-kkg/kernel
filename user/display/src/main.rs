@@ -87,6 +87,9 @@ const KEYS: u64 = 1 << 2;
 /// How often the clock, the console mirror and the app list are checked.
 const TICK_MS: u64 = 100;
 const APPS_EVERY_MS: u64 = 2000;
+/// How often the desktop asks whether the microphone is recording
+/// (ADR-0156): often enough that a short recording shows.
+const IN_USE_EVERY_MS: u64 = 250;
 /// The wallpaper's photograph (ADR-0117), a module of the boot image.
 const WALLPAPER: &str = "wallpaper-ocean.png";
 /// How long the desktop runs before this boot counts as finished
@@ -373,6 +376,7 @@ fn main(start: Start) -> i64 {
     );
 
     let mut last_apps = oceans_rt::clock_ms();
+    let mut last_in_use = last_apps;
     let _ = oceans_rt::timer_set(notification, TICK, TICK_MS);
     // The largest message the kernel carries inline.
     let mut data = [0u8; 256];
@@ -441,6 +445,10 @@ fn main(start: Start) -> i64 {
                     let mut reply = [0u8; 8];
                     let _ = core.call(op::BOOT_OK, &[], &[], &mut reply);
                 }
+            }
+            if now.saturating_sub(last_in_use) >= IN_USE_EVERY_MS {
+                last_in_use = now;
+                dirty |= service.refresh_in_use();
             }
             if now.saturating_sub(last_apps) >= APPS_EVERY_MS {
                 last_apps = now;
@@ -745,6 +753,35 @@ impl Service {
             let (x, y) = self.desktop.pointer;
             self.windows.pointer_moved(x, y);
         }
+        true
+    }
+
+    /// Whether the microphone is recording (ADR-0156), from Core: the dot
+    /// in the top bar. `true` if it changed; said in the log when it does.
+    fn refresh_in_use(&mut self) -> bool {
+        let Some(core) = self.core else {
+            return false;
+        };
+        let mut reply = [0u8; 1];
+        let recording = match core.call(op::IN_USE, &[], &[], &mut reply) {
+            Ok(got) if got.len == 1 => reply[0] & 1 != 0,
+            _ => false,
+        };
+        if recording == self.desktop.recording {
+            return false;
+        }
+        self.desktop.recording = recording;
+        say(
+            self.log,
+            format_args!(
+                "desktop: the microphone {}",
+                if recording {
+                    "is in use"
+                } else {
+                    "is no longer in use"
+                }
+            ),
+        );
         true
     }
 

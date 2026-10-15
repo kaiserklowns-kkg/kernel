@@ -9,6 +9,8 @@ rust-version.workspace = true
 [features]
 # Building and signing packages (xtask, tests): needs an allocator.
 build = []
+# What Settings' Privacy page reads (ADR-0156): needs an allocator.
+alloc = []
 
 [dependencies]
 oceans-archive = { path = "../archive" }

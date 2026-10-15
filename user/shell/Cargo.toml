@@ -16,6 +16,6 @@ oceans-elf.workspace = true
 oceans-fs-proto.workspace = true
 oceans-core-proto.workspace = true
 oceans-net-proto.workspace = true
-oceans-package.workspace = true
+oceans-package = { workspace = true, features = ["alloc"] }
 oceans-rt.workspace = true
 oceans-line.workspace = true

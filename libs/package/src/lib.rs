@@ -15,9 +15,12 @@
 
 #![no_std]
 
-#[cfg(feature = "build")]
+#[cfg(any(feature = "build", feature = "alloc"))]
 extern crate alloc;
 
+/// Needs an allocator: Core, Settings and the shell (ADR-0156).
+#[cfg(any(feature = "build", feature = "alloc"))]
+pub mod privacy;
 pub mod web;
 
 #[cfg(test)]

@@ -300,6 +300,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"n\r\n",
     b"app grant app.oceans.hello network\r\n",
     b"app run app.oceans.hello 10.0.2.2 $TCP\r\n",
+    // Privacy (ADR-0156): it started holding the network, so it was used.
+    b"app privacy\r\n",
     b"app info app.oceans.hello\r\n",
     b"app install /keep/hello2.opk\r\n",
     b"app install /keep/hello.opk\r\n",
@@ -309,6 +311,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@wait hello: waiting until stopped",
     b"app list\r\n",
     b"app revoke app.oceans.hello network\r\n",
+    // Denied now; when it last could stays known (ADR-0156).
+    b"app privacy\r\n",
     b"app rollback app.oceans.hello\r\n",
     b"app start app.oceans.hello wait\r\n",
     b"@wait hello: waiting until stopped",
@@ -1363,6 +1367,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("play: input: microphone (pin 0x"),
     Expect::Contains("play: needs the fs capability"),
     Expect::Contains("play: recording 2 s from microphone (pin 0x"),
+    // The microphone indicator (ADR-0156): on while it records, off after.
+    Expect::Contains("desktop: the microphone is in use"),
+    Expect::Contains("desktop: the microphone is no longer in use"),
     Expect::Line("play: recorded 384000 bytes (2 s) into /docs/mic.wav, peak 0%"),
     Expect::Contains(" lines of trouble in the kept log:"),
     Expect::Contains("  [WARN ] process: process init/crasher killed: page fault"),
@@ -1732,6 +1739,9 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("installed app.oceans.hello 1.0.0 from Oceans Examples"),
     Expect::Contains("denied app.oceans.hello network (at its prompt)"),
     Expect::Contains("stopped app.oceans.hello: a permission it used was revoked"),
+    // Privacy (ADR-0156): allowed and used, then denied and still used.
+    Expect::Line("  app.oceans.hello network allowed, used"),
+    Expect::Line("  app.oceans.hello network denied, used"),
     Expect::Contains("app: installed app.oceans.heartbeat 1.0.0"),
     Expect::Line("app.oceans.heartbeat 1.0.0"),
     Expect::Line("app.oceans.hello 1.0.0"),

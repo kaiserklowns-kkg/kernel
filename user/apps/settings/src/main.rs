@@ -32,6 +32,7 @@ use oceans_abi::sysinfo::{self, KernelInfo, MemoryInfo};
 use oceans_core_proto::{Core, CoreError, Decision, Status, decision, field, op, parts, source};
 use oceans_net_proto::{Colons, Dotted};
 use oceans_package::Permission;
+use oceans_package::privacy::Entry;
 use oceans_rt::{Directory, Handle, Start};
 use oceans_ui::layout::Flow;
 use oceans_ui::{Rect, Scroll, Style, Ui, colour};
@@ -45,8 +46,8 @@ const MIN_SIZE: (u16, u16) = (600, 420);
 /// The widest its pages are laid out: rows of facts stay readable in a
 /// wide window.
 const READABLE: i32 = 720;
-const SECTIONS: [&str; 7] = [
-    "General", "Network", "Sound", "Displays", "Apps", "Users", "Account",
+const SECTIONS: [&str; 8] = [
+    "General", "Network", "Sound", "Displays", "Apps", "Privacy", "Users", "Account",
 ];
 /// The Account section's fields (ADR-0111).
 const NAME_FIELD: u32 = 10;
@@ -82,6 +83,16 @@ struct Account {
     new: String,
     confirm: String,
     message: String,
+}
+
+/// One line of the Privacy page (ADR-0156): an app, a permission it asks
+/// the user for, the decision, and when it last started holding it.
+struct PrivacyRow {
+    permission: Permission,
+    decision: Decision,
+    /// Seconds since 1970; 0: never.
+    last: u64,
+    app: String,
 }
 
 struct App {
@@ -120,6 +131,8 @@ struct Settings {
     scale: u16,
     /// How far down the page shown is scrolled (ADR-0138).
     page: Scroll,
+    /// The Privacy page's lines (ADR-0156).
+    privacy: Vec<PrivacyRow>,
     /// The time zone (ADR-0143), as Core keeps it: minutes ahead of UTC.
     time_zone: i16,
 }
@@ -189,6 +202,27 @@ impl Settings {
         {
             self.time_zone = i16::from_le_bytes([reply[0], reply[1]]);
         }
+        // Privacy (ADR-0156): every app's every permission asked of the
+        // user, a line each.
+        self.privacy.clear();
+        for index in 0u32..256 {
+            match core.call(op::PRIVACY, &index.to_le_bytes(), &[], &mut reply) {
+                Ok(got) => {
+                    let line = core::str::from_utf8(&reply[..got.len]).unwrap_or("");
+                    if let Some(entry) = Entry::parse(line.trim_end())
+                        && let Some(decision) = Decision::from_byte(entry.decision)
+                    {
+                        self.privacy.push(PrivacyRow {
+                            permission: entry.permission,
+                            decision,
+                            last: entry.last,
+                            app: entry.app.to_string(),
+                        });
+                    }
+                }
+                Err(_) => break,
+            }
+        }
         self.chosen = self.chosen.filter(|&i| i < self.apps.len());
         self.detail = self
             .chosen
@@ -199,12 +233,19 @@ impl Settings {
 
     /// `DECIDE` for the chosen app, as made in Settings.
     fn decide(&mut self, permission: u8, choice: u8) {
-        let (Some(core), Some(detail)) = (self.core, &self.detail) else {
+        if let Some(id) = self.detail.as_ref().map(|d| d.id.clone()) {
+            self.decide_for(&id, permission, choice);
+        }
+    }
+
+    /// `DECIDE` for app `id`, as made in Settings (Apps or Privacy).
+    fn decide_for(&mut self, id: &str, permission: u8, choice: u8) {
+        let Some(core) = self.core else {
             return;
         };
         let request = [permission, choice, source::SETTINGS];
         let mut reply = [0u8; 8];
-        self.message = match core.about(op::DECIDE, &request, &detail.id, &mut reply) {
+        self.message = match core.about(op::DECIDE, &request, id, &mut reply) {
             Ok(_) => String::from("Saved."),
             Err((error, _)) => alloc::format!("Not saved: {}", error.message()),
         };
@@ -874,6 +915,129 @@ fn users(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     }
 }
 
+/// When an app last started holding a permission (ADR-0156), in the
+/// user's time zone: `2026-10-15 09:41`, or "never".
+fn when(seconds: u64, zone: i16) -> String {
+    if seconds == 0 {
+        return String::from("never used");
+    }
+    let local = (seconds as i64 + i64::from(zone) * 60).max(0) as u64;
+    let (year, month, day) = oceans_package::date::civil((local / 86_400) as u32);
+    let minutes = local / 60;
+    alloc::format!(
+        "last used {year}-{month:02}-{day:02} {:02}:{:02}",
+        minutes / 60 % 24,
+        minutes % 60
+    )
+}
+
+/// Privacy (ADR-0156): by permission, every app that asks for it, what
+/// was decided, and when it last started holding it; each decision can be
+/// changed here as in Apps.
+fn privacy(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
+    ui.heading("Privacy");
+    if settings.core.is_none() {
+        ui.muted("Settings cannot reach Oceans Core.");
+        return;
+    }
+    ui.muted("What each app may do, and when it last could.");
+    let mut decided: Option<(String, u8, u8)> = None;
+    for permission in Permission::ALL.into_iter().filter(|p| !p.automatic()) {
+        let rows: Vec<&PrivacyRow> = settings
+            .privacy
+            .iter()
+            .filter(|row| row.permission == permission)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        ui.space(8);
+        // "Network: connect to the internet and the local network".
+        let mut title = String::from(permission.name());
+        if let Some(first) = title.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        ui.label(&alloc::format!("{title}: {}", permission.description()));
+        for row in rows {
+            let name = settings
+                .apps
+                .iter()
+                .find(|app| app.id == row.app)
+                .map_or(row.app.as_str(), |app| app.name.as_str());
+            let state = match row.decision {
+                Decision::Allowed => "allowed",
+                Decision::Denied => "denied",
+                Decision::Undecided => "asks at the next start",
+                Decision::Automatic => "allowed (automatic)",
+            };
+            let shown = alloc::format!("{state}, {}", when(row.last, settings.time_zone));
+            // As in Apps (ADR-0137): the choices beside the text where the
+            // width allows, else under it.
+            let line = Rect::new(ui.area.x, ui.y, ui.area.w, 30);
+            let choices = 3 * 66 - 6;
+            let wide = line.w >= 150 + 220 + 12 + choices;
+            let text_w = if wide { line.w - choices - 12 } else { line.w };
+            let name_clip = Rect::new(line.x, line.y, text_w.min(144), line.h);
+            ui.text_at(
+                line.x,
+                line.y + 6,
+                name,
+                Style::Body,
+                colour::text(),
+                name_clip,
+            );
+            let shown_clip = Rect::new(line.x + 150, line.y, (text_w - 150).max(0), line.h);
+            ui.text_at(
+                line.x + 150,
+                line.y + 6,
+                &shown,
+                Style::Body,
+                colour::muted(),
+                shown_clip,
+            );
+            let buttons = [
+                ("Allow", decision::ALLOW, Decision::Allowed),
+                ("Deny", decision::DENY, Decision::Denied),
+                ("Ask", decision::FORGET, Decision::Undecided),
+            ];
+            let top = if wide { line.y } else { line.y + 32 };
+            let left = if wide {
+                line.x + line.w - choices
+            } else {
+                line.x
+            };
+            for (i, (label, choice, state)) in buttons.into_iter().enumerate() {
+                let r = Rect::new(left + i as i32 * 66, top, 60, 28);
+                // The decision in force is the filled one.
+                if ui.button_in(r, label, row.decision == state) && row.decision != state {
+                    decided = Some((row.app.clone(), permission_index(permission), choice));
+                }
+            }
+            if !wide {
+                ui.y += 32;
+            }
+            ui.y += 34;
+        }
+    }
+    if settings.privacy.is_empty() {
+        ui.muted("No app asks for anything that needs your permission.");
+    }
+    if !settings.message.is_empty() {
+        ui.muted(&settings.message);
+    }
+    if let Some((app, permission, choice)) = decided {
+        settings.decide_for(&app, permission, choice);
+    }
+}
+
+/// A permission's number in the catalog, as `DECIDE` takes it.
+fn permission_index(permission: Permission) -> u8 {
+    Permission::ALL
+        .iter()
+        .position(|&p| p == permission)
+        .unwrap_or(0) as u8
+}
+
 fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     ui.heading("Apps");
     if settings.core.is_none() {
@@ -1027,7 +1191,8 @@ fn frame(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         2 => sound(ui, settings),
         3 => displays(ui, settings),
         4 => apps(ui, settings),
-        5 => users(ui, settings),
+        5 => privacy(ui, settings),
+        6 => users(ui, settings),
         _ => account(ui, settings),
     }
     ui.end_scroll(scrolled, &mut page);
@@ -1055,6 +1220,7 @@ fn main(start: Start) -> i64 {
         scale: 0,
         page: Scroll::default(),
         time_zone: 0,
+        privacy: Vec::new(),
     };
     oceans_ui::run_resizable(
         &directory,
