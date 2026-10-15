@@ -655,6 +655,10 @@ name = "oceans-heap"
 version = "0.1.0"
 
 [[package]]
+name = "oceans-html"
+version = "0.1.0"
+
+[[package]]
 name = "oceans-http"
 version = "0.1.0"
 dependencies = [

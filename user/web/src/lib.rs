@@ -149,6 +149,9 @@ impl Connection {
 
 /// A response: its head, then its body as it arrives.
 pub struct Response {
+    /// The address the response came from, after the redirects (what a
+    /// page's relative links are relative to; ADR-0157).
+    pub url: String,
     pub head: Head,
     connection: Connection,
     /// On the heap, like `raw`: a program's stack is 64 KiB.
@@ -179,6 +182,8 @@ pub fn get(net: Handle, url: &str) -> Result<Response, Problem> {
         };
         let response = request(net, &parsed, config)?;
         if !response.head.is_redirect() {
+            let mut response = response;
+            response.url = current;
             return Ok(response);
         }
         let location = response
@@ -245,6 +250,7 @@ fn request(
     }
     let ended = parser.done();
     Ok(Response {
+        url: String::new(),
         head: head.expect("the loop ends with a head"),
         connection,
         parser,

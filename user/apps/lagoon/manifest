@@ -1,0 +1,14 @@
+# Lagoon's package manifest (ADR-0157), an app that comes with the system:
+# `cargo xtask` packages it with the `lagoon-app` program as `lagoon`,
+# signs it with the image's key and bundles it into the boot image.
+id = app.oceans.lagoon
+name = Lagoon
+version = 1.0.0
+publisher = {{PUBLISHER}}
+description = The web, read: pages shown, their links followed, no scripts run
+architecture = x86_64
+api = 1
+entry = lagoon
+permission = window
+permission = network: open the web pages you ask for
+source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/lagoon

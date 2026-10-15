@@ -377,8 +377,8 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     // Wave's button at 640,764; Launchpad's tiles from 220,140, 120 by
     // 112, seven a row, the Terminal first, then the apps by id, Activity
     // Monitor, Calculator and Text Editor among them (ADR-0080): Hello is
-    // the ninth tile (at 400,308); Music comes next, so Notes is the
-    // eleventh (at 640,308); Allow at 836,466.
+    // the ninth tile (at 400,308); Lagoon and Music come next, so Notes is
+    // the twelfth (at 760,308); Allow at 836,466.
     b"run fetch out use:net use:fs -- http://10.0.2.2:$HTTP/packages/notes-1.0.0.opk /keep/notes.opk\r\n",
     b"app install /keep/notes.opk\r\n",
     b"app reset app.oceans.hello network\r\n",
@@ -410,7 +410,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move -196 298",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@monitor mouse_move 0 -456",
+    b"@monitor mouse_move 120 -456",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     // Captured once drawn: Notes' title bar in the focus colour, then the
@@ -421,7 +421,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey ctrl-tab",
     b"@screen 800 90 e3e3e8 the Terminal, focused",
     b"@monitor screendump build/smoke-focus.ppm",
-    b"@monitor mouse_move 225 -55",
+    b"@monitor mouse_move 105 -55",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
     b"@monitor device_del deskmouse",
@@ -843,6 +843,23 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@screen 380 494 f9f9fb the power button's dialog",
     b"@monitor sendkey esc",
     b"@wait desktop: power dialog cancelled",
+    // Lagoon (ADR-0157), started with an address on the host that
+    // redirects to a page: Super+Up gives it the area (its content from
+    // 1,56), its page's text from 253,128, the first line a heading that
+    // is a link, underlined (1 pixel, in the accent) at 155. A click on it
+    // follows it, relative to where the redirect led: the next page's link
+    // is a line further down, underlined at 193. The mouse, at 1216,172
+    // since the desktop's icons, goes back there.
+    b"app start app.oceans.lagoon http://10.0.2.2:$HTTP/lagoon\r\n",
+    b"@wait display: windows for app.oceans.lagoon",
+    b"@monitor sendkey meta_l-up",
+    b"@screen 300 155 2f7cf6 Lagoon's page, its link",
+    b"@monitor mouse_move -916 -27",
+    b"@monitor mouse_button 1",
+    b"@monitor mouse_button 0",
+    b"@screen 300 193 2f7cf6 Lagoon's next page, its link",
+    b"@monitor mouse_move 916 27",
+    b"app stop app.oceans.lagoon\r\n",
     // The lock screen (ADR-0110): a name and a password, then Super+L
     // locks; its field (from 480,400, 320 by 44) is white. A wrong
     // password is refused, the right one opens it. The password stays:
@@ -1208,7 +1225,7 @@ const REBOOT_EXPECT: &[Expect] = &[
     // (ADR-0059), Tiles (ADR-0060) and the three third-party apps
     // (ADR-0062, ADR-0064), whose developer's key is still trusted
     // (ADR-0063).
-    Expect::Contains("core: ready, 16 apps installed, 2 trusted publisher keys"),
+    Expect::Contains("core: ready, 17 apps installed, 2 trusted publisher keys"),
     Expect::Line("Counter: run 3"),
     Expect::Contains("core: started service app.oceans.greeter-service"),
     Expect::Contains("greeter: hello from app.oceans.greeter-service 1.0.0, a Go app on Oceans"),
@@ -1623,7 +1640,10 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains(
         "core: audit: started app.oceans.music 1.1.0 with window, files, sound, network",
     ),
-    Expect::Contains("core: ready, 7 apps installed, 1 trusted publisher keys"),
+    // Lagoon (ADR-0157): the network, and nothing of the user's.
+    Expect::Contains("core: installed lagoon.opk from the system image"),
+    Expect::Contains("core: audit: started app.oceans.lagoon 1.0.0 with window, network"),
+    Expect::Contains("core: ready, 8 apps installed, 1 trusted publisher keys"),
     // Go on Oceans (ADR-0050).
     Expect::Contains("gohello: Go 1."),
     Expect::Contains("gohello: goroutines computed 30"),
@@ -3305,6 +3325,11 @@ const BUNDLED_APPS: &[(&str, &str, &str)] = &[
         "music-app",
         include_str!("../../../user/apps/music/manifest"),
     ),
+    (
+        "lagoon",
+        "lagoon-app",
+        include_str!("../../../user/apps/lagoon/manifest"),
+    ),
 ];
 
 /// The bundled apps as signed packages, `NAME.opk`, for the boot archive.
@@ -4842,6 +4867,18 @@ fn picture_png() -> Vec<u8> {
     png
 }
 
+/// A web page's response, in UTF-8.
+fn html(page: &str) -> Vec<u8> {
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        page.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(page.as_bytes());
+    response
+}
+
 fn big_body() -> Vec<u8> {
     (0..1_048_576u32).map(|i| (i % 251) as u8).collect()
 }
@@ -5246,6 +5283,21 @@ fn serve_http(stream: &mut (impl Read + Write), over_tls: bool) {
         "/big" => fixed("200 OK", &big_body()),
         "/picture.png" => fixed("200 OK", &picture_png()),
         "/tone.wav" => fixed("200 OK", &tone_wav()),
+        // Lagoon's pages (ADR-0157): an address that redirects, a page
+        // with a relative link, and where it leads.
+        "/lagoon" => {
+            b"HTTP/1.1 302 Found\r\nLocation: /lagoon/index.html\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        }
+        "/lagoon/index.html" => html(
+            "<!DOCTYPE html><title>Lagoon's test</title>\
+             <h1><a href=\"next.html\">Lagoon's test link</a></h1>\
+             <p>A page from the host, &amp; its link.</p>",
+        ),
+        "/lagoon/next.html" => html(
+            "<!DOCTYPE html><p>Arrived.</p>\
+             <h1><a href=\"index.html\">Back to the start</a></h1>",
+        ),
         // A radio station (ADR-0135) as SHOUTCAST answers, sending until it
         // closes: 2 s of an 880 Hz tone in MP3.
         "/radio" => {

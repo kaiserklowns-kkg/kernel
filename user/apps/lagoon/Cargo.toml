@@ -1,0 +1,19 @@
+[package]
+name = "lagoon-app"
+description = "Lagoon: Oceans' web browser, pages read and links followed, shipped with the system (ADR-0157)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lagoon-app"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-ui.workspace = true
+oceans-abi.workspace = true
+oceans-html.workspace = true
+oceans-web.workspace = true
