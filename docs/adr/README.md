@@ -153,5 +153,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0144](0144-usb-mouse-wheels.md) | The wheel of a USB mouse: every pointer read by its report descriptor in the report protocol (`SET_PROTOCOL 1`), the boot protocol only as a fallback | Accepted |
 | [0145](0145-files-copy-move-rename.md) | Copy, move and rename in Files (Rename, Copy, Cut and Paste; a copy takes `NAME copy`, never replaces; a folder with all in it) | Accepted |
 | [0147](0147-screen-brightness.md) | The screen's brightness (the `backlight` service: Intel's PCH PWM, Haswell to Kaby Lake, never below 5 %; Control Center's slider; a display controller keeps memory decoding when closed) | Accepted |
+| [0149](0149-desktop-at-first-sight.md) | The desktop at first sight: the Terminal put away at start (Wave, Launchpad or Ctrl+Tab bring it), Control Center's network button named and drawn for Wi-Fi or Ethernet as the top bar shows it | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

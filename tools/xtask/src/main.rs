@@ -3450,14 +3450,14 @@ fn check_smoke_screens() -> Result {
     // Every channel at least `min`: light.
     let light = |colour: u32, min: u32| [16, 8, 0].iter().all(|s| (colour >> s) & 0xff >= min);
     let desktop = read_ppm(&root().join("build/smoke-desktop.ppm"))?;
-    // The Terminal is 960 x 596 at 160,76 on a 1280 x 800 screen; the top
-    // bar is clear, the photograph's pale sky under a shade that darkens
-    // to its top (ADR-0117).
+    // The desktop starts clear (ADR-0149): the Terminal (960 x 596 at
+    // 160,76 on a 1280 x 800 screen when shown) is put away, the
+    // photograph where it would be; the top bar is clear, the
+    // photograph's pale sky under a shade that darkens to its top
+    // (ADR-0117).
     let terminal = pixel(&desktop, 1100, 668);
-    if terminal != TERMINAL {
-        return Err(format!(
-            "desktop capture: the Terminal at 1100,668 is {terminal:06x}, not {TERMINAL:06x}"
-        ));
+    if terminal == TERMINAL {
+        return Err("desktop capture: the Terminal is shown at start (1100,668)".into());
     }
     let (menu, shaded, sky) = (
         pixel(&desktop, 640, 14),
@@ -3484,8 +3484,9 @@ fn check_smoke_screens() -> Result {
     }
     // A window, and the keyboard focus (ADR-0059): Notes' frame is in the
     // middle of the area (at 399,239), its paper inside; the focused title
-    // bar has the focus colour, first Notes', then (Ctrl+Tab) the
-    // Terminal's.
+    // bar has the focus colour, first Notes' (the Terminal put away, its
+    // place the photograph), then Ctrl+Tab gives the Terminal the keyboard
+    // and shows it (ADR-0149).
     const FOCUS_TITLE: u32 = 0xe3_e3_e8;
     const IDLE_TITLE: u32 = 0xf6_f6_f8;
     const PAPER: u32 = 0xf4_ef_e1;
@@ -3493,26 +3494,32 @@ fn check_smoke_screens() -> Result {
     let notes_paper = (787, 450);
     // Clear of the title text and of a notification's shadow (top right).
     let terminal_title = (800, 90);
-    for (file, checks) in [
+    let window = read_ppm(&root().join("build/smoke-window.ppm"))?;
+    let shown = pixel(&window, terminal_title.0, terminal_title.1);
+    if shown == IDLE_TITLE || shown == FOCUS_TITLE {
+        return Err("build/smoke-window.ppm: the Terminal is shown before Ctrl+Tab".into());
+    }
+    type Checks<'a> = &'a [(&'a str, (usize, usize), u32)];
+    let captures: [(&str, Checks<'_>); 2] = [
         (
             "build/smoke-window.ppm",
-            [
+            &[
                 ("Notes' title bar", notes_title, FOCUS_TITLE),
                 ("Notes' paper", notes_paper, PAPER),
-                ("the Terminal's title bar", terminal_title, IDLE_TITLE),
             ],
         ),
         (
             "build/smoke-focus.ppm",
-            [
+            &[
                 ("Notes' title bar", notes_title, IDLE_TITLE),
                 ("Notes' paper", notes_paper, PAPER),
                 ("the Terminal's title bar", terminal_title, FOCUS_TITLE),
             ],
         ),
-    ] {
+    ];
+    for (file, checks) in captures {
         let image = read_ppm(&root().join(file))?;
-        for (what, (x, y), want) in checks {
+        for &(what, (x, y), want) in checks {
             let got = pixel(&image, x, y);
             if got != want {
                 return Err(format!(

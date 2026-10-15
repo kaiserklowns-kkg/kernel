@@ -1987,9 +1987,19 @@ impl Desktop {
         let (dark, accent) = oceans_draw::theme::bytes();
 
         // The round toggles, each with its name under it.
+        // The first is what it opens (ADR-0149): with Wi-Fi, Wi-Fi's own
+        // button (its panel, ADR-0130), lit once joined and showing the
+        // signal; without, the cable, lit once it connects.
         let connected = self.network.as_ref().is_some_and(|n| n.connected);
+        let (network_name, network_on, link) = match self.wifi.as_ref().map(|w| &w.state) {
+            Some(WifiState::Joined { rssi, .. }) => {
+                ("Wi-Fi", true, Link::Wifi(icon::wifi_bars(*rssi)))
+            }
+            Some(_) => ("Wi-Fi", false, Link::WifiOff),
+            None => ("Ethernet", connected, Link::Ethernet(connected)),
+        };
         let toggles: [(&str, bool); 4] = [
-            ("Network", connected),
+            (network_name, network_on),
             ("Dark", dark == 1),
             ("Lock", false),
             ("Settings", false),
@@ -2007,7 +2017,9 @@ impl Desktop {
             canvas.circle(cx, cy, r.w / 2, fill);
             let ink = if *on { WHITE } else { colour::text() };
             match i {
-                0 => glyph_at(canvas, (cx, cy), 20, |s, r| icon::wifi(s, r, 3, ink, ink)),
+                0 => glyph_at(canvas, (cx, cy), 20, |s, r| {
+                    link.draw(s, r, ink, ink.over(fill, 110))
+                }),
                 1 => moon_icon(canvas, cx, cy, ink),
                 2 => lock_icon(canvas, cx, cy, ink),
                 _ => gear_icon(canvas, cx, cy, ink),

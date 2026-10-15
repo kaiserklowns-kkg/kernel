@@ -280,6 +280,9 @@ fn main(start: Start) -> i64 {
             pointer: (canvas.width / 2, canvas.height / 2),
             pointer_device: (canvas.device_width / 2, canvas.device_height / 2),
             terminal_focused: true,
+            // The desktop starts clear (ADR-0149): the Terminal is put
+            // away in Wave, a click or Ctrl+Tab from it.
+            terminal_hidden: true,
             can_power: directory.find("power", "power").is_some(),
             // Until Core says otherwise (without Core, no one else).
             admin: true,
@@ -887,7 +890,18 @@ impl Service {
                             say(self.log, format_args!("display: media key {name} to {app}"));
                         }
                     }
-                    KeyRoute::Consumed => dirty = true,
+                    KeyRoute::Consumed => {
+                        // Ctrl+Tab round to the Terminal (ADR-0149): put
+                        // away, it comes back with the keyboard.
+                        if byte == oceans_window::proto::KEY_NEXT_WINDOW
+                            && self.windows.focus() == Focus::Terminal
+                            && self.desktop.terminal_hidden
+                            && self.desktop.admin
+                        {
+                            self.desktop.terminal_hidden = false;
+                        }
+                        dirty = true;
+                    }
                     KeyRoute::Volume(key) => {
                         self.volume_key(key);
                         dirty = true;
