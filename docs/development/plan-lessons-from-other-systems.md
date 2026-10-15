@@ -289,7 +289,7 @@ items as follows:
 | WP-5 Driver comes back | — | planned |
 | WP-6 Reproducible releases | — | planned |
 | WP-7 Transparency and contrast | [0155](../adr/0155-legibility.md) | done |
-| WP-8 Clean uninstall, reset | — | planned |
+| WP-8 Clean uninstall, reset | [0159](../adr/0159-clean-uninstall-and-reset.md) | done |
 | WP-9 ADR "what the user sees change" | [0146](../adr/0146-promises-to-the-user.md) | done |
 | WP-10 Support windows | [0146](../adr/0146-promises-to-the-user.md) | done |
 | WP-11 Performance budget | — | planned |

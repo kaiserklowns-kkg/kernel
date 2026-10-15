@@ -19,7 +19,7 @@ use super::{LINE_MAX, Shell};
 
 const USAGE: &str = "usage: app list | info ID | install PATH | run ID [ARGS...] | \
                      start ID [ARGS...] | stop ID | enable ID | disable ID | \
-                     remove ID [--keep-data] | \
+                     remove ID [--keep-data] | clear ID | \
                      grant ID PERMISSION | revoke ID PERMISSION | rollback ID | audit | privacy | \
                      trust [add KEY PUBLISHER [--until YYYY-MM-DD] | remove KEY]\r\n";
 
@@ -42,6 +42,8 @@ impl Shell {
             ["stop", id] => self.app_simple(core, op::STOP, &[], id, "stopped"),
             ["enable", id] => self.app_enable(core, id),
             ["disable", id] => self.app_simple(core, op::DISABLE, &[], id, "disabled"),
+            // ADR-0159: erased, so it starts as new; its permissions stay.
+            ["clear", id] => self.app_simple(core, op::RESET_APP, &[], id, "erased the data of"),
             ["remove", id] => self.app_simple(core, op::REMOVE, &[0], id, "removed"),
             ["remove", id, "--keep-data"] => {
                 self.app_simple(core, op::REMOVE, &[1], id, "removed (its data kept)")

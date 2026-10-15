@@ -1706,6 +1706,7 @@ impl Core {
                         }
                     }
                     op::REMOVE => self.remove(data),
+                    op::RESET_APP => self.reset_app(data),
                     op::DECIDE => self.decide(data, reply),
                     op::ROLLBACK => self.rollback(data, reply),
                     op::ENABLE => self.enable(data),
@@ -2402,9 +2403,61 @@ impl Core {
         }
         self.pending_restarts.retain(|(pending, _)| *pending != id);
         let _ = self.save_decisions();
+        self.forget_in_docks(&id);
         self.record(format_args!(
             "removed {id}{}",
             if keep != 0 { " (its data kept)" } else { "" }
+        ));
+        Ok(())
+    }
+
+    /// A removed app leaves no line behind (ADR-0159): out of every
+    /// account's dock file, so installing it again does not bring it back
+    /// into Wave unasked.
+    fn forget_in_docks(&self, id: &str) {
+        let mut files = alloc::vec![String::from(DOCK_FILE)];
+        if let Some(users) = &self.users {
+            for account in &users.accounts {
+                if !account.admin() {
+                    files.push(alloc::format!("{DOCK_FILE}.{}", account.id));
+                }
+            }
+        }
+        for file in files {
+            let Ok(bytes) = read_path(&self.system_dir, &file) else {
+                continue;
+            };
+            let text = core::str::from_utf8(&bytes).unwrap_or("");
+            if !text.lines().any(|line| line.trim() == id) {
+                continue;
+            }
+            let mut kept = String::new();
+            for line in text.lines().filter(|line| line.trim() != id) {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+            let _ = write_file(&self.system_dir, &file, kept.as_bytes());
+        }
+    }
+
+    /// `RESET_APP` (ADR-0159): the app stops and its data is erased, so it
+    /// starts as new; its permissions stay as decided. `NotFound` for an
+    /// app not installed.
+    fn reset_app(&mut self, data: &[u8]) -> Result<(), Refusal> {
+        let id = id_of(data)?.to_owned();
+        self.app(&id)?;
+        let stopped = self.stop(&id, "its data is being reset");
+        let (dir, _) = self.apps_dir.open(&id, flags::WRITE).map_err(io)?;
+        let erased = match oceans_fs_proto::tree::remove_tree(&dir, "data") {
+            Err(FsError::Status(oceans_fs_proto::Status::NotFound)) => Ok(()),
+            other => other,
+        }
+        .and_then(|()| dir.sync());
+        dir.close();
+        erased.map_err(io)?;
+        self.record(format_args!(
+            "reset {id}: its data erased{}",
+            if stopped { "; it was stopped" } else { "" }
         ));
         Ok(())
     }

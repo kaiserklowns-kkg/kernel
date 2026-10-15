@@ -38,7 +38,8 @@ pub mod op {
     pub const RUN: u64 = 5;
     /// data = id: kills the running app.
     pub const STOP: u64 = 6;
-    /// data = `[keep data u8][id]`: stops and uninstalls the app.
+    /// data = `[keep data u8][id]`: stops and uninstalls the app; it
+    /// leaves no line in any dock (ADR-0159).
     pub const REMOVE: u64 = 7;
     /// data = `[permission u8][allow u8][source u8][id]`: records the
     /// user's decision ([`super::source`]): `allow` 1 allows, 0 denies, 2
@@ -214,6 +215,9 @@ pub mod op {
     /// → `[flags u8]` (ADR-0156): bit 0, the microphone is recording now.
     /// Says nothing of who: for the indicator in the top bar.
     pub const IN_USE: u64 = 52;
+    /// data = id (ADR-0159): stops the app and erases its data (`/apps/ID/
+    /// data`), so it starts as new; its permissions stay as decided.
+    pub const RESET_APP: u64 = 53;
 }
 
 /// How many accents there are to choose from (ADR-0113;
@@ -335,6 +339,7 @@ pub mod access {
             op::RUN | op::STOP => RUN,
             op::INSTALL
             | op::REMOVE
+            | op::RESET_APP
             | op::ROLLBACK
             | op::ENABLE
             | op::DISABLE

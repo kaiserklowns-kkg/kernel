@@ -145,6 +145,8 @@ struct Settings {
     /// The updater (`system-update`, ADR-0158), and what it said last.
     updater: Option<Handle>,
     update: UpdateView,
+    /// An erasing button pressed once (ADR-0159): for which app.
+    armed: Option<(String, Armed)>,
     /// The Privacy page's lines (ADR-0156).
     privacy: Vec<PrivacyRow>,
     /// The time zone (ADR-0143), as Core keeps it: minutes ahead of UTC.
@@ -487,6 +489,29 @@ impl Settings {
         self.detail = None;
         self.stale = true;
     }
+
+    /// `RESET_APP` (ADR-0159): the chosen app's data erased; it starts as
+    /// new, its permissions kept.
+    fn reset_app(&mut self) {
+        let (Some(core), Some(detail)) = (self.core, &self.detail) else {
+            return;
+        };
+        let id = detail.id.clone();
+        let mut reply = [0u8; 64];
+        self.message = match core.about(op::RESET_APP, &[], &id, &mut reply) {
+            Ok(_) => alloc::format!("Reset {id}: its data is erased; it starts as new."),
+            Err((error, _)) => alloc::format!("Not reset: {}", error.message()),
+        };
+        self.stale = true;
+    }
+}
+
+/// Which of the chosen app's erasing buttons was pressed once, waiting
+/// for the second press (ADR-0159).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Armed {
+    Reset,
+    Remove,
 }
 
 /// Everything shown about app `id`.
@@ -1256,17 +1281,48 @@ fn apps(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
         ui.y += 34;
     }
     ui.space(10);
-    let remove = ui.button("Remove this app");
+    // Reset and Remove (ADR-0159): each asks for a second press, named
+    // for what it does, before anything is erased.
+    let armed = settings.armed.clone().filter(|(id, _)| *id == detail.id);
+    let reset_label = if matches!(armed, Some((_, Armed::Reset))) {
+        "Press again: erase its data"
+    } else {
+        "Reset"
+    };
+    let remove_label = if matches!(armed, Some((_, Armed::Remove))) {
+        "Press again: remove it and its data"
+    } else {
+        "Remove this app"
+    };
+    let mut flow = Flow::new(Rect::new(ui.area.x, ui.y, ui.area.w, 0), 30, 8);
+    let r = flow.next(ui.button_width(reset_label));
+    let reset = ui.button_in(r, reset_label, false);
+    let r = flow.next(ui.button_width(remove_label));
+    let remove = ui.button_in(r, remove_label, false);
+    ui.y = flow.bottom() + 8;
+    ui.muted("Reset erases what the app keeps, so it starts as new; its permissions stay.");
     if !settings.message.is_empty() {
         ui.muted(&settings.message);
     }
     ui.y = ui.y.max(list_end);
+    let id = detail.id.clone();
     settings.detail = Some(detail);
     if let Some((permission, choice)) = decided {
+        settings.armed = None;
         settings.decide(permission, choice);
     }
-    if remove {
-        settings.remove();
+    match (reset, remove, armed) {
+        (true, _, Some((_, Armed::Reset))) => {
+            settings.armed = None;
+            settings.reset_app();
+        }
+        (true, _, _) => settings.armed = Some((id, Armed::Reset)),
+        (_, true, Some((_, Armed::Remove))) => {
+            settings.armed = None;
+            settings.remove();
+        }
+        (_, true, _) => settings.armed = Some((id, Armed::Remove)),
+        _ => {}
     }
 }
 
@@ -1321,6 +1377,7 @@ fn main(start: Start) -> i64 {
         page: Scroll::default(),
         time_zone: 0,
         privacy: Vec::new(),
+        armed: None,
         updater: directory.find("use", "updater"),
         update: UpdateView::default(),
     };

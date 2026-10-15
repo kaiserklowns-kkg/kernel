@@ -163,5 +163,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0155](0155-legibility.md) | Legibility: Increase contrast and Reduce transparency in Settings → Appearance (`theme::Options`; `APPEARANCE` answers 3 bytes, `kind::THEME`'s `x`), the top bar solid; a WCAG test over every design value | Accepted |
 | [0156](0156-privacy.md) | Privacy in Settings (by permission: each app's decision and when it last started holding it; Core's `PRIVACY` and `IN_USE`, `/system/permissions-used`), and an orange microphone dot in the top bar (audio `RECORDING`); `app privacy` | Accepted |
 | [0158](0158-updates-from-settings.md) | Updates from Settings: the `updater` service (checks signed `SHA256SUMS`, downloads a piece per tick, installs to the slot not in use, never restarts; looks once a day unless turned off), `system-update`, Settings → General → Software update, the shell's `updates`; `oceans-update` shared with `update`; the system's own apps follow a release | Accepted |
+| [0159](0159-clean-uninstall-and-reset.md) | Removing an app leaves nothing (its line in every account's dock goes too); resetting one erases its data so it starts as new, permissions kept (Core's `RESET_APP`, Settings' Reset, `app clear`); erasing buttons ask for a second press | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

@@ -1145,6 +1145,9 @@ const REBOOT_SCRIPT: &[&[u8]] = &[
     b"app list\r\n",
     b"app run app.oceans.hello\r\n",
     b"app run app.oceans.greeter after a reboot\r\n",
+    // Reset (ADR-0159): its data erased, it counts from 1 again.
+    b"app clear app.oceans.hello\r\n",
+    b"app run app.oceans.hello\r\n",
     b"app remove app.oceans.hello\r\n",
     b"app disable app.oceans.heartbeat\r\n",
     b"app list\r\n",
@@ -1209,6 +1212,10 @@ const REBOOT_EXPECT: &[Expect] = &[
     // browser's approval. Up to 11; started and stopped at once, a run may
     // end before it counts itself, so at least the 6 that cannot.
     Expect::Count("hello: run ", 6, 11, " (counted in my storage)"),
+    // Reset (ADR-0159): erased, audited, and the next run is its first.
+    Expect::Line("app: erased the data of app.oceans.hello"),
+    Expect::Contains("core: audit: reset app.oceans.hello: its data erased"),
+    Expect::Line("hello: run 1 (counted in my storage)"),
     Expect::Contains("app: removed app.oceans.hello"),
     Expect::Contains("core: started service app.oceans.heartbeat"),
     Expect::Contains("heartbeat: run 3, beating"),
