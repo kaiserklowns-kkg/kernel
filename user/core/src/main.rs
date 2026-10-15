@@ -358,6 +358,8 @@ struct Core {
     sysinfo: Option<Handle>,
     /// The audio service's endpoint, to ask for player ends (ADR-0094).
     audio: Option<Handle>,
+    /// The updater service (ADR-0158), for Settings' `system-update`.
+    updater: Option<Handle>,
     /// The display service's window endpoint (`WINDOWS`, ADR-0059): a
     /// server end Core may only mint client ends of.
     windows: Option<Handle>,
@@ -471,6 +473,7 @@ impl Core {
             input: directory.find("use", "input"),
             sysinfo: directory.find("sysinfo", "sysinfo"),
             audio: directory.find("use", "audio"),
+            updater: directory.find("use", "updater"),
             windows: None,
             next_window_badge: 1,
             proposal: None,
@@ -562,18 +565,28 @@ impl Core {
         // Every bundled id first: they are the system's own (ADR-0081)
         // when the image's key signed them, checked as each installs.
         let trust = self.trust();
-        let ids: Vec<String> = packages
+        let ids: Vec<Option<String>> = packages
             .iter()
-            .filter_map(|(_, bytes)| {
+            .map(|(_, bytes)| {
                 Package::open(bytes, &trust)
                     .ok()
                     .map(|package| package.manifest.id.to_owned())
             })
             .collect();
-        self.bundled.extend(ids);
-        for (name, bytes) in packages {
+        drop(trust);
+        self.bundled.extend(ids.iter().flatten().cloned());
+        for ((name, bytes), id) in packages.into_iter().zip(ids) {
+            // The same package already installed: nothing to do. Another
+            // with the same version came with a new release (ADR-0158).
+            if let Some(id) = id.filter(|id| self.apps.contains_key(id))
+                && self
+                    .read_app_file(&id, "package.opk")
+                    .is_ok_and(|kept| kept == bytes)
+            {
+                continue;
+            }
             let mut reply = Vec::new();
-            match self.install_bytes(&bytes, &mut reply) {
+            match self.install_bytes_from(&bytes, &mut reply, true) {
                 Ok(()) => say(
                     self.log,
                     format_args!("core: installed {name} from the system image"),
@@ -2010,21 +2023,41 @@ impl Core {
     }
 
     /// Whether `package` may be installed over what is there: by the same
-    /// key, and newer. Returns the version it replaces.
-    fn installable(&self, package: &Package<'_>) -> Result<Option<Version>, Refusal> {
+    /// key, and newer; or, from the system image, as new (ADR-0158: the
+    /// system's own apps are the release's, so a release that changed one
+    /// without a new version still replaces it). Returns the version it
+    /// replaces.
+    fn installable(
+        &self,
+        package: &Package<'_>,
+        from_image: bool,
+    ) -> Result<Option<Version>, Refusal> {
         let Some(installed) = self.apps.get(package.manifest.id) else {
             return Ok(None);
         };
         if installed.key != package.key {
             return Err(Status::KeyChanged.into());
         }
-        if package.manifest.version <= installed.version {
+        let newer = package.manifest.version > installed.version;
+        let same = from_image && package.manifest.version == installed.version;
+        if !newer && !same {
             return Err(Status::NotNewer.into());
         }
         Ok(Some(installed.version))
     }
 
     fn install_bytes(&mut self, bytes: &[u8], reply: &mut Vec<u8>) -> Result<(), Refusal> {
+        self.install_bytes_from(bytes, reply, false)
+    }
+
+    /// Installs a package; `from_image` for the system's own apps from the
+    /// image, which replace an installed copy as new as them (ADR-0158).
+    fn install_bytes_from(
+        &mut self,
+        bytes: &[u8],
+        reply: &mut Vec<u8>,
+        from_image: bool,
+    ) -> Result<(), Refusal> {
         let trust = self.trust();
         let package = Package::open(bytes, &trust).map_err(invalid)?;
         if let Some(request) = package
@@ -2050,7 +2083,7 @@ impl Core {
             });
         }
         let id = package.manifest.id.to_owned();
-        let previous = self.installable(&package)?;
+        let previous = self.installable(&package, from_image)?;
 
         // A folder already there (an app removed with its data kept) is
         // never removed below.
@@ -2239,7 +2272,7 @@ impl Core {
         }
         let trust = self.trust();
         let package = Package::open(&bytes, &trust).map_err(invalid)?;
-        let previous = self.installable(&package)?;
+        let previous = self.installable(&package, false)?;
         let manifest = &package.manifest;
         let mut permissions = String::new();
         for (i, request) in manifest.requests().enumerate() {
@@ -2794,6 +2827,13 @@ impl Core {
                     .map(|h| (h, "use", "audio")),
                 // Given above, as two ends.
                 Permission::SystemSettings => continue,
+                // An end of the updater (ADR-0158): finding and installing
+                // system updates, for the system's own apps only.
+                Permission::SystemUpdate if self.system_app(id) => self
+                    .updater
+                    .and_then(|h| oceans_rt::duplicate(h, rights::SEND | rights::TRANSFER).ok())
+                    .map(|h| (h, "use", "updater")),
+                Permission::SystemUpdate => None,
             };
             match given {
                 Some((handle, kind, label)) => {

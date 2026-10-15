@@ -21,6 +21,9 @@ extern crate alloc;
 /// Needs an allocator: Core, Settings and the shell (ADR-0156).
 #[cfg(any(feature = "build", feature = "alloc"))]
 pub mod privacy;
+/// Needs an allocator: the updater (ADR-0158).
+#[cfg(any(feature = "build", feature = "alloc"))]
+pub mod sums;
 pub mod web;
 
 #[cfg(test)]
@@ -84,10 +87,14 @@ pub enum Permission {
     /// sound's configuration, read only. Only the system's own apps
     /// (Settings) may ask for it.
     SystemSettings,
+    /// Finding and installing system updates (ADR-0158): an end of the
+    /// `updater` service. Only the system's own apps (Settings) may ask for
+    /// it.
+    SystemUpdate,
 }
 
 impl Permission {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Console,
         Self::Storage,
         Self::SystemInfo,
@@ -99,6 +106,7 @@ impl Permission {
         Self::ManageApps,
         Self::Sound,
         Self::SystemSettings,
+        Self::SystemUpdate,
     ];
 
     pub fn name(self) -> &'static str {
@@ -114,6 +122,7 @@ impl Permission {
             Self::ManageApps => "manage-apps",
             Self::Sound => "sound",
             Self::SystemSettings => "system-settings",
+            Self::SystemUpdate => "system-update",
         }
     }
 
@@ -135,6 +144,7 @@ impl Permission {
             Self::ManageApps => "manage your apps and their permissions",
             Self::Sound => "play sound",
             Self::SystemSettings => "see the network's and the sound's settings",
+            Self::SystemUpdate => "find and install updates to Oceans",
         }
     }
 
@@ -154,7 +164,10 @@ impl Permission {
     /// Only the system's own apps (signed by a key of the image's trust
     /// list) may ask for it (ADR-0081).
     pub fn system_only(self) -> bool {
-        matches!(self, Self::ManageApps | Self::SystemSettings)
+        matches!(
+            self,
+            Self::ManageApps | Self::SystemSettings | Self::SystemUpdate
+        )
     }
 }
 

@@ -1,0 +1,21 @@
+[package]
+name = "updater"
+description = "The updater service: finds, downloads and installs system updates when the user asks (ADR-0158)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "updater"
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-fs-proto.workspace = true
+oceans-core-proto.workspace = true
+oceans-package = { workspace = true, features = ["alloc"] }
+oceans-update.workspace = true
+oceans-web.workspace = true
+sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"] }

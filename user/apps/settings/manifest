@@ -14,4 +14,5 @@ permission = window
 permission = system-info
 permission = manage-apps: show your apps and change their permissions
 permission = system-settings: show the network's and the sound's settings
+permission = system-update: find and install updates to Oceans
 source = https://github.com/kaiserklowns-kkg/kernel/tree/main/user/apps/settings

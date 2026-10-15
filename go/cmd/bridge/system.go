@@ -84,6 +84,7 @@ var permissions = []struct{ name, description string }{
 	{"manage-apps", "manage your apps and their permissions"},
 	{"sound", "play sound"},
 	{"system-settings", "see the network's and the sound's settings"},
+	{"system-update", "find and install updates to Oceans"},
 }
 
 var decisions = []string{"automatic", "allowed", "denied", "undecided"}

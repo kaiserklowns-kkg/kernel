@@ -274,3 +274,23 @@ fn signed_lists_name_only_files_beside_them() {
         assert!(error.contains("not a plain file name"), "{name}: {error}");
     }
 }
+
+/// What `oceans release` signs is what the device's updater checks
+/// (ADR-0158): the same context, format and key.
+#[test]
+fn release_checksums_verify_on_the_device() {
+    let key = DeveloperKey::generate("Oceans Test Release").unwrap();
+    let sums = format!(
+        "{}  oceans-0.1.1-alpha.opk\n",
+        release::sha256_hex(b"package")
+    );
+    let signature = release::sign_checksums(&key, &sums);
+    let public = release::parse_key(&key.public_hex()).unwrap();
+    let trusted = [oceans_package::TrustedKey {
+        publisher: "Oceans Test Release",
+        key: public,
+    }];
+    let listed = oceans_package::sums::verify(&sums, &signature, &trusted).unwrap();
+    assert_eq!(listed[0].name, "oceans-0.1.1-alpha.opk");
+    assert_eq!(listed[0].sha256, release::sha256_hex(b"package"));
+}

@@ -1,0 +1,21 @@
+[package]
+name = "oceans-update"
+description = "System updates shared by `update` and the `updater` service (ADR-0071, ADR-0092, ADR-0158)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+oceans-rt = { workspace = true, features = ["alloc"] }
+oceans-block-proto.workspace = true
+oceans-fs-proto.workspace = true
+oceans-package.workspace = true
+oceans-fat.workspace = true
+oceans-gpt.workspace = true
+# BLAKE2B: checking a Secure Boot update before it is written (ADR-0092).
+blake2 = { version = "0.10.6", default-features = false }

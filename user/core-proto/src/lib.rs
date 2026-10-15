@@ -641,3 +641,50 @@ pub fn parts(bytes: &[u8]) -> impl Iterator<Item = &str> {
         .split(|&b| b == 0)
         .map(|part| core::str::from_utf8(part).unwrap_or("?"))
 }
+
+/// The `updater` service's protocol (ADR-0158): what Settings (through the
+/// `system-update` permission) and the shell ask of it. Every request is
+/// answered at once; the work goes on in the service between requests.
+pub mod updater {
+    /// → `[state u8][auto u8][percent u8]` then a line of text for the
+    /// user: what is running, what is available, how far a download is,
+    /// or what went wrong.
+    pub const STATUS: u64 = 1;
+    /// Looks for a newer release at the source (`SHA256SUMS`, signed by an
+    /// update key); answered once it is known.
+    pub const CHECK: u64 = 2;
+    /// Downloads the release found, checks it, and installs it in the slot
+    /// not in use. Answered at once; `STATUS` follows it. Nothing restarts.
+    pub const INSTALL: u64 = 3;
+    /// The previous release starts first from the next boot (ADR-0122).
+    pub const PREVIOUS: u64 = 4;
+    /// data = `[0 | 1]`: look for updates by itself (once a day), or only
+    /// when asked. Only ever looks; never downloads or installs alone.
+    pub const AUTO: u64 = 5;
+    /// data = a URL ending in `/`, where `SHA256SUMS` is (a mirror, or a
+    /// test server); empty: the published releases again.
+    pub const SOURCE: u64 = 6;
+
+    /// The states `STATUS` reports.
+    pub mod state {
+        /// Nothing looked for yet since the start.
+        pub const IDLE: u8 = 0;
+        pub const CHECKING: u8 = 1;
+        pub const UP_TO_DATE: u8 = 2;
+        /// A newer release is there; `INSTALL` gets it.
+        pub const AVAILABLE: u8 = 3;
+        pub const DOWNLOADING: u8 = 4;
+        pub const INSTALLING: u8 = 5;
+        /// Installed; it starts when the user restarts.
+        pub const INSTALLED: u8 = 6;
+        pub const FAILED: u8 = 7;
+    }
+
+    /// Request statuses.
+    pub const OK: u64 = 0;
+    /// Busy with a download or an install.
+    pub const BUSY: u64 = 1;
+    pub const BAD_REQUEST: u64 = 2;
+    /// Not now: nothing found to install, or it failed (`STATUS` says).
+    pub const NOT_NOW: u64 = 3;
+}

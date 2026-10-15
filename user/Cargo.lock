@@ -1086,6 +1086,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "oceans-update"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "oceans-block-proto",
+ "oceans-fat",
+ "oceans-fs-proto",
+ "oceans-gpt",
+ "oceans-package",
+ "oceans-rt",
+]
+
+[[package]]
 name = "oceans-usb"
 version = "0.1.0"
 dependencies = [
@@ -1567,6 +1580,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "updater"
+version = "0.1.0"
+dependencies = [
+ "oceans-core-proto",
+ "oceans-fs-proto",
+ "oceans-package",
+ "oceans-rt",
+ "oceans-update",
+ "oceans-web",
+ "sha2",
+]
+
+[[package]]
 name = "usb-hid"
 version = "0.1.0"
 dependencies = [
@@ -1606,6 +1632,7 @@ dependencies = [
  "oceans-package",
  "oceans-rt",
  "oceans-tls",
+ "oceans-update",
  "oceans-usb",
  "oceans-wav",
 ]

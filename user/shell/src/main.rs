@@ -53,7 +53,7 @@ const KEY_DOWN: u8 = 0x81;
 /// Command lines kept for Up and Down.
 const HISTORY: usize = 32;
 /// The shell's own commands, for Tab (programs come from `/bin`).
-const BUILTINS: [&str; 24] = [
+const BUILTINS: [&str; 25] = [
     "help",
     "echo",
     "grants",
@@ -74,6 +74,7 @@ const BUILTINS: [&str; 24] = [
     "user",
     "appearance",
     "scale",
+    "updates",
     "ai",
     "ui",
     "clear",
@@ -418,6 +419,7 @@ impl Shell {
             ["user", words @ ..] => self.user(words),
             ["appearance", words @ ..] => self.appearance(words),
             ["scale", words @ ..] => self.scale(words),
+            ["updates", words @ ..] => self.updates(words),
             ["ai", words @ ..] => self.ai(words),
             ["ui", words @ ..] => self.ui(words),
             ["clear"] => self.write(b"\x1b[2J\x1b[H"),
@@ -482,6 +484,7 @@ impl Shell {
              \x20 appearance [light | dark] [ACCENT]  the theme; ACCENT: blue, purple, ...\r\n\
              \x20 appearance contrast | plain | solid | clear  legibility (ADR-0155)\r\n\
              \x20 scale [auto | PERCENT]     the interface's size: 100, 125, 150 ... 300\r\n\
+             \x20 updates [check | install | previous | auto on|off | source URL]  system updates\r\n\
              \x20 shutdown | reboot          stop the system, then switch off or restart\r\n\
              \x20 clear                      clear the screen\r\n\
              \x20 exit                       leave the shell\r\n"

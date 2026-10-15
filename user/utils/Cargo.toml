@@ -134,3 +134,5 @@ oceans-gpt.workspace = true
 oceans-account.workspace = true
 # BLAKE2B: checking a Secure Boot update before it is written (ADR-0092).
 blake2 = { version = "0.10.6", default-features = false }
+# `update` (ADR-0071), shared with the updater service (ADR-0158).
+oceans-update.workspace = true

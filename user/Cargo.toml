@@ -3,7 +3,7 @@
 # user/.cargo/config.toml. Built by `cargo xtask`.
 [workspace]
 resolver = "3"
-members = ["rt", "fs-proto", "core-proto", "block-proto", "audio-proto", "net-proto", "input-proto", "display-proto", "ui", "clock", "backlight", "acpi", "web", "sdk", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "nvme", "ahci", "hda", "nic", "virtio-net", "e1000e", "igc", "rtl8168", "iwm", "installer", "xhci", "usb-storage", "usb-hid", "core", "display", "apps/hello", "apps/heartbeat", "apps/notes", "apps/calculator", "apps/settings", "apps/files", "apps/activity", "apps/editor", "apps/viewer", "apps/music", "gohost", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
+members = ["rt", "update-core", "updater", "fs-proto", "core-proto", "block-proto", "audio-proto", "net-proto", "input-proto", "display-proto", "ui", "clock", "backlight", "acpi", "web", "sdk", "virtio", "init", "fs", "shell", "utils", "virtio-blk", "nvme", "ahci", "hda", "nic", "virtio-net", "e1000e", "igc", "rtl8168", "iwm", "installer", "xhci", "usb-storage", "usb-hid", "core", "display", "apps/hello", "apps/heartbeat", "apps/notes", "apps/calculator", "apps/settings", "apps/files", "apps/activity", "apps/editor", "apps/viewer", "apps/music", "gohost", "net", "net-echo", "echo-service", "hello-client", "crasher", "ipc-test"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,6 +19,7 @@ oceans-rt = { path = "rt" }
 oceans-fs-proto = { path = "fs-proto" }
 oceans-core-proto = { path = "core-proto" }
 oceans-package = { path = "../libs/package" }
+oceans-update = { path = "update-core" }
 oceans-search = { path = "../libs/search" }
 oceans-account = { path = "../libs/account" }
 oceans-block-proto = { path = "block-proto" }

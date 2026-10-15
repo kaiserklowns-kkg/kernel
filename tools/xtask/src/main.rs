@@ -57,6 +57,8 @@ const USER_PROGRAMS: &[&str] = &[
     "net-echo",
     "clock",
     "backlight",
+    // System updates, from Settings and the shell (ADR-0158).
+    "updater",
     "acpi",
     "ifconfig",
     "ping",
@@ -1330,6 +1332,9 @@ const NEW_EXPECT: &[Expect] = &[
 /// Output the script must produce: `Line` must be a whole console line,
 /// `Contains` a substring of one (never text that is also typed input).
 const SHELL_EXPECT: &[Expect] = &[
+    // The updater (ADR-0158): a test looks only when asked, so this long
+    // boot never reaches the internet.
+    Expect::Contains("updater: ready; checks automatically: off"),
     // The diagnostic key (ADR-0089).
     Expect::Contains("diag: cpu 0 runs "),
     Expect::Contains("(init/shell): thread "),
@@ -1496,7 +1501,7 @@ const SHELL_EXPECT: &[Expect] = &[
     Expect::Contains("core: installed settings.opk from the system image"),
     // `system-settings` (ADR-0096), with the system's own rights, unasked.
     Expect::Contains(
-        "core: audit: started app.oceans.settings 1.5.0 with window, system-info, manage-apps, system-settings",
+        "core: audit: started app.oceans.settings 1.5.0 with window, system-info, manage-apps, system-settings, system-update",
     ),
     Expect::Contains("core: installed files.opk from the system image"),
     Expect::Contains("core: installed activity.opk from the system image"),

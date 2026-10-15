@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use oceans_abi::sysinfo::{self, KernelInfo, MemoryInfo};
+use oceans_core_proto::updater::{self, state as update_state};
 use oceans_core_proto::{Core, CoreError, Decision, Status, decision, field, op, parts, source};
 use oceans_net_proto::{Colons, Dotted};
 use oceans_package::Permission;
@@ -85,6 +86,16 @@ struct Account {
     message: String,
 }
 
+/// What the updater said last (ADR-0158): its state, whether it looks by
+/// itself, a download's progress, and its words.
+#[derive(Default)]
+struct UpdateView {
+    state: u8,
+    auto: bool,
+    percent: u8,
+    text: String,
+}
+
 /// One line of the Privacy page (ADR-0156): an app, a permission it asks
 /// the user for, the decision, and when it last started holding it.
 struct PrivacyRow {
@@ -131,6 +142,9 @@ struct Settings {
     scale: u16,
     /// How far down the page shown is scrolled (ADR-0138).
     page: Scroll,
+    /// The updater (`system-update`, ADR-0158), and what it said last.
+    updater: Option<Handle>,
+    update: UpdateView,
     /// The Privacy page's lines (ADR-0156).
     privacy: Vec<PrivacyRow>,
     /// The time zone (ADR-0143), as Core keeps it: minutes ahead of UTC.
@@ -229,6 +243,35 @@ impl Settings {
             .and_then(|i| self.apps.get(i))
             .map(|app| app.id.clone())
             .map(|id| detail(core, &id));
+    }
+
+    /// One request to the updater (ADR-0158); what it says after is kept.
+    /// `false` if it refused (its words say why).
+    fn ask_updater(&mut self, op: u64, data: &[u8]) -> bool {
+        let Some(updater) = self.updater else {
+            return false;
+        };
+        let mut reply = [0u8; 256];
+        match oceans_rt::ipc_call(updater, op, data, &mut reply) {
+            Ok((len, status)) => {
+                if len >= 3 {
+                    self.update = UpdateView {
+                        state: reply[0],
+                        auto: reply[1] != 0,
+                        percent: reply[2],
+                        text: String::from(core::str::from_utf8(&reply[3..len]).unwrap_or("")),
+                    };
+                }
+                if status == updater::BUSY {
+                    self.update.text = String::from("busy: a download or an install is under way");
+                }
+                status == updater::OK
+            }
+            Err(_) => {
+                self.update.text = String::from("the updater does not answer");
+                false
+            }
+        }
     }
 
     /// `DECIDE` for the chosen app, as made in Settings.
@@ -571,6 +614,7 @@ fn general(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
             settings.set_time_zone(oceans_core_proto::TIME_ZONES[i].0);
         }
     }
+    software_update(ui, settings);
     // The appearance (ADR-0113): light or dark, and the accent.
     if settings.core.is_none() {
         return;
@@ -915,6 +959,62 @@ fn users(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
     }
 }
 
+/// Software update (ADR-0158): what runs and what is available, and the
+/// user's buttons. Nothing here restarts the machine: an installed update
+/// waits for the user's restart.
+fn software_update(ui: &mut Ui<'_, '_>, settings: &mut Settings) {
+    if settings.updater.is_none() {
+        return;
+    }
+    // Asked each frame (a second apart): a download's progress shows.
+    settings.ask_updater(updater::STATUS, &[]);
+    ui.space(10);
+    ui.heading("Software update");
+    let view = &settings.update;
+    let mut words = view.text.clone();
+    if view.state == update_state::DOWNLOADING && view.percent > 0 {
+        words = alloc::format!("{words} ({}%)", view.percent);
+    }
+    ui.muted(&words);
+    if view.state == update_state::INSTALLED {
+        ui.muted("It starts when you restart: Launchpad, then Restart.");
+    }
+    let busy = matches!(
+        view.state,
+        update_state::CHECKING | update_state::DOWNLOADING | update_state::INSTALLING
+    );
+    let auto = view.auto;
+    let mut buttons: Vec<(&str, u64, bool)> = Vec::new();
+    if !busy {
+        buttons.push(("Check now", updater::CHECK, false));
+    }
+    if view.state == update_state::AVAILABLE {
+        buttons.push(("Download and install", updater::INSTALL, true));
+    }
+    if !busy && view.state != update_state::INSTALLED {
+        buttons.push(("Use the previous version", updater::PREVIOUS, false));
+    }
+    let mut flow = Flow::new(Rect::new(ui.area.x, ui.y, ui.area.w, 0), 30, 6);
+    let mut asked = None;
+    for &(label, op, primary) in &buttons {
+        let r = flow.next(ui.button_width(label));
+        if ui.button_in(r, label, primary) {
+            asked = Some(op);
+        }
+    }
+    // Filled while on: it only ever looks, never installs by itself.
+    let label = "Check automatically";
+    let r = flow.next(ui.button_width(label));
+    let toggled = ui.button_in(r, label, auto);
+    ui.y = flow.bottom() + 12;
+    if let Some(op) = asked {
+        settings.ask_updater(op, &[]);
+    }
+    if toggled {
+        settings.ask_updater(updater::AUTO, &[u8::from(!auto)]);
+    }
+}
+
 /// When an app last started holding a permission (ADR-0156), in the
 /// user's time zone: `2026-10-15 09:41`, or "never".
 fn when(seconds: u64, zone: i16) -> String {
@@ -1221,6 +1321,8 @@ fn main(start: Start) -> i64 {
         page: Scroll::default(),
         time_zone: 0,
         privacy: Vec::new(),
+        updater: directory.find("use", "updater"),
+        update: UpdateView::default(),
     };
     oceans_ui::run_resizable(
         &directory,
@@ -1228,7 +1330,8 @@ fn main(start: Start) -> i64 {
         WIDTH,
         HEIGHT,
         MIN_SIZE,
-        None,
+        // A second: the time, and an update's progress (ADR-0158).
+        Some(1000),
         &mut settings,
         frame,
     )

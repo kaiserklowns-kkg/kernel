@@ -28,7 +28,9 @@ use blake2::{Blake2b512, Digest};
 use oceans_block_proto::{Disk, SECTOR_SIZE};
 use oceans_fat::{Fat, IoError, NodeId, ROOT, Window};
 use oceans_gpt::Partition;
-use oceans_rt::{Handle, Out};
+use oceans_rt::Handle;
+
+use crate::Report;
 
 /// The slot's files (as `cargo xtask` writes them, `secure_boot.rs`).
 const EFI_DIR: [&str; 2] = ["EFI", "BOOT"];
@@ -211,7 +213,7 @@ fn slots(stick: &mut Stick) -> Result<[Slot; 2], String> {
 }
 
 /// Makes the table whole after an interrupted switch, saying so.
-fn repair(out: &mut Out, stick: &mut Stick) -> Result<(), String> {
+fn repair(out: &mut dyn Report, stick: &mut Stick) -> Result<(), String> {
     if !stick.writable {
         return Ok(());
     }
@@ -227,7 +229,7 @@ fn repair(out: &mut Out, stick: &mut Stick) -> Result<(), String> {
     Ok(())
 }
 
-pub fn status(out: &mut Out, block: Handle, release: &str) -> Result<(), String> {
+pub fn status(out: &mut dyn Report, block: Handle, release: &str) -> Result<(), String> {
     let mut stick = Stick::open(block)?;
     repair(out, &mut stick)?;
     let [first, second] = slots(&mut stick)?;
@@ -331,7 +333,7 @@ pub struct Update<'a> {
 /// Installs `update` into the slot not starting first, then makes it
 /// start first (module docs). `running` is the running release.
 pub fn apply(
-    out: &mut Out,
+    out: &mut dyn Report,
     block: Handle,
     running: &str,
     update: &Update<'_>,
@@ -365,7 +367,7 @@ pub fn apply(
     }
     let [_, target] = slots(&mut stick)?;
     let _ = writeln!(out, "update: writing slot {}", target.name);
-    let _ = out.flush();
+    out.flush();
 
     // 1. The slot not starting first, made again from nothing: its label
     //    kept, its release written last.

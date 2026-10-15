@@ -304,6 +304,80 @@ pub fn system_package(
     oceans_package::build(&files, &key.seed).map_err(|e| format!("cannot sign the update: {e:?}"))
 }
 
+/// The port of the hardware smoke test's release server (ADR-0158), typed
+/// as `$UPDATES`.
+static UPDATES_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+/// Where the test release is published for the updater to find.
+const UPDATES_DIR: &str = "build/smoke-hw-release";
+
+/// Publishes `update` as a release is published (ADR-0075: the package,
+/// `SHA256SUMS`, its signature by the test's release key) and serves the
+/// directory over HTTP on a free port, for the updater (ADR-0158).
+fn serve_updates(update: &[u8]) -> Result {
+    let dir = root().join(UPDATES_DIR);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let name = "oceans-0.1.1-alpha.opk";
+    let sums = format!("{}  {name}\n", oceans_dev::release::sha256_hex(update));
+    let key = release::test_release_key();
+    for (file, bytes) in [
+        (name, update.to_vec()),
+        (oceans_dev::release::SUMS, sums.clone().into_bytes()),
+        (
+            oceans_dev::release::SIGNATURE,
+            oceans_dev::release::sign_checksums(&key, &sums).into_bytes(),
+        ),
+    ] {
+        fs::write(dir.join(file), bytes).map_err(|e| format!("{file}: {e}"))?;
+    }
+    if UPDATES_PORT.get().is_some() {
+        return Ok(());
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("the release server: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let _ = UPDATES_PORT.set(port);
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let dir = dir.clone();
+            thread::spawn(move || serve_file(stream, &dir));
+        }
+    });
+    Ok(())
+}
+
+/// One `GET /NAME` of a file in `dir` (plain names only), or a 404.
+fn serve_file(mut stream: std::net::TcpStream, dir: &Path) {
+    use std::io::{Read as _, Write as _};
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut request = Vec::new();
+    let mut byte = [0u8; 1];
+    while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+        match stream.read(&mut byte) {
+            Ok(1) => request.push(byte[0]),
+            _ => return,
+        }
+    }
+    let request = String::from_utf8_lossy(&request);
+    let path = request.split(' ').nth(1).unwrap_or("");
+    let name = path.trim_start_matches('/');
+    let plain = !name.is_empty() && !name.contains(['/', '\\', ':']) && !name.starts_with('.');
+    let body = plain.then(|| fs::read(dir.join(name)).ok()).flatten();
+    let _ = match body {
+        Some(body) => stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .and_then(|()| stream.write_all(&body)),
+        None => stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+    };
+}
+
 /// The hardware smoke test's system packages:
 /// - an update signed with its release key;
 /// - one signed with the development key, which a release image does not
@@ -464,11 +538,17 @@ const HW_REBOOT_EXPECT: &[Expect] = &[
 
 /// Installed (ADR-0126), first boot from the SSD: `/boot` is the SSD's EFI
 /// system partition, the root its Oceans partition, formatted now; an
-/// update goes to `/boot`.
+/// update goes to `/boot`. The update comes as Settings gets it (ADR-0158):
+/// the updater finds it at a release's source (the host's test release),
+/// checks its signed checksums, downloads it and installs it; the restart
+/// is the user's (the script's).
 const INSTALLED_SCRIPT: &[&[u8]] = &[
     b"ls /boot/boot\r\n",
     b"run update out use:fs -- status\r\n",
-    b"run update out use:fs -- apply /usb/update.opk\r\n",
+    b"updates\r\n",
+    b"updates source http://10.0.2.2:$UPDATES/\r\n",
+    b"updates check\r\n",
+    b"updates install\r\n",
     b"write /installed.txt kept on the installed disk\r\n",
     b"sync\r\n",
     b"reboot\r\n",
@@ -481,7 +561,15 @@ const INSTALLED_EXPECT: &[Expect] = &[
     Expect::Line("  a/"),
     Expect::Line("update: running Oceans 0.1.0 alpha (slot a)"),
     Expect::Line("update: slot b is empty"),
-    Expect::Contains("update: Oceans 0.1.1 alpha installed in slot b"),
+    // The updater (ADR-0158): looking by itself, then asked.
+    Expect::Contains("updater: ready; checks automatically: on"),
+    Expect::Line("updates: checks automatically: on"),
+    Expect::Line(
+        "updates: Oceans 0.1.1 is available (oceans-0.1.1-alpha.opk); you are running 0.1.0 alpha",
+    ),
+    Expect::Contains("updater: Oceans 0.1.1: "),
+    Expect::Contains("updates: Oceans 0.1.1 alpha installed in slot b"),
+    Expect::Contains("restart when you are ready"),
     Expect::Contains("init: asked to restart: stopping the system"),
 ];
 /// Installed, the update started first; the file kept on the SSD's root.
@@ -508,6 +596,8 @@ pub fn smoke_hw(profile: Profile) -> Result {
     let esp = build_image_for(profile, None, Setup::Hardware, &keys)?;
     write_usb_image(&esp)?;
     let (update, untrusted, system) = smoke_updates(&esp)?;
+    // The same update as a published release, for the updater (ADR-0158).
+    serve_updates(&update)?;
     copy_to_usb(&[
         ("update.opk", &update),
         ("untrusted.opk", &untrusted),
@@ -978,7 +1068,14 @@ fn hw_boot(script: &[&[u8]], expected: &[Expect], from: BootFrom) -> Result {
             // last output, then done.
             Ok(Err(())) => match commands.next() {
                 Some(command) => {
-                    for &byte in *command {
+                    // The test release's server (ADR-0158), as `$UPDATES`.
+                    let port = UPDATES_PORT
+                        .get()
+                        .map_or_else(String::new, |port| port.to_string());
+                    let command = String::from_utf8_lossy(command)
+                        .replace("$UPDATES", &port)
+                        .into_bytes();
+                    for &byte in &command {
                         let _ = input.write_all(&[byte]).and_then(|()| input.flush());
                         thread::sleep(Duration::from_millis(5));
                     }

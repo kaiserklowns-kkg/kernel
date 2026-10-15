@@ -788,6 +788,75 @@ impl Shell {
         ));
     }
 
+    /// `updates [check | install | previous | auto on|off | source URL]`
+    /// (ADR-0158): asks the updater, then says what it says. `install`
+    /// waits for the download and the install, saying how far it got; it
+    /// never restarts.
+    pub(super) fn updates(&self, words: &[&str]) {
+        use oceans_core_proto::updater::{self, state};
+        const USAGE: &str =
+            "usage: updates [check | install | previous | auto on|off | source URL]\r\n";
+        let Some(end) = self.directory.find("use", "updater") else {
+            return self.print(format_args!(
+                "updates: this shell cannot reach the updater\r\n"
+            ));
+        };
+        let (op, data): (u64, &[u8]) = match words {
+            [] => (updater::STATUS, &[]),
+            ["check"] => (updater::CHECK, &[]),
+            ["install"] => (updater::INSTALL, &[]),
+            ["previous"] => (updater::PREVIOUS, &[]),
+            ["auto", "on"] => (updater::AUTO, &[1]),
+            ["auto", "off"] => (updater::AUTO, &[0]),
+            ["source"] => (updater::SOURCE, &[]),
+            ["source", url] => (updater::SOURCE, url.as_bytes()),
+            _ => return self.write(USAGE.as_bytes()),
+        };
+        let mut reply = [0u8; 256];
+        let ask = |op: u64, data: &[u8], reply: &mut [u8; 256]| {
+            oceans_rt::ipc_call(end, op, data, reply)
+                .ok()
+                .filter(|&(len, _)| len >= 3)
+                .map(|(len, status)| (status, len))
+        };
+        let Some((status, mut len)) = ask(op, data, &mut reply) else {
+            return self.print(format_args!("updates: the updater does not answer\r\n"));
+        };
+        match status {
+            updater::OK => {}
+            updater::BUSY => {
+                return self.print(format_args!(
+                    "updates: busy: a download or an install is under way\r\n"
+                ));
+            }
+            updater::BAD_REQUEST => return self.write(USAGE.as_bytes()),
+            _ => {}
+        }
+        // An install goes on in the updater: follow it to its end.
+        let mut shown = 0u8;
+        while op == updater::INSTALL && matches!(reply[0], state::DOWNLOADING | state::INSTALLING) {
+            if reply[0] == state::DOWNLOADING && reply[2] >= shown.saturating_add(25) {
+                shown = reply[2] / 25 * 25;
+                self.print(format_args!("updates: downloaded {shown}%\r\n"));
+            }
+            oceans_rt::sleep_ms(200);
+            match ask(updater::STATUS, &[], &mut reply) {
+                Some((_, got)) => len = got,
+                None => {
+                    return self.print(format_args!("updates: the updater does not answer\r\n"));
+                }
+            }
+        }
+        let auto = if reply[1] != 0 { "on" } else { "off" };
+        self.print(format_args!(
+            "updates: {}\r\n",
+            core::str::from_utf8(&reply[3..len]).unwrap_or("?")
+        ));
+        if words.is_empty() || words[0] == "auto" {
+            self.print(format_args!("updates: checks automatically: {auto}\r\n"));
+        }
+    }
+
     /// `scale [auto | PERCENT]` (ADR-0136): the interface's scale, kept by
     /// Core; the desktop takes it up if the screen can (else automatic).
     pub(super) fn scale(&self, words: &[&str]) {
