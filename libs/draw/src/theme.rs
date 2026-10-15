@@ -36,15 +36,52 @@ pub const ACCENTS: [(&str, Rgb); 6] = [
     ("Blue", Rgb(0x2f_7c_f6)),
     ("Purple", Rgb(0x8e_5c_f7)),
     ("Pink", Rgb(0xe8_4a_7f)),
-    ("Orange", Rgb(0xf5_8f_3b)),
+    ("Orange", Rgb(0xe0_6c_0a)),
     ("Green", Rgb(0x2f_a8_4f)),
     ("Graphite", Rgb(0x7d_7d_85)),
 ];
+
+/// The accents with more contrast (ADR-0155): each dark enough that white
+/// on it reaches 4.5:1 (WCAG AA), in the order of [`ACCENTS`].
+pub const CONTRAST_ACCENTS: [Rgb; 6] = [
+    Rgb(0x1a_5f_d0),
+    Rgb(0x6e_3c_d6),
+    Rgb(0xc0_2c_5e),
+    Rgb(0xa8_52_0a),
+    Rgb(0x1d_76_35),
+    Rgb(0x5e_5e_66),
+];
+
+/// What the user chose for legibility (ADR-0155), beside light or dark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Increase contrast: stronger text, lines and borders, deeper
+    /// accents.
+    pub contrast: bool,
+    /// Reduce transparency: the menu bar and Wave solid, the wallpaper no
+    /// longer through them.
+    pub solid: bool,
+}
+
+impl Options {
+    pub const fn from_byte(byte: u8) -> Self {
+        Self {
+            contrast: byte & 1 != 0,
+            solid: byte & 2 != 0,
+        }
+    }
+
+    pub const fn byte(self) -> u8 {
+        (self.contrast as u8) | ((self.solid as u8) << 1)
+    }
+}
 
 /// The colours of one appearance with one accent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub appearance: Appearance,
+    /// The legibility options these colours were made with.
+    pub options: Options,
     /// A window's background.
     pub window: Rgb,
     /// Sidebars and toolbars.
@@ -79,6 +116,60 @@ pub struct Theme {
 
 impl Theme {
     pub fn new(appearance: Appearance, accent: usize) -> Self {
+        Self::with(appearance, accent, Options::default())
+    }
+
+    /// The colours of `appearance` with accent number `accent`, made more
+    /// legible as `options` asks (ADR-0155).
+    pub fn with(appearance: Appearance, accent: usize, options: Options) -> Self {
+        let mut theme = Self::base(appearance, accent);
+        theme.options = options;
+        if options.contrast {
+            theme.raise_contrast(accent);
+        }
+        theme
+    }
+
+    /// Increase contrast (ADR-0155): text and secondary text toward full
+    /// black or white, lines and borders that stand out (3:1 against the
+    /// window), controls a step further from the window, and accents dark
+    /// enough for white text on them (4.5:1).
+    fn raise_contrast(&mut self, accent: usize) {
+        let deep = CONTRAST_ACCENTS
+            .get(accent)
+            .copied()
+            .unwrap_or(CONTRAST_ACCENTS[0]);
+        self.accent = deep;
+        self.accent_pressed = Rgb(0).over(deep, 40);
+        match self.appearance {
+            Appearance::Light => {
+                self.text = Rgb(0x00_00_00);
+                self.muted = Rgb(0x48_48_4d);
+                self.line = Rgb(0x8a_8a_90);
+                self.border = Rgb(0x6e_6e_73);
+                self.button = Rgb(0xd1_d1_d6);
+                self.button_hover = Rgb(0xbe_be_c4);
+                self.title_focused = Rgb(0xd1_d1_d6);
+                self.selected = deep.over(self.surface, 40);
+                self.button_off = Rgb(0xa8_a8_ae);
+                self.danger = Rgb(0xc4_1e_14);
+                self.success = Rgb(0x1d_76_35);
+            }
+            Appearance::Dark => {
+                self.text = Rgb(0xff_ff_ff);
+                self.muted = Rgb(0xc7_c7_cc);
+                self.line = Rgb(0x7c_7c_82);
+                self.border = Rgb(0x8e_8e_93);
+                self.button = Rgb(0x48_48_4a);
+                self.button_hover = Rgb(0x58_58_5c);
+                self.title_focused = Rgb(0x48_48_4a);
+                self.selected = deep.over(self.surface, 150);
+                self.button_off = Rgb(0x7c_7c_82);
+            }
+        }
+    }
+
+    fn base(appearance: Appearance, accent: usize) -> Self {
         let accent = ACCENTS.get(accent).map_or(ACCENTS[0].1, |&(_, rgb)| rgb);
         let white = Rgb(0xff_ff_ff);
         match appearance {
@@ -88,11 +179,12 @@ impl Theme {
                 let blue = accent == ACCENTS[0].1;
                 Self {
                     appearance,
+                    options: Options::default(),
                     window: Rgb(0xf6_f6_f8),
                     sidebar: Rgb(0xe9_e9_ee),
                     surface,
                     text: Rgb(0x1d_1d_1f),
-                    muted: Rgb(0x6e_6e_73),
+                    muted: Rgb(0x66_66_6b),
                     accent,
                     accent_pressed: if blue {
                         Rgb(0x52_93_f8)
@@ -122,6 +214,7 @@ impl Theme {
                 let surface = Rgb(0x2c_2c_2e);
                 Self {
                     appearance,
+                    options: Options::default(),
                     window: Rgb(0x1e_1e_20),
                     sidebar: Rgb(0x26_26_29),
                     surface,
@@ -150,6 +243,7 @@ impl Theme {
 
 static APPEARANCE: AtomicU8 = AtomicU8::new(0);
 static ACCENT: AtomicU8 = AtomicU8::new(0);
+static OPTIONS: AtomicU8 = AtomicU8::new(0);
 
 /// This process's theme, from now on.
 pub fn set(appearance: Appearance, accent: u8) {
@@ -157,11 +251,18 @@ pub fn set(appearance: Appearance, accent: u8) {
     ACCENT.store(accent, Ordering::Relaxed);
 }
 
-/// The theme this process draws with: light and blue until [`set`].
+/// This process's legibility options (ADR-0155), from now on.
+pub fn set_options(options: Options) {
+    OPTIONS.store(options.byte(), Ordering::Relaxed);
+}
+
+/// The theme this process draws with: light and blue, without options,
+/// until [`set`] and [`set_options`].
 pub fn current() -> Theme {
-    Theme::new(
+    Theme::with(
         Appearance::from_byte(APPEARANCE.load(Ordering::Relaxed)),
         usize::from(ACCENT.load(Ordering::Relaxed)),
+        Options::from_byte(OPTIONS.load(Ordering::Relaxed)),
     )
 }
 
@@ -209,6 +310,129 @@ mod tests {
             (Appearance::Dark, ACCENTS[2].1)
         );
         assert_eq!(bytes(), (1, 2));
+        set_options(Options {
+            contrast: true,
+            solid: true,
+        });
+        assert_eq!(current().accent, CONTRAST_ACCENTS[2]);
+        assert!(current().options.solid);
+        set_options(Options::default());
         set(Appearance::Light, 0);
+    }
+
+    #[test]
+    fn options_round_trip_as_a_byte() {
+        for byte in 0..4 {
+            assert_eq!(Options::from_byte(byte).byte(), byte);
+        }
+        // Bits a later Oceans may add are ignored here.
+        assert_eq!(Options::from_byte(0xfc), Options::default());
+    }
+
+    #[test]
+    fn without_options_the_colours_are_unchanged() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for accent in 0..ACCENTS.len() {
+                let mut plain = Theme::with(appearance, accent, Options::default());
+                assert_eq!(plain, Theme::new(appearance, accent));
+                // Reduce transparency is the desktop's to apply; the
+                // colours stay.
+                let solid = Theme::with(
+                    appearance,
+                    accent,
+                    Options {
+                        contrast: false,
+                        solid: true,
+                    },
+                );
+                plain.options.solid = true;
+                assert_eq!(solid, plain);
+            }
+        }
+    }
+
+    extern crate std;
+
+    /// WCAG 2.x relative luminance.
+    fn luminance(c: Rgb) -> f64 {
+        let linear = |v: u32| {
+            let s = f64::from(v) / 255.0;
+            if s <= 0.039_28 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (r, g, b) = (c.0 >> 16 & 0xff, c.0 >> 8 & 0xff, c.0 & 0xff);
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
+    /// WCAG 2.x contrast ratio, 1 to 21.
+    fn ratio(a: Rgb, b: Rgb) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// ADR-0155: every pair of text and what it is drawn on, in every
+    /// appearance, accent and option, reaches WCAG AA. A value changed
+    /// below it fails here.
+    #[test]
+    fn text_is_legible_everywhere() {
+        let mut failures = std::vec::Vec::new();
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for byte in 0..4 {
+                let options = Options::from_byte(byte);
+                for accent in 0..ACCENTS.len() {
+                    let t = Theme::with(appearance, accent, options);
+                    let mut need = |what: &str, fg: Rgb, bg: Rgb, min: f64| {
+                        let got = ratio(fg, bg);
+                        if got < min {
+                            failures.push(std::format!(
+                                "{appearance:?} {options:?} accent {accent}: {what} \
+                                 {fg:?} on {bg:?} is {got:.2}, needs {min}"
+                            ));
+                        }
+                    };
+                    // Body text: 4.5:1 on everything that holds it.
+                    for (name, bg) in [
+                        ("window", t.window),
+                        ("sidebar", t.sidebar),
+                        ("surface", t.surface),
+                        ("button", t.button),
+                        ("button_hover", t.button_hover),
+                        ("selected", t.selected),
+                        ("panel", t.panel),
+                        ("dialog", t.dialog),
+                        ("title_focused", t.title_focused),
+                        ("title_idle", t.title_idle),
+                    ] {
+                        need(&std::format!("text on {name}"), t.text, bg, 4.5);
+                    }
+                    // Secondary text: 4.5:1 where it is used.
+                    for (name, bg) in [
+                        ("window", t.window),
+                        ("sidebar", t.sidebar),
+                        ("surface", t.surface),
+                        ("panel", t.panel),
+                        ("dialog", t.dialog),
+                    ] {
+                        need(&std::format!("muted on {name}"), t.muted, bg, 4.5);
+                    }
+                    // Labels on the accent are bold: 3:1 (WCAG's large
+                    // text); 4.5:1 with more contrast.
+                    let on_accent = if options.contrast { 4.5 } else { 3.0 };
+                    need("on_accent on accent", t.on_accent, t.accent, on_accent);
+                    // With more contrast, lines and borders are seen
+                    // (WCAG 1.4.11: 3:1 for parts of controls).
+                    if options.contrast {
+                        for (name, bg) in [("window", t.window), ("surface", t.surface)] {
+                            need(&std::format!("border on {name}"), t.border, bg, 3.0);
+                            need(&std::format!("line on {name}"), t.line, bg, 3.0);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

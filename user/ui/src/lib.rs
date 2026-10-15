@@ -938,12 +938,18 @@ fn run_window<S>(
                     kind::RESIZE => {
                         let _ = window.resize();
                     }
-                    // The theme (ADR-0113): the frame after this batch is
-                    // drawn in it.
-                    kind::THEME => oceans_draw::theme::set(
-                        oceans_draw::theme::Appearance::from_byte(event.key),
-                        event.button,
-                    ),
+                    // The theme (ADR-0113) and the legibility options
+                    // (ADR-0155): the frame after this batch is drawn in
+                    // them.
+                    kind::THEME => {
+                        oceans_draw::theme::set(
+                            oceans_draw::theme::Appearance::from_byte(event.key),
+                            event.button,
+                        );
+                        oceans_draw::theme::set_options(oceans_draw::theme::Options::from_byte(
+                            event.x as u8,
+                        ));
+                    }
                     kind::PASTE => {
                         input.paste =
                             oceans_display_proto::paste(windows, |text: &str| String::from(text))

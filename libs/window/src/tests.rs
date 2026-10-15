@@ -973,9 +973,10 @@ fn every_window_hears_of_the_theme() {
     let b = m.open(OTHER, "B", "", 100, 100).unwrap();
     m.take_events(APP, 100);
     m.take_events(OTHER, 100);
-    // Dark, the third accent: both windows hear of it, once.
-    m.set_theme(1, 2);
-    m.set_theme(1, 2);
+    // Dark, the third accent, more contrast: both windows hear of it,
+    // once.
+    m.set_theme(1, 2, 1);
+    m.set_theme(1, 2, 1);
     let events = m.take_events(APP, 100);
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -983,9 +984,10 @@ fn every_window_hears_of_the_theme() {
             events[0].kind,
             events[0].window,
             events[0].key,
-            events[0].button
+            events[0].button,
+            events[0].x
         ),
-        (kind::THEME, a, 1, 2)
+        (kind::THEME, a, 1, 2, 1)
     );
     assert_eq!(m.take_events(OTHER, 100)[0].window, b);
     // A window opened later starts in it.

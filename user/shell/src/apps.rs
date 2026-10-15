@@ -690,8 +690,9 @@ impl Shell {
         }
     }
 
-    /// `appearance [light | dark] [ACCENT]` (ADR-0113): the theme, kept by
-    /// Core; the desktop and every window follow.
+    /// `appearance [light | dark] [ACCENT] [contrast | plain] [solid |
+    /// clear]` (ADR-0113, ADR-0155): the theme and the legibility options,
+    /// kept by Core; the desktop and every window follow.
     pub(super) fn appearance(&self, words: &[&str]) {
         const ACCENTS: [&str; 6] = ["blue", "purple", "pink", "orange", "green", "graphite"];
         let Some(core) = self.core() else {
@@ -700,36 +701,56 @@ impl Shell {
             ));
         };
         let mut reply = [0u8; 8];
-        let (mut dark, mut accent) = match core.call(op::APPEARANCE, &[], &[], &mut reply) {
-            Ok(got) if got.len == 2 => (reply[0], reply[1]),
-            Ok(_) => return self.print(format_args!("appearance: no answer\r\n")),
-            Err((error, _)) => {
-                return self.print(format_args!("appearance: {}\r\n", error.message()));
-            }
-        };
+        let (mut dark, mut accent, mut options) =
+            match core.call(op::APPEARANCE, &[], &[], &mut reply) {
+                Ok(got) if got.len == 3 => (reply[0], reply[1], reply[2]),
+                Ok(_) => return self.print(format_args!("appearance: no answer\r\n")),
+                Err((error, _)) => {
+                    return self.print(format_args!("appearance: {}\r\n", error.message()));
+                }
+            };
         for word in words {
             match *word {
                 "light" => dark = 0,
                 "dark" => dark = 1,
+                "contrast" => options |= 1,
+                "plain" => options &= !1,
+                "solid" => options |= 2,
+                "clear" => options &= !2,
                 name => match ACCENTS.iter().position(|a| *a == name) {
                     Some(i) => accent = i as u8,
                     None => {
                         return self.print(format_args!(
-                            "usage: appearance [light | dark] [blue | purple | pink | orange | green | graphite]\r\n"
+                            "usage: appearance [light | dark] [blue | purple | pink | orange | green | graphite] [contrast | plain] [solid | clear]\r\n"
                         ));
                     }
                 },
             }
         }
         if !words.is_empty()
-            && let Err((error, _)) = core.call(op::SET_APPEARANCE, &[dark, accent], &[], &mut reply)
+            && let Err((error, _)) = core.call(
+                op::SET_APPEARANCE,
+                &[dark, accent, options],
+                &[],
+                &mut reply,
+            )
         {
             return self.print(format_args!("appearance: {}\r\n", error.message()));
         }
         self.print(format_args!(
-            "appearance: {}, {}\r\n",
+            "appearance: {}, {}{}{}\r\n",
             if dark == 1 { "dark" } else { "light" },
-            ACCENTS.get(usize::from(accent)).unwrap_or(&"?")
+            ACCENTS.get(usize::from(accent)).unwrap_or(&"?"),
+            if options & 1 != 0 {
+                ", more contrast"
+            } else {
+                ""
+            },
+            if options & 2 != 0 {
+                ", less transparency"
+            } else {
+                ""
+            },
         ));
     }
 

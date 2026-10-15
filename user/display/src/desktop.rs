@@ -110,7 +110,30 @@ pub mod colour {
             oceans_draw::theme::Appearance::Dark => Rgb(0x1e_1e_20),
         }
     }
+
+    /// How opaque a shade behind white text over the wallpaper is drawn
+    /// (ADR-0155): `alpha` as designed; twice that, at most opaque, with
+    /// more contrast; opaque with less transparency.
+    pub fn backing(alpha: u32) -> u32 {
+        let options = theme().options;
+        if options.solid {
+            255
+        } else if options.contrast {
+            (alpha * 2).min(255)
+        } else {
+            alpha
+        }
+    }
+
+    /// Less transparency (ADR-0155): the menu bar a solid band.
+    pub fn solid() -> bool {
+        theme().options.solid
+    }
 }
+
+/// The menu bar's band when transparency is reduced (ADR-0155): dark, so
+/// its white text and icons read as on the wallpaper's shade.
+const SOLID_BAR: Rgb = Rgb(0x1c_1c_1e);
 /// App icons' colours, chosen by the app's name.
 const ICON_COLOURS: [Rgb; 6] = [
     Rgb(0x2f_7c_f6),
@@ -1522,10 +1545,16 @@ impl Desktop {
     fn draw_menu_bar(&self, canvas: &mut Canvas, windows: &[WindowView<'_>]) {
         let w = canvas.width;
         let bar = menu_bar(w);
-        // The shade: darkest at the top, gone at the bar's foot.
-        for row in 0..MENU_HEIGHT {
-            let alpha = (70 * (MENU_HEIGHT - row) / MENU_HEIGHT) as u32;
-            canvas.tint(Rect::new(0, row, w, 1), 0, BLACK, alpha);
+        // The shade: darkest at the top, gone at the bar's foot; a solid
+        // band with less transparency (ADR-0155), and a deeper shade with
+        // more contrast.
+        if colour::solid() {
+            canvas.fill(Rect::new(0, 0, w, MENU_HEIGHT), SOLID_BAR);
+        } else {
+            for row in 0..MENU_HEIGHT {
+                let alpha = (70 * (MENU_HEIGHT - row) / MENU_HEIGHT) as u32;
+                canvas.tint(Rect::new(0, row, w, 1), 0, BLACK, colour::backing(alpha));
+            }
         }
         let hover = |r: Rect| r.contains(self.pointer.0, self.pointer.1);
         let lit = |canvas: &mut Canvas, r: Rect, open: bool| {
@@ -1644,7 +1673,7 @@ impl Desktop {
             }
             let lw = canvas.measure(label, Font::Body).min(tile.w - 8);
             let shade = Rect::new(tile.x + (tile.w - lw) / 2 - 6, tile.y + 60, lw + 12, 22);
-            canvas.tint(shade, 8, BLACK, 90);
+            canvas.tint(shade, 8, BLACK, colour::backing(90));
             canvas.text(shade.x + 6, shade.y + 2, label, Font::Body, WHITE, shade);
         }
     }
@@ -2301,7 +2330,7 @@ impl Desktop {
         if let Some((r, name)) = label {
             let width = canvas.measure(&name, Font::Body) + 20;
             let tip = Rect::new(r.x + (r.w - width) / 2, r.y - 34, width, 26);
-            canvas.tint(tip, 8, Rgb(0x2c_2c_2e), 230);
+            canvas.tint(tip, 8, Rgb(0x2c_2c_2e), colour::backing(230));
             canvas.text(tip.x + 10, tip.y + 5, &name, Font::Body, WHITE, tip);
         }
     }

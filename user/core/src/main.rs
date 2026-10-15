@@ -824,20 +824,29 @@ impl Core {
             .unwrap_or(0)
     }
 
-    /// The appearance and accent the user chose (ADR-0113), from
-    /// `/system/appearance`; light and the first accent until then.
-    fn appearance(&self) -> [u8; 2] {
+    /// The appearance, accent and legibility options the user chose
+    /// (ADR-0113, ADR-0155), from `/system/appearance` (`A C` before
+    /// ADR-0155, `A C O` since); light, the first accent and no options
+    /// until then.
+    fn appearance(&self) -> [u8; 3] {
         let bytes =
             read_path(&self.system_dir, &self.user_file(APPEARANCE_FILE)).unwrap_or_default();
         let text = core::str::from_utf8(&bytes).unwrap_or("");
         let mut words = text.split_whitespace().map(|w| w.parse::<u8>().ok());
-        match (words.next().flatten(), words.next().flatten()) {
+        let (appearance, accent, options) = (words.next(), words.next(), words.next());
+        match (appearance.flatten(), accent.flatten()) {
             (Some(appearance), Some(accent))
                 if appearance <= 1 && accent < oceans_core_proto::ACCENT_COUNT =>
             {
-                [appearance, accent]
+                // No options kept (an older Oceans wrote it), or damaged:
+                // none.
+                let options = options
+                    .flatten()
+                    .filter(|&o| o <= oceans_core_proto::OPTIONS_MAX)
+                    .unwrap_or(0);
+                [appearance, accent, options]
             }
-            _ => [0, 0],
+            _ => [0, 0, 0],
         }
     }
 
@@ -1773,11 +1782,19 @@ impl Core {
                         }
                         _ => Err(Status::BadRequest.into()),
                     },
-                    op::SET_APPEARANCE => match data {
-                        &[appearance, accent]
-                            if appearance <= 1 && accent < oceans_core_proto::ACCENT_COUNT =>
+                    op::SET_APPEARANCE => match *data {
+                        // Without options (Control Center, older apps):
+                        // the kept ones stay (ADR-0155).
+                        [appearance, accent] | [appearance, accent, _]
+                            if appearance <= 1
+                                && accent < oceans_core_proto::ACCENT_COUNT
+                                && data
+                                    .get(2)
+                                    .is_none_or(|&o| o <= oceans_core_proto::OPTIONS_MAX) =>
                         {
-                            let text = alloc::format!("{appearance} {accent}\n");
+                            let options =
+                                data.get(2).copied().unwrap_or_else(|| self.appearance()[2]);
+                            let text = alloc::format!("{appearance} {accent} {options}\n");
                             write_file(
                                 &self.system_dir,
                                 &self.user_file(APPEARANCE_FILE),
@@ -1787,8 +1804,18 @@ impl Core {
                             say(
                                 self.log,
                                 format_args!(
-                                    "core: appearance {}, accent {accent}",
-                                    if appearance == 1 { "dark" } else { "light" }
+                                    "core: appearance {}, accent {accent}{}{}",
+                                    if appearance == 1 { "dark" } else { "light" },
+                                    if options & 1 != 0 {
+                                        ", more contrast"
+                                    } else {
+                                        ""
+                                    },
+                                    if options & 2 != 0 {
+                                        ", less transparency"
+                                    } else {
+                                        ""
+                                    },
                                 ),
                             );
                             Ok(())

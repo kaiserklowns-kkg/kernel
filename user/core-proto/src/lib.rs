@@ -141,10 +141,15 @@ pub mod op {
     pub const LOCK_AFTER: u64 = 32;
     /// data = `[minutes u8]`, one of [`crate::LOCK_CHOICES`].
     pub const SET_LOCK_AFTER: u64 = 33;
-    /// → `[appearance u8][accent u8]` (ADR-0113): 0 light, 1 dark; the
-    /// accent's index (`oceans_draw::theme::ACCENTS`).
+    /// → `[appearance u8][accent u8][options u8]` (ADR-0113, ADR-0155): 0
+    /// light, 1 dark; the accent's index (`oceans_draw::theme::ACCENTS`);
+    /// the legibility options (`oceans_draw::theme::Options`, 1 more
+    /// contrast, 2 reduced transparency). A reader of the first two still
+    /// works.
     pub const APPEARANCE: u64 = 34;
-    /// data = `[appearance u8][accent u8]`, kept across reboots.
+    /// data = `[appearance u8][accent u8]`, keeping the options, or
+    /// `[appearance u8][accent u8][options u8]` (ADR-0155); kept across
+    /// reboots.
     pub const SET_APPEARANCE: u64 = 35;
     /// → lines `ID`, `NAME`, `FLAGS` between tabs (ADR-0115), the first first;
     /// FLAGS has `a` for the administrator, `p` with a password and `c` for
@@ -198,6 +203,9 @@ pub mod op {
 /// How many accents there are to choose from (ADR-0113;
 /// `oceans_draw::theme::ACCENTS` holds them).
 pub const ACCENT_COUNT: u8 = 6;
+
+/// The legibility options (ADR-0155) as bits: none set above this.
+pub const OPTIONS_MAX: u8 = 3;
 
 /// The scales offered, in percent (ADR-0136; `oceans_window::Scale::CHOICES`
 /// holds the same).

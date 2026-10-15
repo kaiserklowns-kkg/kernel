@@ -480,6 +480,7 @@ impl Shell {
              \x20 user list | remove LOGIN   the accounts; one goes (its files stay)\r\n\
              \x20 user add LOGIN PW NAME     another account, its Home /users/LOGIN\r\n\
              \x20 appearance [light | dark] [ACCENT]  the theme; ACCENT: blue, purple, ...\r\n\
+             \x20 appearance contrast | plain | solid | clear  legibility (ADR-0155)\r\n\
              \x20 scale [auto | PERCENT]     the interface's size: 100, 125, 150 ... 300\r\n\
              \x20 shutdown | reboot          stop the system, then switch off or restart\r\n\
              \x20 clear                      clear the screen\r\n\

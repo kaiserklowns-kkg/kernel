@@ -1322,32 +1322,50 @@ impl Service {
         changed
     }
 
-    /// The appearance and accent from Core (ADR-0113): the desktop draws in
-    /// them, and every window hears of a change. `true` if it changed.
+    /// The appearance, accent and legibility options from Core (ADR-0113,
+    /// ADR-0155): the desktop draws in them, and every window hears of a
+    /// change. `true` if it changed.
     fn refresh_appearance(&mut self) -> bool {
         let Some(core) = self.core else {
             return false;
         };
-        let mut reply = [0u8; 2];
+        let mut reply = [0u8; 3];
         let Ok(got) = core.call(op::APPEARANCE, &[], &[], &mut reply) else {
             return false;
         };
-        if got.len != 2 || oceans_draw::theme::bytes() == (reply[0], reply[1]) {
+        if got.len != 3 {
+            return false;
+        }
+        let options = oceans_draw::theme::Options::from_byte(reply[2]);
+        if oceans_draw::theme::bytes() == (reply[0], reply[1])
+            && oceans_draw::theme::current().options == options
+        {
             return false;
         }
         let appearance = oceans_draw::theme::Appearance::from_byte(reply[0]);
         oceans_draw::theme::set(appearance, reply[1]);
-        self.windows.set_theme(reply[0], reply[1]);
+        oceans_draw::theme::set_options(options);
+        self.windows.set_theme(reply[0], reply[1], options.byte());
         say(
             self.log,
             format_args!(
-                "desktop: appearance {}, accent {}",
+                "desktop: appearance {}, accent {}{}{}",
                 if appearance == oceans_draw::theme::Appearance::Dark {
                     "dark"
                 } else {
                     "light"
                 },
-                reply[1]
+                reply[1],
+                if options.contrast {
+                    ", more contrast"
+                } else {
+                    ""
+                },
+                if options.solid {
+                    ", less transparency"
+                } else {
+                    ""
+                },
             ),
         );
         true

@@ -235,7 +235,8 @@ pub mod kind {
     /// width and height; `RESIZE` takes pixels of that size.
     pub const RESIZE: u8 = 7;
     /// The theme to draw with (ADR-0113): `key` the appearance (0 light,
-    /// 1 dark), `button` the accent (`oceans_draw::theme::ACCENTS`). Sent
+    /// 1 dark), `button` the accent (`oceans_draw::theme::ACCENTS`), `x` the
+    /// legibility options (ADR-0155, `oceans_draw::theme::Options`). Sent
     /// when the window opens and whenever the user changes it.
     pub const THEME: u8 = 8;
     /// A character typed in a layout other than English (ADR-0114): `x`

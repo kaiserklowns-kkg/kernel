@@ -694,7 +694,7 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor mouse_move -213 0",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
-    b"@screen 1000 288 6e6e73 Control Center's slider, muted",
+    b"@screen 1000 288 66666b Control Center's slider, muted",
     b"@monitor mouse_move 157 -274",
     b"@monitor mouse_button 1",
     b"@monitor mouse_button 0",
@@ -829,6 +829,14 @@ const SHELL_SCRIPT: &[&[u8]] = &[
     b"@monitor sendkey meta_l",
     b"@screen 1200 400 262629 Launchpad, dark",
     b"@monitor sendkey esc",
+    // Legibility (ADR-0155): more contrast and less transparency, the menu
+    // bar a solid band (its top row, clear of text); then both off again,
+    // so the next boot starts dark and plain.
+    b"appearance contrast solid\r\n",
+    b"@wait desktop: appearance dark, accent 0, more contrast, less transparency",
+    b"@screen 640 2 1c1c1e the solid menu bar",
+    b"appearance plain clear\r\n",
+    b"@wait desktop: appearance dark, accent 0",
     // The scale (ADR-0136): QEMU's 1280 × 800 screen at 100 dpi is 100 %,
     // automatic. 150 % is kept by Core but does not fit it, so the desktop
     // stays at 100 % (every pixel probed here is where it was); then back
@@ -1469,6 +1477,10 @@ const SHELL_EXPECT: &[Expect] = &[
     // Dark (ADR-0113): kept by Core, followed by the desktop.
     Expect::Line("appearance: dark, blue"),
     Expect::Contains("core: appearance dark, accent 0"),
+    // Legibility (ADR-0155): kept by Core, said by the shell.
+    Expect::Line("appearance: dark, blue, more contrast, less transparency"),
+    Expect::Contains("core: appearance dark, accent 0, more contrast, less transparency"),
+    Expect::Line("appearance: dark, blue"),
     // The scale (ADR-0136): kept by Core, and back to automatic.
     Expect::Line("scale: 150%"),
     Expect::Contains("core: scale 150%"),

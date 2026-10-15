@@ -155,5 +155,6 @@ Statuses: **Proposed** → **Accepted** → (**Superseded by ADR-NNNN**).
 | [0146](0146-promises-to-the-user.md) | Oceans' promises to the user (no telemetry, no ads, no forced account or restart, AI never watches, permissions visible, failures undone, nothing moves without a reason, a support window, checkable releases, legibility), and a network that says where it went (ABI 25: `DEBUG_WRITE`'s level, lines never kept; `net: first contact`; a new computer's boot may reach only its time servers) | Accepted |
 | [0147](0147-screen-brightness.md) | The screen's brightness (the `backlight` service: Intel's PCH PWM, Haswell to Kaby Lake, never below 5 %; Control Center's slider; a display controller keeps memory decoding when closed) | Accepted |
 | [0149](0149-desktop-at-first-sight.md) | The desktop at first sight: the Terminal put away at start (Wave, Launchpad or Ctrl+Tab bring it), Control Center's network button named and drawn for Wi-Fi or Ethernet as the top bar shows it | Accepted |
+| [0155](0155-legibility.md) | Legibility: Increase contrast and Reduce transparency in Settings → Appearance (`theme::Options`; `APPEARANCE` answers 3 bytes, `kind::THEME`'s `x`), the top bar solid; a WCAG test over every design value | Accepted |
 
 New ADRs copy [template.md](template.md) and take the next number.

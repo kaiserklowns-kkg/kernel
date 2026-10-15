@@ -392,9 +392,10 @@ pub struct Manager {
     /// The windows that asked for the media keys (ADR-0102), the one
     /// that gets them last.
     media: Vec<Player>,
-    /// The theme (ADR-0113): appearance and accent, as `kind::THEME`
+    /// The theme (ADR-0113, ADR-0155): appearance, accent and options, as
+    /// `kind::THEME`
     /// carries them.
-    theme: (u8, u8),
+    theme: (u8, u8, u8),
 }
 
 impl Manager {
@@ -417,7 +418,7 @@ impl Manager {
             may_open: None,
             paste: None,
             media: Vec::new(),
-            theme: (0, 0),
+            theme: (0, 0, 0),
         }
     }
 
@@ -427,12 +428,14 @@ impl Manager {
     }
 
     /// The theme the user chose (ADR-0113): every window hears of a change
-    /// (`kind::THEME`), and new ones of it when they open.
-    pub fn set_theme(&mut self, appearance: u8, accent: u8) {
-        if self.theme == (appearance, accent) {
+    /// (`kind::THEME`), and new ones of it when they open. `options` are
+    /// the legibility options (ADR-0155), carried in the event's `x`, which
+    /// an app built before them does not read.
+    pub fn set_theme(&mut self, appearance: u8, accent: u8, options: u8) {
+        if self.theme == (appearance, accent, options) {
             return;
         }
-        self.theme = (appearance, accent);
+        self.theme = (appearance, accent, options);
         let windows: Vec<(u64, u32)> = self.frames.iter().map(|f| (f.owner, f.id)).collect();
         for (owner, id) in windows {
             self.tell_theme(owner, id);
@@ -440,7 +443,7 @@ impl Manager {
     }
 
     fn tell_theme(&mut self, owner: u64, id: u32) {
-        let (appearance, accent) = self.theme;
+        let (appearance, accent, options) = self.theme;
         self.queue(
             owner,
             Event {
@@ -448,6 +451,7 @@ impl Manager {
                 kind: kind::THEME,
                 key: appearance,
                 button: accent,
+                x: i16::from(options),
                 ..Event::default()
             },
         );
