@@ -548,7 +548,9 @@ pub fn smoke_secure_boot(profile: Profile) -> Result {
             ),
             (&apply, "installed in slot B"),
         ],
-        Duration::from_secs(300),
+        // Boot, then a refused and an installed update of ~44 MB onto the
+        // stick: 600 s, as other smoke tests may share the CPUs (ADR-0148).
+        Duration::from_secs(600),
     )?;
     if !updated {
         return Err("the signed image did not boot and install the signed update".into());
